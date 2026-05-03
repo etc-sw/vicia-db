@@ -442,7 +442,7 @@ pub(crate) fn filter_facts_as_of(facts: Vec<Fact>, as_of: &AsOf) -> Vec<Fact> {
             AsOf::Counter(n) => f.tx_count <= *n,
             AsOf::Timestamp(t) => f.tx_id <= *t as u64,
             AsOf::Slot(_) => {
-                panic!("internal: unsubstituted :as-of bind slot reached get_facts_as_of");
+                unreachable!("internal: unsubstituted :as-of bind slot reached filter_facts_as_of")
             }
         })
         .collect()
