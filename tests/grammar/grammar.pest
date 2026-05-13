@@ -1,0 +1,169 @@
+// ── WHITESPACE (auto-skipped between every token) ─────────────────────────
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" | "," }
+
+// ── WORD-BOUNDARY HELPER ──────────────────────────────────────────────────
+// Used in negative lookaheads to enforce keyword boundaries.
+word_cont = _{ ASCII_ALPHANUMERIC | "?" | "_" | "-" | "/" }
+
+// ── EDN PRIMITIVES ────────────────────────────────────────────────────────
+
+// boolean: "true" or "false" — only when NOT followed by a word character
+// (so "trueish" is NOT a boolean, it's a plain symbol)
+boolean_lit = @{ ("true" | "false") ~ !word_cont }
+
+// nil literal
+nil_lit = @{ "nil" ~ !word_cont }
+
+// integer: optional minus, one or more digits, NOT followed by "." + digit
+// (the negative lookahead prevents consuming "-3" as the start of "-3.14")
+integer_lit = @{ "-"? ~ ASCII_DIGIT+ ~ !("." ~ ASCII_DIGIT) }
+
+// float: optional minus, digits, dot, optional more digits
+float_lit = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* }
+
+// string with escape sequences: \n \t \r \" \\, or any other char after \
+str_char  = _{ "\\" ~ ("n" | "t" | "r" | "\"" | "\\" | ANY) | !("\"" | "\\") ~ ANY }
+string_lit = @{ "\"" ~ str_char* ~ "\"" }
+
+// UUID tagged literal: #uuid "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+// Content validation (RFC 4122 format) is a semantic check — pest accepts any string.
+uuid_lit = { "#uuid" ~ string_lit }
+
+// Prepared-query bind slot: $name
+bind_slot = @{ "$" ~ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+
+// Keyword: starts with ":", followed by alphanumeric, "/", "-", "_"
+keyword = @{ ":" ~ (ASCII_ALPHANUMERIC | "/" | "-" | "_")+ }
+
+// Logic variable: starts with "?"
+variable = @{ "?" ~ word_cont* }
+
+// Operator symbols used in expressions
+op_sym = @{ "<=" | ">=" | "!=" | "<" | ">" | "=" | "+" | "*" | "/" }
+
+// Plain symbol: letter or underscore start; or "-" followed by at least one word char.
+// Negative lookaheads prevent "true", "false", "nil" from matching as plain symbols.
+plain_sym = @{
+    !boolean_lit ~ !nil_lit ~ (ASCII_ALPHA | "_") ~ word_cont*
+    | "-" ~ word_cont+
+}
+
+// ── EDN VALUE (any EDN atom or container) ─────────────────────────────────
+// Order matters: more specific alternatives first to avoid ambiguity.
+edn_value = {
+    uuid_lit | boolean_lit | nil_lit | float_lit | integer_lit | string_lit |
+    bind_slot | keyword | op_sym | variable | plain_sym |
+    edn_list | edn_vector | edn_map
+}
+edn_list   = { "(" ~ edn_value* ~ ")" }
+edn_vector = { "[" ~ edn_value* ~ "]" }
+edn_map    = { "{" ~ (edn_value ~ edn_value)* ~ "}" }
+
+// ── TOP-LEVEL COMMAND ─────────────────────────────────────────────────────
+command = { SOI ~ (transact_cmd | retract_cmd | query_cmd | rule_cmd) ~ EOI }
+
+// ── TRANSACT ──────────────────────────────────────────────────────────────
+// (transact [facts...]) or (transact {:valid-from "ts"} [facts...])
+transact_cmd = {
+    "(" ~ "transact" ~ (valid_time_map ~ fact_vector | fact_vector) ~ ")"
+}
+
+// ── RETRACT ───────────────────────────────────────────────────────────────
+retract_cmd = { "(" ~ "retract" ~ fact_vector ~ ")" }
+
+// Fact vector: a vector of individual fact vectors
+fact_vector = { "[" ~ fact* ~ "]" }
+
+// A single fact: permissive (edn_value+) so arity violations are semantic, not syntax.
+// The real parser enforces [E A V] or [E A V {map}]; pest only requires ≥1 element.
+fact = { "[" ~ edn_value+ ~ "]" }
+
+// Transaction-level valid-time options map
+valid_time_map  = { "{" ~ valid_time_pair* ~ "}" }
+valid_time_pair = { (":valid-from" | ":valid-to") ~ string_lit }
+
+// ── QUERY ─────────────────────────────────────────────────────────────────
+query_cmd    = { "(" ~ "query" ~ query_vector ~ ")" }
+query_vector = { "[" ~ query_section+ ~ "]" }
+
+// A query vector is a sequence of keyed sections in any order.
+query_section = {
+    find_section | where_section | as_of_section |
+    valid_at_section | any_valid_time_section | with_section
+}
+
+// ── FIND SECTION ──────────────────────────────────────────────────────────
+// :find accepts variables, aggregates, and window functions
+find_section = { ":find" ~ find_spec+ }
+find_spec    = { window_expr | aggregate_expr | variable }
+
+// Aggregate: (func-name ?var) — e.g. (count ?e), (sum ?salary)
+aggregate_expr = { "(" ~ (op_sym | plain_sym) ~ variable ~ ")" }
+
+// Window function: (func ?var :over (...)) or (func :over (...)) for rank/row-number
+window_expr = {
+    "(" ~ (op_sym | plain_sym) ~ (variable ~ ":over" | ":over") ~ over_clause ~ ")"
+}
+over_clause = { "(" ~ over_option* ~ ")" }
+over_option = {
+    ":partition-by" ~ variable |
+    ":order-by" ~ variable |
+    ":desc" | ":asc"
+}
+
+// ── WHERE SECTION ─────────────────────────────────────────────────────────
+where_section = { ":where" ~ where_clause+ }
+
+// where_clause covers all clause forms
+where_clause = {
+    expr_clause | not_clause | not_join_clause |
+    or_clause | or_join_clause |
+    pattern_clause | rule_invocation
+}
+
+// Pattern: exactly [E A V] — three EDN values
+pattern_clause = { "[" ~ edn_value ~ edn_value ~ edn_value ~ "]" }
+
+// Expression clause: [(expr) ?out?] — first element is a list (the expression)
+expr_clause = { "[" ~ expr ~ variable? ~ "]" }
+
+// NOT / NOT-JOIN
+not_clause      = { "(" ~ "not" ~ where_clause+ ~ ")" }
+not_join_clause = { "(" ~ "not-join" ~ join_vars ~ where_clause+ ~ ")" }
+
+// OR / OR-JOIN
+or_clause      = { "(" ~ "or" ~ or_branch+ ~ ")" }
+or_join_clause = { "(" ~ "or-join" ~ join_vars ~ or_branch+ ~ ")" }
+join_vars      = { "[" ~ variable* ~ "]" }
+or_branch      = { and_branch | where_clause }
+and_branch     = { "(" ~ "and" ~ where_clause+ ~ ")" }
+
+// Rule invocation: (predicate-name args...)
+rule_invocation = { "(" ~ plain_sym ~ edn_value* ~ ")" }
+
+// ── EXPRESSIONS ───────────────────────────────────────────────────────────
+expr        = { "(" ~ expr_body ~ ")" }
+expr_body   = { binary_form | unary_form }
+unary_form  = { (unary_op | op_sym | plain_sym) ~ expr_arg }
+binary_form = { binary_op ~ expr_arg ~ expr_arg }
+unary_op    = @{ "string?" | "integer?" | "float?" | "boolean?" | "nil?" }
+binary_op   = @{
+    "<=" | ">=" | "!=" | "starts-with?" | "ends-with?" | "contains?" | "matches?" |
+    "<" | ">" | "=" | "+" | "-" | "*" | "/"
+}
+expr_arg = {
+    expr | boolean_lit | nil_lit | float_lit | integer_lit |
+    string_lit | bind_slot | keyword | variable
+}
+
+// ── TEMPORAL / WITH SECTIONS ───────────────────────────────────────────────
+as_of_section          = { ":as-of" ~ (integer_lit | string_lit | bind_slot) }
+valid_at_section       = { ":valid-at" ~ (string_lit | ":any-valid-time" | bind_slot) }
+any_valid_time_section = { ":any-valid-time" }
+with_section           = { ":with" ~ variable+ }
+
+// ── RULE ──────────────────────────────────────────────────────────────────
+// (rule [(head ?args) body-clause ...])
+rule_cmd    = { "(" ~ "rule" ~ rule_vector ~ ")" }
+rule_vector = { "[" ~ rule_head ~ where_clause* ~ "]" }
+rule_head   = { "(" ~ plain_sym ~ variable* ~ ")" }
