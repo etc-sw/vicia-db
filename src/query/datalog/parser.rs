@@ -232,6 +232,16 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     return Err("Unexpected character: !".to_string());
                 }
             }
+            // EDN line comment: skip from ';' to the next newline (or end of input)
+            ';' => {
+                chars.next(); // consume ';'
+                while let Some(&c) = chars.peek() {
+                    if c == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
             '$' => {
                 chars.next(); // consume '$'
                 let mut name = String::new();
