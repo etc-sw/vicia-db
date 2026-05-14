@@ -1839,7 +1839,11 @@ mod tests {
         ];
 
         let result = net_asserted_facts(facts);
-        assert_eq!(result.len(), 1, "only the post-retraction assertion should survive");
+        assert_eq!(
+            result.len(),
+            1,
+            "only the post-retraction assertion should survive"
+        );
         assert_eq!(result[0].tx_count, 6);
     }
 
@@ -1857,12 +1861,30 @@ mod tests {
         let value = Value::Integer(100_000);
 
         let facts = vec![
-            make_assert(entity, attr, value.clone(), 1, 1_577_836_800_000, 1_640_995_200_000),
-            make_assert(entity, attr, value.clone(), 2, 1_704_067_200_000, VALID_TIME_FOREVER),
+            make_assert(
+                entity,
+                attr,
+                value.clone(),
+                1,
+                1_577_836_800_000,
+                1_640_995_200_000,
+            ),
+            make_assert(
+                entity,
+                attr,
+                value.clone(),
+                2,
+                1_704_067_200_000,
+                VALID_TIME_FOREVER,
+            ),
             make_retract(entity, attr, value.clone(), 3),
         ];
 
         let result = net_asserted_facts(facts);
-        assert_eq!(result.len(), 0, "retraction should wipe all windows for the EAV triple");
+        assert_eq!(
+            result.len(),
+            0,
+            "retraction should wipe all windows for the EAV triple"
+        );
     }
 }
