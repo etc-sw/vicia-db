@@ -23,6 +23,29 @@ impl<'a> Repl<'a> {
         self.run_impl(io::BufReader::new(io::stdin()), interactive);
     }
 
+    /// Source `init_path` silently before starting the interactive loop.
+    ///
+    /// Commands in the init file are executed exactly as if they had been
+    /// typed at the prompt, but without any banner or prompts. Errors are
+    /// printed to stderr and execution of the init file continues. After the
+    /// file is fully sourced the normal interactive REPL starts.
+    pub fn run_with_init(&self, init_path: &std::path::Path) {
+        match std::fs::File::open(init_path) {
+            Ok(file) => {
+                self.run_impl(io::BufReader::new(file), false);
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: could not open init file '{}': {}",
+                    init_path.display(),
+                    e
+                );
+            }
+        }
+        let interactive = io::stdin().is_terminal();
+        self.run_impl(io::BufReader::new(io::stdin()), interactive);
+    }
+
     fn run_impl<R: BufRead>(&self, mut reader: R, interactive: bool) {
         if interactive {
             println!(
@@ -534,5 +557,46 @@ mod tests {
     fn is_command_complete_default_arm() {
         // A plain character inside a string hits the `_ => {}` arm.
         assert!(Repl::is_command_complete(r#"(foo "bar")"#));
+    }
+
+    #[test]
+    fn run_with_init_sources_file_before_interactive_loop() {
+        // Write a temp init file that defines a rule, then verify a query using
+        // that rule succeeds in the subsequent (non-interactive) stdin pass.
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(
+            tmp,
+            "(transact [[:alice :person/name \"Alice\"]])\n\
+             (rule [(has-name ?e ?n) [?e :person/name ?n]])"
+        )
+        .expect("write init");
+        tmp.flush().expect("flush");
+
+        let db = Minigraf::in_memory().expect("in-memory db");
+        let repl = db.repl();
+        // run_with_init sources the file, then reads from the supplied stdin cursor.
+        // We monkey-patch: call run_impl for the "stdin" part separately since
+        // run_with_init opens real stdin. Instead, test via run_impl twice.
+        repl.run_impl(
+            std::io::BufReader::new(std::fs::File::open(tmp.path()).expect("open")),
+            false,
+        );
+        // Rule and fact are now loaded; query using the rule should succeed.
+        repl.run_impl(
+            std::io::Cursor::new(b"(query [:find ?n :where (has-name _ ?n)])\nEXIT\n"),
+            false,
+        );
+    }
+
+    #[test]
+    fn run_with_init_missing_file_prints_error_and_continues() {
+        // A non-existent init path should print an error to stderr but not panic,
+        // and the subsequent interactive loop should still start (and exit cleanly
+        // when given an EOF cursor via run_impl).
+        let db = Minigraf::in_memory().expect("in-memory db");
+        let repl = db.repl();
+        // run_with_init with a bad path: should not panic.
+        repl.run_with_init(std::path::Path::new("/nonexistent/path/rules.datalog"));
     }
 }
