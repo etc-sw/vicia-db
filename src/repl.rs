@@ -93,7 +93,7 @@ impl<'a> Repl<'a> {
                     }
 
                     if !command_buffer.is_empty() {
-                        command_buffer.push(' ');
+                        command_buffer.push('\n');
                     }
                     command_buffer.push_str(line);
 
@@ -101,6 +101,7 @@ impl<'a> Repl<'a> {
                         match self.db.execute(&command_buffer) {
                             Ok(result) => {
                                 Self::print_result(result);
+                                io::stdout().flush().ok();
                             }
                             Err(e) => {
                                 eprintln!("Error: {}", e);
