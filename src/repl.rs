@@ -562,8 +562,15 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn run_with_init_sources_file_before_interactive_loop() {
-        // Write a temp init file that defines a rule, then verify a query using
-        // that rule succeeds in the subsequent (non-interactive) stdin pass.
+        // Exercises run_with_init directly: write a temp init file containing a
+        // transact + rule definition, call run_with_init (which opens the file and
+        // runs it through run_impl), then verify the fact and rule are available.
+        // The subsequent stdin read inside run_with_init exits immediately because
+        // stdin is non-TTY in CI (EOF) and the test runner closes it.
+        // To avoid blocking in interactive (TTY) environments we skip the test.
+        if io::stdin().is_terminal() {
+            return;
+        }
         use std::io::Write;
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(
@@ -576,18 +583,19 @@ mod tests {
 
         let db = Minigraf::in_memory().expect("in-memory db");
         let repl = db.repl();
-        // run_with_init sources the file, then reads from the supplied stdin cursor.
-        // We monkey-patch: call run_impl for the "stdin" part separately since
-        // run_with_init opens real stdin. Instead, test via run_impl twice.
-        repl.run_impl(
-            std::io::BufReader::new(std::fs::File::open(tmp.path()).expect("open")),
-            false,
-        );
-        // Rule and fact are now loaded; query using the rule should succeed.
-        repl.run_impl(
-            std::io::Cursor::new(b"(query [:find ?n :where (has-name _ ?n)])\nEXIT\n"),
-            false,
-        );
+        // run_with_init opens the file, sources it, then drops into the interactive
+        // loop (which exits immediately on EOF stdin in CI).
+        repl.run_with_init(tmp.path());
+        // Verify the rule and fact loaded by the init file are still active.
+        let result = db
+            .execute("(query [:find ?n :where (has-name _ ?n)])")
+            .expect("query");
+        match result {
+            crate::query::datalog::QueryResult::QueryResults { results, .. } => {
+                assert_eq!(results.len(), 1);
+            }
+            _ => panic!("expected query results"),
+        }
     }
 
     #[test]
