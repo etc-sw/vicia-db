@@ -42,8 +42,7 @@ impl<'a> Repl<'a> {
                 );
             }
         }
-        let interactive = io::stdin().is_terminal();
-        self.run_impl(io::BufReader::new(io::stdin()), interactive);
+        self.run();
     }
 
     fn run_impl<R: BufRead>(&self, mut reader: R, interactive: bool) {
