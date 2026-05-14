@@ -60,11 +60,14 @@ impl<'a> Repl<'a> {
 
         let mut command_buffer = String::new();
         let mut is_multiline = false;
+        // Only print the prompt once per command, not once per blank/comment line.
+        let mut prompt_needed = true;
 
         loop {
-            if interactive && !is_multiline {
+            if interactive && !is_multiline && prompt_needed {
                 print!("minigraf> ");
                 io::stdout().flush().ok();
+                prompt_needed = false;
             }
 
             let mut input = String::new();
@@ -106,8 +109,10 @@ impl<'a> Repl<'a> {
 
                         command_buffer.clear();
                         is_multiline = false;
+                        prompt_needed = true;
                         if interactive {
                             println!();
+                            io::stdout().flush().ok();
                         }
                     } else {
                         is_multiline = true;
