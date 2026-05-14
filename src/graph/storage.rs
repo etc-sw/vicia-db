@@ -503,54 +503,74 @@ pub(crate) fn filter_facts_as_of(facts: Vec<Fact>, as_of: &AsOf) -> Vec<Fact> {
 ///
 /// This is the single source of truth for retraction semantics, shared by
 /// `get_current_value` and `filter_facts_for_query`.
+///
+/// # Implementation note
+///
+/// This function uses two flat `HashMap`s in a single pass over the input:
+///
+/// - `max_retract_tx`: EAV → highest retraction `tx_count` seen so far.
+/// - `by_window`: (EAV + valid_from + valid_to) → highest-`tx_count` assertion
+///   for that time window.
+///
+/// The retraction filter (`fact.tx_count > max_retract_tx`) is applied in the
+/// final `filter_map` rather than eagerly.  This means `by_window` temporarily
+/// holds assertions that will be filtered out, so on workloads where most
+/// EAV triples are immediately retracted it uses more peak memory than the
+/// previous per-group approach.  The trade-off is intentional: eliminating the
+/// per-group `Vec<Fact>` allocation yields a measurable throughput gain on large
+/// mostly-unique fact sets (see issue #227).
 pub(crate) fn net_asserted_facts(facts: Vec<Fact>) -> Vec<Fact> {
     use std::collections::HashMap;
 
-    // Group all facts by (entity, attribute, canonical value bytes).
-    let mut groups: HashMap<(EntityId, Attribute, Vec<u8>), Vec<Fact>> = HashMap::new();
+    type EavKey = (EntityId, Attribute, Vec<u8>);
+    type WindowKey = (EntityId, Attribute, Vec<u8>, i64, i64);
+
+    let mut max_retract_tx: HashMap<EavKey, u64> = HashMap::new();
+    let mut by_window: HashMap<WindowKey, Fact> = HashMap::new();
+
     for fact in facts {
-        let key = (
+        let eav_key = (
             fact.entity,
             fact.attribute.clone(),
             encode_value(&fact.value),
         );
-        groups.entry(key).or_default().push(fact);
-    }
 
-    let mut result = Vec::new();
-    for (_key, group) in groups {
-        // Find the highest tx_count among retractions in this group.
-        let max_retract_tx = group
-            .iter()
-            .filter(|f| !f.asserted)
-            .map(|f| f.tx_count)
-            .max()
-            .unwrap_or(0);
-
-        // Keep assertions whose tx_count > max_retract_tx.
-        // (If no retraction exists, max_retract_tx is 0 and all assertions pass.)
-        // Deduplicate by (valid_from, valid_to): keep the highest-tx_count assertion
-        // for each validity window so that re-asserting the same EAV at the same
-        // window acts as an update rather than a duplicate.
-        let mut by_window: HashMap<(i64, i64), Fact> = HashMap::new();
-        for fact in group {
-            if !fact.asserted || fact.tx_count <= max_retract_tx {
-                continue;
-            }
-            let window = (fact.valid_from, fact.valid_to);
-            match by_window.get(&window) {
+        if fact.asserted {
+            let window_key = (
+                eav_key.0,
+                eav_key.1,
+                eav_key.2,
+                fact.valid_from,
+                fact.valid_to,
+            );
+            match by_window.get(&window_key) {
                 None => {
-                    by_window.insert(window, fact);
+                    by_window.insert(window_key, fact);
                 }
                 Some(existing) if fact.tx_count > existing.tx_count => {
-                    by_window.insert(window, fact);
+                    by_window.insert(window_key, fact);
                 }
                 _ => {}
             }
+        } else {
+            let tx_count = fact.tx_count;
+            max_retract_tx
+                .entry(eav_key)
+                .and_modify(|max_tx| *max_tx = (*max_tx).max(tx_count))
+                .or_insert(tx_count);
         }
-        result.extend(by_window.into_values());
     }
-    result
+
+    by_window
+        .into_iter()
+        .filter_map(|((entity, attribute, value, _, _), fact)| {
+            let retract_tx = max_retract_tx
+                .get(&(entity, attribute, value))
+                .copied()
+                .unwrap_or(0);
+            (fact.tx_count > retract_tx).then_some(fact)
+        })
+        .collect()
 }
 
 /// Resolve a FactRef to a Fact using the committed reader (for on-disk facts)
@@ -1753,5 +1773,118 @@ mod tests {
 
         // Both facts should be present
         assert_eq!(storage.fact_count(), 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Unit tests for net_asserted_facts directly
+    // -------------------------------------------------------------------------
+
+    /// Helper: build an asserted fact with explicit tx_count and valid window.
+    fn make_assert(
+        entity: uuid::Uuid,
+        attr: &str,
+        value: Value,
+        tx_count: u64,
+        valid_from: i64,
+        valid_to: i64,
+    ) -> Fact {
+        Fact {
+            entity,
+            attribute: attr.to_string(),
+            value,
+            tx_id: tx_count as u64,
+            tx_count,
+            valid_from,
+            valid_to,
+            asserted: true,
+        }
+    }
+
+    /// Helper: build a retraction with explicit tx_count and default valid window.
+    fn make_retract(entity: uuid::Uuid, attr: &str, value: Value, tx_count: u64) -> Fact {
+        Fact {
+            entity,
+            attribute: attr.to_string(),
+            value,
+            tx_id: tx_count as u64,
+            tx_count,
+            valid_from: 0,
+            valid_to: VALID_TIME_FOREVER,
+            asserted: false,
+        }
+    }
+
+    /// Multiple retractions of the same EAV: `max_retract_tx` must be the
+    /// global maximum, not just the first retraction seen.
+    ///
+    /// Timeline:
+    ///   tx=1  assert W1        (should be wiped by retraction at tx=5)
+    ///   tx=3  retract          (max_retract so far = 3)
+    ///   tx=4  assert W1        (should survive — tx 4 > 3, BUT a later retraction at tx=5 wipes it)
+    ///   tx=5  retract          (max_retract = 5, wipes tx=4 assertion)
+    ///   tx=6  assert W1        (should survive — tx 6 > 5)
+    #[test]
+    fn test_net_asserted_multiple_retractions_max_wins() {
+        let entity = uuid::Uuid::new_v4();
+        let attr = ":salary";
+        let value = Value::Integer(100_000);
+        let w = (1_000_i64, VALID_TIME_FOREVER);
+
+        let facts = vec![
+            make_assert(entity, attr, value.clone(), 1, w.0, w.1),
+            make_retract(entity, attr, value.clone(), 3),
+            make_assert(entity, attr, value.clone(), 4, w.0, w.1),
+            make_retract(entity, attr, value.clone(), 5),
+            make_assert(entity, attr, value.clone(), 6, w.0, w.1),
+        ];
+
+        let result = net_asserted_facts(facts);
+        assert_eq!(
+            result.len(),
+            1,
+            "only the post-retraction assertion should survive"
+        );
+        assert_eq!(result[0].tx_count, 6);
+    }
+
+    /// A single retraction wipes all valid-time windows of the same EAV triple,
+    /// not just the window that was explicitly retracted.
+    ///
+    /// Timeline:
+    ///   tx=1  assert W1 (2020–2022)
+    ///   tx=2  assert W2 (2024–2026)
+    ///   tx=3  retract          → both windows must disappear
+    #[test]
+    fn test_net_asserted_retraction_wipes_all_windows() {
+        let entity = uuid::Uuid::new_v4();
+        let attr = ":salary";
+        let value = Value::Integer(100_000);
+
+        let facts = vec![
+            make_assert(
+                entity,
+                attr,
+                value.clone(),
+                1,
+                1_577_836_800_000,
+                1_640_995_200_000,
+            ),
+            make_assert(
+                entity,
+                attr,
+                value.clone(),
+                2,
+                1_704_067_200_000,
+                VALID_TIME_FOREVER,
+            ),
+            make_retract(entity, attr, value.clone(), 3),
+        ];
+
+        let result = net_asserted_facts(facts);
+        assert_eq!(
+            result.len(),
+            0,
+            "retraction should wipe all windows for the EAV triple"
+        );
     }
 }
