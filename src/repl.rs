@@ -23,12 +23,12 @@ impl<'a> Repl<'a> {
         self.run_impl(io::BufReader::new(io::stdin()), interactive);
     }
 
-    /// Source `init_path` silently before starting the interactive loop.
+    /// Source `init_path` silently, without starting the interactive loop.
     ///
     /// Commands in the init file are executed exactly as if they had been
     /// typed at the prompt, but without any banner or prompts. Errors are
-    /// printed to stderr and execution of the init file continues. After the
-    /// file is fully sourced the normal interactive REPL starts.
+    /// printed to stderr and execution of the init file continues. Call
+    /// [`Repl::run`] afterwards to start the interactive REPL.
     pub fn run_with_init(&self, init_path: &std::path::Path) {
         match std::fs::File::open(init_path) {
             Ok(file) => {
@@ -42,7 +42,6 @@ impl<'a> Repl<'a> {
                 );
             }
         }
-        self.run();
     }
 
     fn run_impl<R: BufRead>(&self, mut reader: R, interactive: bool) {
@@ -560,16 +559,9 @@ mod tests {
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn run_with_init_sources_file_before_interactive_loop() {
-        // Exercises run_with_init directly: write a temp init file containing a
-        // transact + rule definition, call run_with_init (which opens the file and
-        // runs it through run_impl), then verify the fact and rule are available.
-        // The subsequent stdin read inside run_with_init exits immediately because
-        // stdin is non-TTY in CI (EOF) and the test runner closes it.
-        // To avoid blocking in interactive (TTY) environments we skip the test.
-        if io::stdin().is_terminal() {
-            return;
-        }
+    fn run_with_init_sources_file() {
+        // run_with_init only processes the init file (no interactive loop), so
+        // this test is safe to run in any environment without blocking on stdin.
         use std::io::Write;
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(
@@ -582,10 +574,7 @@ mod tests {
 
         let db = Minigraf::in_memory().expect("in-memory db");
         let repl = db.repl();
-        // run_with_init opens the file, sources it, then drops into the interactive
-        // loop (which exits immediately on EOF stdin in CI).
         repl.run_with_init(tmp.path());
-        // Verify the rule and fact loaded by the init file are still active.
         let result = db
             .execute("(query [:find ?n :where (has-name _ ?n)])")
             .expect("query");
@@ -599,13 +588,11 @@ mod tests {
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn run_with_init_missing_file_prints_error_and_continues() {
-        // A non-existent init path should print an error to stderr but not panic,
-        // and the subsequent interactive loop should still start (and exit cleanly
-        // when given an EOF cursor via run_impl).
+    fn run_with_init_missing_file_prints_error() {
+        // A non-existent init path should print an error to stderr but not panic.
+        // run_with_init no longer starts the interactive loop, so no stdin blocking.
         let db = Minigraf::in_memory().expect("in-memory db");
         let repl = db.repl();
-        // run_with_init with a bad path: should not panic.
         repl.run_with_init(std::path::Path::new("/nonexistent/path/rules.datalog"));
     }
 }

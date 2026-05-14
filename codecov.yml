@@ -1,9 +1,6 @@
 codecov:
   require_ci_to_pass: false
 
-ignore:
-  - "src/main.rs"
-
 coverage:
   status:
     patch:

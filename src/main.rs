@@ -43,9 +43,8 @@ fn main() -> anyhow::Result<()> {
         let repl = db.repl();
         if let Some(path) = init_path {
             repl.run_with_init(std::path::Path::new(&path));
-        } else {
-            repl.run();
         }
+        repl.run();
         Ok(())
     }
 }
