@@ -503,6 +503,22 @@ pub(crate) fn filter_facts_as_of(facts: Vec<Fact>, as_of: &AsOf) -> Vec<Fact> {
 ///
 /// This is the single source of truth for retraction semantics, shared by
 /// `get_current_value` and `filter_facts_for_query`.
+///
+/// # Implementation note
+///
+/// This function uses two flat `HashMap`s in a single pass over the input:
+///
+/// - `max_retract_tx`: EAV → highest retraction `tx_count` seen so far.
+/// - `by_window`: (EAV + valid_from + valid_to) → highest-`tx_count` assertion
+///   for that time window.
+///
+/// The retraction filter (`fact.tx_count > max_retract_tx`) is applied in the
+/// final `filter_map` rather than eagerly.  This means `by_window` temporarily
+/// holds assertions that will be filtered out, so on workloads where most
+/// EAV triples are immediately retracted it uses more peak memory than the
+/// previous per-group approach.  The trade-off is intentional: eliminating the
+/// per-group `Vec<Fact>` allocation yields a measurable throughput gain on large
+/// mostly-unique fact sets (see issue #227).
 pub(crate) fn net_asserted_facts(facts: Vec<Fact>) -> Vec<Fact> {
     use std::collections::HashMap;
 
@@ -1757,5 +1773,96 @@ mod tests {
 
         // Both facts should be present
         assert_eq!(storage.fact_count(), 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Unit tests for net_asserted_facts directly
+    // -------------------------------------------------------------------------
+
+    /// Helper: build an asserted fact with explicit tx_count and valid window.
+    fn make_assert(
+        entity: uuid::Uuid,
+        attr: &str,
+        value: Value,
+        tx_count: u64,
+        valid_from: i64,
+        valid_to: i64,
+    ) -> Fact {
+        Fact {
+            entity,
+            attribute: attr.to_string(),
+            value,
+            tx_id: tx_count as u64,
+            tx_count,
+            valid_from,
+            valid_to,
+            asserted: true,
+        }
+    }
+
+    /// Helper: build a retraction with explicit tx_count and default valid window.
+    fn make_retract(entity: uuid::Uuid, attr: &str, value: Value, tx_count: u64) -> Fact {
+        Fact {
+            entity,
+            attribute: attr.to_string(),
+            value,
+            tx_id: tx_count as u64,
+            tx_count,
+            valid_from: 0,
+            valid_to: VALID_TIME_FOREVER,
+            asserted: false,
+        }
+    }
+
+    /// Multiple retractions of the same EAV: `max_retract_tx` must be the
+    /// global maximum, not just the first retraction seen.
+    ///
+    /// Timeline:
+    ///   tx=1  assert W1        (should be wiped by retraction at tx=5)
+    ///   tx=3  retract          (max_retract so far = 3)
+    ///   tx=4  assert W1        (should survive — tx 4 > 3, BUT a later retraction at tx=5 wipes it)
+    ///   tx=5  retract          (max_retract = 5, wipes tx=4 assertion)
+    ///   tx=6  assert W1        (should survive — tx 6 > 5)
+    #[test]
+    fn test_net_asserted_multiple_retractions_max_wins() {
+        let entity = uuid::Uuid::new_v4();
+        let attr = ":salary";
+        let value = Value::Integer(100_000);
+        let w = (1_000_i64, VALID_TIME_FOREVER);
+
+        let facts = vec![
+            make_assert(entity, attr, value.clone(), 1, w.0, w.1),
+            make_retract(entity, attr, value.clone(), 3),
+            make_assert(entity, attr, value.clone(), 4, w.0, w.1),
+            make_retract(entity, attr, value.clone(), 5),
+            make_assert(entity, attr, value.clone(), 6, w.0, w.1),
+        ];
+
+        let result = net_asserted_facts(facts);
+        assert_eq!(result.len(), 1, "only the post-retraction assertion should survive");
+        assert_eq!(result[0].tx_count, 6);
+    }
+
+    /// A single retraction wipes all valid-time windows of the same EAV triple,
+    /// not just the window that was explicitly retracted.
+    ///
+    /// Timeline:
+    ///   tx=1  assert W1 (2020–2022)
+    ///   tx=2  assert W2 (2024–2026)
+    ///   tx=3  retract          → both windows must disappear
+    #[test]
+    fn test_net_asserted_retraction_wipes_all_windows() {
+        let entity = uuid::Uuid::new_v4();
+        let attr = ":salary";
+        let value = Value::Integer(100_000);
+
+        let facts = vec![
+            make_assert(entity, attr, value.clone(), 1, 1_577_836_800_000, 1_640_995_200_000),
+            make_assert(entity, attr, value.clone(), 2, 1_704_067_200_000, VALID_TIME_FOREVER),
+            make_retract(entity, attr, value.clone(), 3),
+        ];
+
+        let result = net_asserted_facts(facts);
+        assert_eq!(result.len(), 0, "retraction should wipe all windows for the EAV triple");
     }
 }
