@@ -559,11 +559,15 @@ impl DatalogExecutor {
             use std::collections::HashSet;
 
             // --- Not bodies ---
-            // Each element: either Some(HashSet of excluded join-key tuples) or None (expr-only,
-            // use slow path).
-            let not_exclusion_sets: Vec<Option<HashSet<Vec<(String, Value)>>>> = not_clauses
+            // Each element: either Some((has_expr, HashSet of excluded join-key tuples)) or None
+            // (expr-only, use slow path). `has_expr` is computed once here during pre-compute,
+            // not inside the per-binding filter closure.
+            let not_exclusion_sets: Vec<Option<(bool, HashSet<Vec<(String, Value)>>)>> = not_clauses
                 .iter()
                 .map(|not_body| {
+                    let has_expr = not_body
+                        .iter()
+                        .any(|c| matches!(c, WhereClause::Expr { .. }));
                     let patterns: Vec<_> = not_body
                         .iter()
                         .filter_map(|c| match c {
@@ -582,33 +586,42 @@ impl DatalogExecutor {
                         );
                     let body_bindings = matcher.match_patterns(&patterns);
                     // Store all body bindings as sorted (key, value) vecs for probing.
+                    // Normalize values (e.g. keyword entities → Ref) so that probe keys from
+                    // the outer binding match body bindings regardless of representation.
                     let exclusion_set: HashSet<Vec<(String, Value)>> = body_bindings
                         .into_iter()
                         .map(|mut b| {
                             // Drop hidden metadata keys (prefixed `__f`)
                             b.retain(|k, _| !k.starts_with("__f"));
-                            let mut kv: Vec<(String, Value)> = b.into_iter().collect();
+                            let mut kv: Vec<(String, Value)> = b
+                                .into_iter()
+                                .map(|(k, v)| (k, normalize_value(&v)))
+                                .collect();
                             kv.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                             kv
                         })
                         .collect();
-                    Some(exclusion_set)
+                    Some((has_expr, exclusion_set))
                 })
                 .collect();
 
             // --- Not-join bodies ---
-            // Each entry: Some((key_vars, HashSet)) where key_vars are the join_vars that
-            // actually appear in the body bindings (the intersection of join_vars and body-bound
-            // vars). This handles cases like `not-join [?u ?r]` where the body only binds `?r`.
+            // Each entry: Some((has_expr, key_vars, HashSet)) where key_vars are the join_vars
+            // that actually appear in ALL body binding rows (the intersection of join_vars and
+            // vars bound in every row). This handles cases like `not-join [?u ?r]` where the
+            // body only binds `?r`.
             //
             // Values are normalized: Value::Keyword(k) that represents an entity keyword is
             // converted to Value::Ref(uuid) so that probe keys from the outer binding (which
             // may store entity references as keywords) match the body bindings (which bind
-            // entity fields as Value::Ref).
-            let not_join_exclusion_sets: Vec<Option<(Vec<String>, HashSet<Vec<(String, Value)>>)>> =
+            // entity fields as Value::Ref). `has_expr` is computed once here, not per-binding.
+            let not_join_exclusion_sets: Vec<Option<(bool, Vec<String>, HashSet<Vec<(String, Value)>>)>> =
                 not_join_clauses
                     .iter()
                     .map(|(join_vars, nj_clauses)| {
+                        let has_expr = nj_clauses
+                            .iter()
+                            .any(|c| matches!(c, WhereClause::Expr { .. }));
                         let patterns: Vec<_> = nj_clauses
                             .iter()
                             .filter_map(|c| match c {
@@ -628,18 +641,16 @@ impl DatalogExecutor {
                         if body_bindings.is_empty() {
                             // No body bindings → no exclusions. Use empty exclusion set with
                             // all join_vars as key so probe returns not-found for all.
-                            return Some((join_vars.clone(), HashSet::new()));
+                            return Some((has_expr, join_vars.clone(), HashSet::new()));
                         }
-                        // Determine which join_vars actually appear in body bindings.
-                        // Only those can be used as the exclusion key.
-                        let key_vars: Vec<String> = {
-                            let sample = &body_bindings[0];
-                            join_vars
-                                .iter()
-                                .filter(|v| sample.contains_key(*v))
-                                .cloned()
-                                .collect()
-                        };
+                        // Determine which join_vars appear in ALL body binding rows.
+                        // Using only the first row (as before) misses variables that appear
+                        // in later rows but not the first when results are heterogeneous.
+                        let key_vars: Vec<String> = join_vars
+                            .iter()
+                            .filter(|v| body_bindings.iter().all(|b| b.contains_key(*v)))
+                            .cloned()
+                            .collect();
                         // Project to key_vars only (subset of join_vars), normalizing values.
                         let exclusion_set: HashSet<Vec<(String, Value)>> = body_bindings
                             .into_iter()
@@ -654,7 +665,7 @@ impl DatalogExecutor {
                                 kv
                             })
                             .collect();
-                        Some((key_vars, exclusion_set))
+                        Some((has_expr, key_vars, exclusion_set))
                     })
                     .collect();
 
@@ -663,32 +674,43 @@ impl DatalogExecutor {
                 .filter(|binding| {
                     // Check not-bodies via pre-computed exclusion sets (fast path) or
                     // via not_body_matches (slow path for expr-only bodies).
-                    for (i, not_body) in not_clauses.iter().enumerate() {
-                        match &not_exclusion_sets[i] {
-                            Some(exclusion_set) => {
-                                let has_expr = not_body
-                                    .iter()
-                                    .any(|c| matches!(c, WhereClause::Expr { .. }));
+                    for (not_body, exclusion_entry) in
+                        not_clauses.iter().zip(not_exclusion_sets.iter())
+                    {
+                        match exclusion_entry {
+                            Some((has_expr, exclusion_set)) => {
                                 if exclusion_set.is_empty() && !has_expr {
                                     // No excluding bindings → this outer binding is safe.
                                     continue;
                                 }
                                 if !has_expr {
                                     // Fast path: probe exclusion set using the outer binding's
-                                    // values for the join variables.
+                                    // values for the join variables, normalized for consistency.
                                     if let Some(sample) = exclusion_set.iter().next() {
                                         let key: Vec<(String, Value)> = sample
                                             .iter()
                                             .filter_map(|(var, _)| {
                                                 binding
                                                     .get(var)
-                                                    .map(|val| (var.clone(), val.clone()))
+                                                    .map(|val| (var.clone(), normalize_value(val)))
                                             })
                                             .collect();
-                                        // Only probe if all join vars are bound in the outer binding.
-                                        if key.len() == sample.len()
-                                            && exclusion_set.contains(&key)
-                                        {
+                                        if key.len() == sample.len() {
+                                            // All join vars are bound in the outer binding.
+                                            if exclusion_set.contains(&key) {
+                                                return false;
+                                            }
+                                            continue;
+                                        }
+                                        // Outer binding is underspecified (fewer vars than
+                                        // the exclusion set key) — fall back to slow path.
+                                        if not_body_matches(
+                                            not_body,
+                                            binding,
+                                            filtered_facts.clone(),
+                                            valid_at_value.clone(),
+                                            &registry,
+                                        ) {
                                             return false;
                                         }
                                         continue;
@@ -721,12 +743,11 @@ impl DatalogExecutor {
                     }
 
                     // Check not-join-bodies.
-                    for (i, (join_vars, nj_clauses)) in not_join_clauses.iter().enumerate() {
-                        match &not_join_exclusion_sets[i] {
-                            Some((key_vars, exclusion_set)) => {
-                                let has_expr = nj_clauses
-                                    .iter()
-                                    .any(|c| matches!(c, WhereClause::Expr { .. }));
+                    for ((join_vars, nj_clauses), nj_exclusion_entry) in
+                        not_join_clauses.iter().zip(not_join_exclusion_sets.iter())
+                    {
+                        match nj_exclusion_entry {
+                            Some((has_expr, key_vars, exclusion_set)) => {
                                 if !has_expr {
                                     if key_vars.is_empty() {
                                         // Body bound no join vars: if exclusion set non-empty,
