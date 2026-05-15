@@ -1,0 +1,91 @@
+# ================================================================
+# Corestore Tutorial Dataset
+# ================================================================
+# Base setup for the Minigraf Datalog tutorial series.
+# All tutorial sections assume this has been loaded first.
+#
+# Run with: cargo run < demos/tutorial_corestore_setup.txt
+#
+# After loading: tx_count = 3
+# ================================================================
+
+# ── tx 1: Category hierarchy ─────────────────────────────────────
+# Electronics
+#   ├── Laptops
+#   ├── Mobile
+#   ├── Audio
+#   │   └── Headphones
+#   │       └── Noise-Cancelling
+#   └── Accessories
+
+(transact [
+  [:cat-electronics :category/name "Electronics"]
+  [:cat-laptops     :category/name "Laptops"]
+  [:cat-laptops     :category/parent :cat-electronics]
+  [:cat-mobile      :category/name "Mobile"]
+  [:cat-mobile      :category/parent :cat-electronics]
+  [:cat-audio       :category/name "Audio"]
+  [:cat-audio       :category/parent :cat-electronics]
+  [:cat-headphones  :category/name "Headphones"]
+  [:cat-headphones  :category/parent :cat-audio]
+  [:cat-nc          :category/name "Noise-Cancelling"]
+  [:cat-nc          :category/parent :cat-headphones]
+  [:cat-accessories :category/name "Accessories"]
+  [:cat-accessories :category/parent :cat-electronics]
+])
+
+# ── tx 2: Product catalog ─────────────────────────────────────────
+# Two products per major leaf category for window function examples.
+
+(transact [
+  [:laptop-pro    :product/name "LaptopPro 15"]
+  [:laptop-pro    :product/sku "LP-15"]
+  [:laptop-pro    :product/price 1299]
+  [:laptop-pro    :product/category :cat-laptops]
+
+  [:laptop-budget :product/name "BudgetBook 14"]
+  [:laptop-budget :product/sku "LB-14"]
+  [:laptop-budget :product/price 699]
+  [:laptop-budget :product/category :cat-laptops]
+
+  [:phone-x       :product/name "PhoneX 12"]
+  [:phone-x       :product/sku "PX-12"]
+  [:phone-x       :product/price 799]
+  [:phone-x       :product/category :cat-mobile]
+
+  [:phone-prev    :product/name "PhoneX 11"]
+  [:phone-prev    :product/sku "PX-11"]
+  [:phone-prev    :product/price 599]
+  [:phone-prev    :product/category :cat-mobile]
+
+  [:nc-headphones :product/name "NoiseCancel Pro"]
+  [:nc-headphones :product/sku "NC-PRO"]
+  [:nc-headphones :product/price 249]
+  [:nc-headphones :product/category :cat-nc]
+
+  [:usb-cable     :product/name "USB-C Cable 2m"]
+  [:usb-cable     :product/sku "USB-C-2M"]
+  [:usb-cable     :product/price 19]
+  [:usb-cable     :product/category :cat-accessories]
+
+  [:keyboard-k1   :product/name "Compact Keyboard"]
+  [:keyboard-k1   :product/sku "KB-K1"]
+  [:keyboard-k1   :product/price 89]
+  [:keyboard-k1   :product/category :cat-accessories]
+
+  [:monitor-27    :product/name "ClearView 27\" Monitor"]
+  [:monitor-27    :product/sku "CV-27"]
+  [:monitor-27    :product/price 449]
+  [:monitor-27    :product/category :cat-electronics]
+])
+
+# ── tx 3: Customers ───────────────────────────────────────────────
+
+(transact [
+  [:alice :customer/name "Alice"]
+  [:alice :customer/email "alice@example.com"]
+  [:ben   :customer/name "Ben"]
+  [:ben   :customer/email "ben@example.com"]
+  [:clara :customer/name "Clara"]
+  [:clara :customer/email "clara@example.com"]
+])
