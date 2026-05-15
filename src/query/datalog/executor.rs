@@ -562,7 +562,7 @@ impl DatalogExecutor {
             // Each element: either Some((has_expr, HashSet of excluded join-key tuples)) or None
             // (expr-only, use slow path). `has_expr` is computed once here during pre-compute,
             // not inside the per-binding filter closure.
-            let not_exclusion_sets: Vec<Option<(bool, HashSet<Vec<(String, Value)>>)>> = not_clauses
+            let not_exclusion_sets: Vec<NotExclusionEntry> = not_clauses
                 .iter()
                 .map(|not_body| {
                     let has_expr = not_body
@@ -579,11 +579,10 @@ impl DatalogExecutor {
                         // Expr-only body: no pre-computation possible.
                         return None;
                     }
-                    let matcher =
-                        PatternMatcher::from_slice_with_valid_at(
-                            filtered_facts.clone(),
-                            valid_at_value.clone(),
-                        );
+                    let matcher = PatternMatcher::from_slice_with_valid_at(
+                        filtered_facts.clone(),
+                        valid_at_value.clone(),
+                    );
                     let body_bindings = matcher.match_patterns(&patterns);
                     // Store all body bindings as sorted (key, value) vecs for probing.
                     // Normalize values (e.g. keyword entities → Ref) so that probe keys from
@@ -615,59 +614,51 @@ impl DatalogExecutor {
             // converted to Value::Ref(uuid) so that probe keys from the outer binding (which
             // may store entity references as keywords) match the body bindings (which bind
             // entity fields as Value::Ref). `has_expr` is computed once here, not per-binding.
-            let not_join_exclusion_sets: Vec<Option<(bool, Vec<String>, HashSet<Vec<(String, Value)>>)>> =
-                not_join_clauses
-                    .iter()
-                    .map(|(join_vars, nj_clauses)| {
-                        let has_expr = nj_clauses
-                            .iter()
-                            .any(|c| matches!(c, WhereClause::Expr { .. }));
-                        let patterns: Vec<_> = nj_clauses
-                            .iter()
-                            .filter_map(|c| match c {
-                                WhereClause::Pattern(p) => Some(p.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        if patterns.is_empty() {
-                            return None;
-                        }
-                        let matcher =
-                            PatternMatcher::from_slice_with_valid_at(
-                                filtered_facts.clone(),
-                                valid_at_value.clone(),
-                            );
-                        let body_bindings = matcher.match_patterns(&patterns);
-                        if body_bindings.is_empty() {
-                            // No body bindings → no exclusions. Use empty exclusion set with
-                            // all join_vars as key so probe returns not-found for all.
-                            return Some((has_expr, join_vars.clone(), HashSet::new()));
-                        }
-                        // Determine which join_vars appear in ALL body binding rows.
-                        // Using only the first row (as before) misses variables that appear
-                        // in later rows but not the first when results are heterogeneous.
-                        let key_vars: Vec<String> = join_vars
-                            .iter()
-                            .filter(|v| body_bindings.iter().all(|b| b.contains_key(*v)))
-                            .cloned()
-                            .collect();
-                        // Project to key_vars only (subset of join_vars), normalizing values.
-                        let exclusion_set: HashSet<Vec<(String, Value)>> = body_bindings
-                            .into_iter()
-                            .map(|b| {
-                                let mut kv: Vec<(String, Value)> = key_vars
-                                    .iter()
-                                    .filter_map(|v| {
-                                        b.get(v).map(|val| (v.clone(), normalize_value(val)))
-                                    })
-                                    .collect();
-                                kv.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                                kv
-                            })
-                            .collect();
-                        Some((has_expr, key_vars, exclusion_set))
-                    })
-                    .collect();
+            let not_join_exclusion_sets: Vec<NotJoinExclusionEntry> = not_join_clauses
+                .iter()
+                .map(|(join_vars, nj_clauses)| {
+                    let has_expr = nj_clauses
+                        .iter()
+                        .any(|c| matches!(c, WhereClause::Expr { .. }));
+                    let patterns: Vec<_> = nj_clauses
+                        .iter()
+                        .filter_map(|c| match c {
+                            WhereClause::Pattern(p) => Some(p.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if patterns.is_empty() {
+                        return None;
+                    }
+                    let matcher = PatternMatcher::from_slice_with_valid_at(
+                        filtered_facts.clone(),
+                        valid_at_value.clone(),
+                    );
+                    let body_bindings = matcher.match_patterns(&patterns);
+                    if body_bindings.is_empty() {
+                        return Some((has_expr, join_vars.clone(), HashSet::new()));
+                    }
+                    let key_vars: Vec<String> = join_vars
+                        .iter()
+                        .filter(|v| body_bindings.iter().all(|b| b.contains_key(*v)))
+                        .cloned()
+                        .collect();
+                    let exclusion_set: HashSet<Vec<(String, Value)>> = body_bindings
+                        .into_iter()
+                        .map(|b| {
+                            let mut kv: Vec<(String, Value)> = key_vars
+                                .iter()
+                                .filter_map(|v| {
+                                    b.get(v).map(|val| (v.clone(), normalize_value(val)))
+                                })
+                                .collect();
+                            kv.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                            kv
+                        })
+                        .collect();
+                    Some((has_expr, key_vars, exclusion_set))
+                })
+                .collect();
 
             bindings
                 .into_iter()
@@ -1249,6 +1240,14 @@ fn extract_variables(
 }
 
 type Binding = std::collections::HashMap<String, Value>;
+/// Internal type alias for pre-computed not-body exclusion sets.
+type NotExclusionEntry = Option<(bool, std::collections::HashSet<Vec<(String, Value)>>)>;
+/// Internal type alias for pre-computed not-join exclusion sets.
+type NotJoinExclusionEntry = Option<(
+    bool,
+    Vec<String>,
+    std::collections::HashSet<Vec<(String, Value)>>,
+)>;
 
 /// Unified post-processing: handles plain-variable extraction, aggregation,
 /// window functions, and mixed (aggregate + window) queries.
