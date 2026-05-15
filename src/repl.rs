@@ -453,13 +453,19 @@ mod tests {
     #[test]
     fn print_result_transacted() {
         use crate::query::datalog::QueryResult as DResult;
-        Repl::print_result(DResult::Transacted { tx_id: 12345678, tx_count: 1 });
+        Repl::print_result(DResult::Transacted {
+            tx_id: 12345678,
+            tx_count: 1,
+        });
     }
 
     #[test]
     fn print_result_retracted() {
         use crate::query::datalog::QueryResult as DResult;
-        Repl::print_result(DResult::Retracted { tx_id: 12345678, tx_count: 2 });
+        Repl::print_result(DResult::Retracted {
+            tx_id: 12345678,
+            tx_count: 2,
+        });
     }
 
     #[test]

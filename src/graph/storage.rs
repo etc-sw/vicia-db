@@ -240,7 +240,10 @@ impl FactStorage {
     /// # Returns
     /// `(tx_id, tx_count)` — the Unix-ms timestamp and the monotonic counter
     /// assigned to these retractions.
-    pub(crate) fn retract(&self, fact_tuples: Vec<(EntityId, Attribute, Value)>) -> Result<(TxId, u64)> {
+    pub(crate) fn retract(
+        &self,
+        fact_tuples: Vec<(EntityId, Attribute, Value)>,
+    ) -> Result<(TxId, u64)> {
         let tx_id = tx_id_now();
         let tx_count = self
             .tx_counter
