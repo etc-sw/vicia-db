@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Wave 1 Performance — 2026-05-15
+
+### Summary
+
+Four O(N²) query-engine bottlenecks eliminated. No API changes, no file-format changes, no new dependencies.
+
+**PR #246 — #208: B+Tree Selective Lookup**
+
+- `get_facts_by_entity`, `get_facts_by_attribute`, `get_facts_by_entity_attribute` promoted from `#[cfg(test)]` to production in `src/graph/storage.rs`
+- New `selective_fact_fetch` helper in `executor.rs`: inspects query patterns for bound entity literals and bound attribute strings; calls index-driven fetches instead of `get_all_facts()` when ≤4 distinct lookups detected
+- `as_of` queries continue to use full scan (required for correctness)
+- New benchmark groups: `btree_lookup/entity_point`, `btree_lookup/attribute_scan`
+
+**PR #247 — #202 + #203 + #204: Hash-Join Cluster**
+
+- **#202** (`executor.rs`): `not`/`not-join` bodies pre-computed once into `HashSet<Vec<(String, Value)>>` keyed on join variables; O(1) probe per outer binding replaces O(N) re-scan. `normalize_value` handles `keyword→Ref` representation asymmetry in value position.
+- **#203** (`executor.rs`): `or`/`or-join` branches now evaluated from a single empty seed; branch results hash-joined back onto incoming bindings on shared user-visible variables (`__`-prefixed metadata keys excluded). `or-join` projects to `join_vars` before joining.
+- **#204** (`matcher.rs`): `join_with_pattern` detects join variable (entity position first, value position second), builds `HashMap<Value, Vec<Bindings>>` once, probes per existing binding O(1). `normalize_join_value` handles `keyword→Ref`. Falls back to nested-loop when no join variable found.
+
+### Tests
+
+850 tests passing (844 passing + 6 ignored: confirmed `or`+neg-cycle stratification bug, deferred to post-1.0 backlog).
+
+---
+
 ## v1.0.0 — Phase 8 Complete (2026-05-01)
 
 ### Milestone

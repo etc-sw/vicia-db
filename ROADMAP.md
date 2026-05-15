@@ -1402,25 +1402,31 @@ branched_db.execute("(transact [[:x :y 1]])")?;
 
 ## Post-1.0 Performance Backlog
 
-Known O(N²) hotspots discovered during benchmarking (v0.13.0). Each has a well-understood O(N) fix but touches the query evaluator rather than the optimizer, so they are deferred beyond v1.0 to avoid expanding Phase 7.4's scope.
+Known O(N²) hotspots discovered during benchmarking (v0.13.0). Wave 1 (#208, #202, #203, #204) eliminated four of them.
 
-### Hash-Join for Negation Inner Loop
+### ✅ Hash-Join for Negation Inner Loop (#202) — COMPLETE
 
 **Problem**: `not` / `not-join` evaluation re-scans all candidate facts once per outer binding — O(outer × inner) = O(N²). Observed: 13 s (`not_scale/10k`), 23 s (`not_join_scale/10k`).
 
-**Fix**: Pre-compute the exclusion set from the `not` body once → `HashSet<Value>`. Probe per outer binding in O(1). Overall: O(N).
+**Fix**: Pre-computed exclusion set in `execute_query` / `evaluate_not_join` — run `PatternMatcher` once, collect join-key tuples into a `HashSet`, probe O(1) per outer binding. `keyword→Ref` normalization (`normalize_value`) handles value-position representation asymmetry.
 
-### Hash-Join for Disjunction (`or` / `or-join`) Inner Loop
+### ✅ Hash-Join for Disjunction (`or` / `or-join`) Inner Loop (#203) — COMPLETE
 
-**Problem**: `apply_or_clauses` evaluates each branch against the full incoming binding set (seeded re-scan) — O(seeds × facts) = O(N²). Observed: 74 s (`or_scale/10k`), 73 s (`or_join_scale/10k`). (Rules are exempt — they start from an empty binding, giving O(N).)
+**Problem**: `apply_or_clauses` evaluates each branch against the full incoming binding set (seeded re-scan) — O(seeds × facts) = O(N²). Observed: 74 s (`or_scale/10k`), 73 s (`or_join_scale/10k`).
 
-**Fix**: Evaluate each branch from an empty seed, then intersect/project results back onto the incoming bindings using a hash lookup. Overall: O(N) per branch.
+**Fix**: Each branch evaluated from empty seed `[{}]`; branch results hash-joined back onto incoming bindings on shared user-visible variables (metadata `__`-prefixed keys excluded). `OrJoin` projects to `join_vars` before joining.
 
-### Hash-Join for `with`-Grouped Aggregation Cross-Product
+### ✅ Hash-Join in `join_with_pattern` (#204) — COMPLETE
 
-**Problem**: `with_grouped_sum` triggers a two-pattern cross-product join without a hash-join step — O(N²). Observed: 67 s (`with_grouped_sum/10k`).
+**Problem**: For each existing binding, `join_with_pattern` scanned all facts for the next pattern — O(existing_bindings × facts).
 
-**Fix**: Add a hash-join planning step in the aggregation post-processor for multi-pattern `with` clauses.
+**Fix**: Detect join variable (entity position first, value position second), build `HashMap<Value, Vec<Bindings>>` once via `match_pattern`, probe per binding in O(1). `normalize_join_value` handles `keyword→Ref`. Falls back to nested-loop when no join variable found.
+
+### ✅ B+Tree Selective Lookup (#208) — COMPLETE
+
+**Problem**: `filter_facts_for_query` always called `get_all_facts()` — full sequential scan regardless of query selectivity.
+
+**Fix**: `selective_fact_fetch` inspects patterns for bound entity literals and bound attribute strings; calls `get_facts_by_entity` / `get_facts_by_attribute` (promoted from `#[cfg(test)]`), unions and deduplicates results. Falls back to full scan when 0 or >4 distinct lookups. `as_of` queries always use full scan for correctness.
 
 ### Cost-Based Optimizer Extensions for New Clause Types
 
@@ -1433,14 +1439,6 @@ Improve semi-naive evaluation for rules that include `not`, `or`, and aggregate 
 ### Predicate Push-Down
 
 Push `Expr` predicate clauses (e.g. `[(> ?age 30)]`) down to filter bindings as early as possible rather than applying them as a final post-processing pass. Currently `apply_expr_clauses` runs after all pattern matching. A natural complement to the `filter_facts_for_query` snapshot fix, but kept separate to avoid expanding Phase 7.4's scope.
-
-### B+Tree Selective Lookup (Range-Scan Predicate Push-Down)
-
-**Problem**: `filter_facts_for_query` step 1 calls `get_all_facts()`, which performs a full B+tree range scan regardless of query predicates. Every query pays O(N) I/O even when the query pattern binds a specific entity or attribute that could be resolved in O(log N) via an existing EAVT/AEVT index key lookup.
-
-**Fix**: Inspect query patterns before calling `get_all_facts()`. If a pattern binds a concrete entity (or entity + attribute), use `get_facts_by_entity` / `get_facts_by_attribute` to fetch only the relevant subset from the on-disk B+tree. This makes point-entity and point-attribute queries sub-linear in total fact count.
-
-**Scope**: Requires changes to `filter_facts_for_query` and the query planner to propagate bound values from patterns into the storage fetch call. More invasive than the Phase 7.4 snapshot fix; deferred to avoid destabilising the pre-1.0 query path.
 
 ---
 
@@ -1663,6 +1661,7 @@ When evaluating features, ask:
 - ✅ Phase 8.3c: Complete (April 2026) — C FFI `minigraf.h` + platform tarballs, 795 tests
 - ✅ Phase 8.3d: Complete (April 2026) — Node.js `minigraf` on npm, 795 tests
 - ✅ Phase 8: Complete (May 2026) — v1.0.0
+- ✅ Wave 1 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
 - 🎯 Phase 9: Ongoing (Ecosystem — integration examples, cookbook, GraphRAG/LangChain examples)
 
 **Note**: This is a hobby project. Timeline is flexible but realistic.
@@ -1698,4 +1697,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: Phase 8 Complete (May 2026) — 795 tests passing, v1.0.0
+**Last Updated**: Wave 1 Performance Complete (May 2026) — 850 tests passing, v1.0.0

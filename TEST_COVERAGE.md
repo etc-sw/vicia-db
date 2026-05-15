@@ -1,35 +1,49 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Phase 8 COMPLETE — v1.0.0 (May 2026), 795 tests ✅
+**Last Updated**: Wave 1 Performance COMPLETE (May 2026), 850 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 795 ✅ (788 passing, 7 ignored)
-- ✅ 530 unit tests (lib, +6 from browser/mod.rs wasm-bindgen-test suite)
-- ✅ 24 bi-temporal tests (integration)
-- ✅ 10 complex query tests (integration)
-- ✅ 8 recursive rules tests (integration)
-- ✅ 10 concurrency tests (integration)
-- ✅ 7 WAL / crash recovery tests (integration)
-- ✅ 16 index tests (integration, Phase 6.1)
-- ✅ 4 performance / packed page tests (integration, Phase 6.2)
-- ✅ 8 retraction tests (integration, Phase 6.4a)
-- ✅ 6 edge case tests (integration, Phase 6.4a)
-- ✅ 10 B+tree v6 tests (integration, Phase 6.5)
-- ✅ 14 negation (`not`) tests (integration, Phase 7.1a)
-- ✅ 7 not-join tests (integration, Phase 7.1b)
-- ✅ 28 aggregation tests (integration, Phase 7.2a)
-- ✅ 8 predicate expression tests (integration, Phase 7.2b)
-- ✅ 9 disjunction tests (integration, Phase 7.3)
-- ✅ 7 production pattern tests (integration, Phase 7.5 — cross-feature scenarios)
-- ✅ 22 error handling tests (integration, Phase 7.5 — error-path coverage; 7 ignored: or+neg-cycle bug)
-- ✅ 9 temporal metadata tests (integration, Phase 7.6 — `:db/valid-from`, `:db/valid-to`, `:db/tx-count`, `:db/tx-id`, `:db/valid-at`)
-- ✅ 12 window function tests (integration, Phase 7.7a — cumulative sum/count/min/avg, rank with ties, row-number, partition-by, desc ordering, mixed aggregate+window, edge cases, lag/lead parse rejection)
-- ✅ 14 UDF tests (integration, Phase 7.7b — custom aggregates, custom predicates, UDF as window function, name collision guards, runtime errors, thread safety)
+**Total Tests**: 856 ✅ (850 passing, 6 ignored)
+- ✅ 580 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules)
+- ✅ 12 bi-temporal tests (integration)
+- ✅ 11 complex query tests (integration)
+- ✅ 9 recursive rules tests (integration)
+- ✅ 7 concurrency tests (integration)
+- ✅ 12 WAL / crash recovery tests (integration)
+- ✅ 2 cross-platform compat tests (integration, Phase 8.1)
+- ✅ 6 index tests (integration, Phase 6.1)
+- ✅ 7 performance tests (integration, Phase 6.2/6.4b)
+- ✅ 7 retraction tests (integration, Phase 6.4a)
+- ✅ 4 edge case tests (integration, Phase 6.4a)
+- ✅ 8 B+tree v6 tests (integration, Phase 6.5)
+- ✅ 10 negation (`not`) tests (integration, Phase 7.1a)
+- ✅ 14 not-join tests (integration, Phase 7.1b)
+- ✅ 24 aggregation tests (integration, Phase 7.2a)
+- ✅ 28 predicate expression tests (integration, Phase 7.2b)
+- ✅ 18 disjunction tests (integration, Phase 7.3)
+- ✅ 8 production pattern tests (integration, Phase 7.5 — cross-feature scenarios)
+- ✅ 8 error handling tests (integration, Phase 7.5 — error-path coverage; 6 ignored: or+neg-cycle bug)
+- ✅ 22 temporal metadata tests (integration, Phase 7.6 — `:db/valid-from`, `:db/valid-to`, `:db/tx-count`, `:db/tx-id`, `:db/valid-at`)
+- ✅ 14 window function tests (integration, Phase 7.7a — cumulative sum/count/min/avg, rank with ties, row-number, partition-by, desc ordering, mixed aggregate+window, edge cases, lag/lead parse rejection)
+- ✅ 10 UDF tests (integration, Phase 7.7b — custom aggregates, custom predicates, UDF as window function, name collision guards, runtime errors, thread safety)
 - ✅ 17 prepared statement tests (integration, Phase 7.8 — entity/value/as-of/valid-at slots, combined temporal+entity, AnyValidTime, error paths, plan reuse)
-- ✅ 23 doc tests (15 prior + 8 new from Phase 7.9 rustdoc sweep on public API items)
+- ✅ 3 grammar conformance tests (integration, Phase 7.9 — pest shadow grammar + EDN corpus)
+- ✅ 15 doc tests (9 passing, 6 ignored: or+neg-cycle stratification bug confirmed)
 
-**Status**: ✅ **All 788 tests passing** (7 ignored: confirmed or+neg-cycle stratification bug)
+**Status**: ✅ **All 850 tests passing** (6 ignored: confirmed or+neg-cycle stratification bug)
+
+## Wave 1 Performance Completion Status: ✅ COMPLETE
+
+**Wave 1 issues**: #208 (selective B+Tree lookup), #202 (not/not-join hash-join), #203 (or/or-join hash-join), #204 (join_with_pattern hash-join)
+
+**New unit test modules added**:
+- ✅ `selective_lookup_tests` in `executor.rs` — entity-bound and attribute-bound point queries, threshold fallback, `as_of` full-scan path
+- ✅ `not_hash_join_tests` in `executor.rs` — `not`/`not-join` pre-computed exclusion set at 1k/10k scale
+- ✅ `or_hash_join_tests` in `executor.rs` — `or`/`or-join` empty-seed branch evaluation and hash-join back-join at scale
+- ✅ `hash_join_tests` in `matcher.rs` — shared-`?e` join, value-position join, no-join-var fallback
+
+---
 
 ## Phase 8 Completion Status: ✅ COMPLETE — v1.0.0
 
