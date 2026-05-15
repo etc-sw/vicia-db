@@ -1834,7 +1834,16 @@ pub(crate) fn apply_or_clauses(
                     .collect();
 
                 if shared_vars.is_empty() {
-                    // No shared variables → replace bindings with branch union entirely.
+                    // No shared user-visible variables between incoming bindings and branch
+                    // results. This is semantically equivalent to a cross-join, which only
+                    // makes sense when `bindings` carries no meaningful state yet (i.e. it
+                    // is a single empty binding — the query start state — or all incoming
+                    // variables are fact-metadata keys that the branch does not reference).
+                    // In that case the cross-join degenerates to "replace with branch union",
+                    // which is what the original seeded evaluation produced. Incoming bindings
+                    // that carry user-visible variables but none matching any branch variable
+                    // would be silently dropped here — that situation should not arise given
+                    // that `or` must share at least one variable with the surrounding clause.
                     bindings = union_bindings;
                     continue;
                 }
@@ -1883,6 +1892,18 @@ pub(crate) fn apply_or_clauses(
             } => {
                 let outer_keys: std::collections::HashSet<String> =
                     bindings.iter().flat_map(|b| b.keys().cloned()).collect();
+
+                // Defensive check: every join_var must be bound in the incoming scope.
+                // The parser validates this, but guard here to avoid silent wrong results
+                // if a join_var is missing from outer_keys (hash-join key would be partial).
+                for jv in join_vars.iter() {
+                    if !outer_keys.contains(jv.as_str()) {
+                        anyhow::bail!(
+                            "or-join variable {} is not bound in the incoming scope",
+                            jv
+                        );
+                    }
+                }
 
                 let empty_seed: Vec<Binding> = vec![HashMap::new()];
                 let mut projected: Vec<Binding> = Vec::new();
