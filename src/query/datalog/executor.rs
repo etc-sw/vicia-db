@@ -1747,9 +1747,8 @@ pub(crate) fn apply_or_clauses(
                 // from the outer scope to evaluate correctly), fall back to the classic
                 // seeded-branch evaluation to preserve correctness.
                 let any_branch_has_not = branches.iter().any(|b| {
-                    b.iter().any(|c| {
-                        matches!(c, WhereClause::Not(_) | WhereClause::NotJoin { .. })
-                    })
+                    b.iter()
+                        .any(|c| matches!(c, WhereClause::Not(_) | WhereClause::NotJoin { .. }))
                 });
 
                 if any_branch_has_not {
@@ -1897,10 +1896,7 @@ pub(crate) fn apply_or_clauses(
                 // if a join_var is missing from outer_keys (hash-join key would be partial).
                 for jv in join_vars.iter() {
                     if !outer_keys.contains(jv.as_str()) {
-                        anyhow::bail!(
-                            "or-join variable {} is not bound in the incoming scope",
-                            jv
-                        );
+                        anyhow::bail!("or-join variable {} is not bound in the incoming scope", jv);
                     }
                 }
 
@@ -5147,8 +5143,7 @@ mod not_hash_join_tests {
                 .unwrap(),
             )
             .unwrap();
-        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
-        {
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result {
             assert_eq!(
                 results.len(),
                 n - excluded,
@@ -5202,8 +5197,7 @@ mod not_hash_join_tests {
                 .unwrap(),
             )
             .unwrap();
-        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
-        {
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result {
             assert_eq!(
                 results.len(),
                 n - excluded,
@@ -5221,7 +5215,6 @@ mod or_hash_join_tests {
     use crate::graph::FactStorage;
     use crate::query::datalog::executor::DatalogExecutor;
 
-
     fn make_or_db(n: usize, a_count: usize, b_count: usize) -> DatalogExecutor {
         let storage = FactStorage::new();
         let exec = DatalogExecutor::new(storage);
@@ -5232,7 +5225,8 @@ mod or_hash_join_tests {
                 cmd.push_str(&format!("[:e{i} :val {i}]", i = i));
             }
             cmd.push_str("])");
-            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap()).unwrap();
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap())
+                .unwrap();
         }
         for batch_start in (0..a_count).step_by(100) {
             let batch_end = (batch_start + 100).min(a_count);
@@ -5241,7 +5235,8 @@ mod or_hash_join_tests {
                 cmd.push_str(&format!("[:e{i} :tag-a true]", i = i));
             }
             cmd.push_str("])");
-            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap()).unwrap();
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap())
+                .unwrap();
         }
         let b_start = n.saturating_sub(b_count);
         for batch_start in (b_start..n).step_by(100) {
@@ -5251,7 +5246,8 @@ mod or_hash_join_tests {
                 cmd.push_str(&format!("[:e{i} :tag-b true]", i = i));
             }
             cmd.push_str("])");
-            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap()).unwrap();
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap())
+                .unwrap();
         }
         exec
     }
@@ -5272,8 +5268,7 @@ mod or_hash_join_tests {
                 .unwrap(),
             )
             .unwrap();
-        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
-        {
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result {
             assert_eq!(
                 results.len(),
                 a + b,
@@ -5302,8 +5297,7 @@ mod or_hash_join_tests {
                 .unwrap(),
             )
             .unwrap();
-        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
-        {
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result {
             assert_eq!(
                 results.len(),
                 a + b,
@@ -5329,8 +5323,7 @@ mod or_hash_join_tests {
                 .unwrap(),
             )
             .unwrap();
-        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
-        {
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result {
             assert_eq!(results.len(), n, "expected {} deduplicated results", n);
         } else {
             panic!("expected QueryResults");

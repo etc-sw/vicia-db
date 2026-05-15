@@ -421,10 +421,7 @@ impl PatternMatcher {
             let entity_var = match &pattern.entity {
                 EdnValue::Symbol(s) if s.starts_with('?') => {
                     // It's a variable. Is it bound in existing bindings?
-                    if existing_bindings
-                        .first()
-                        .is_some_and(|b| b.contains_key(s))
-                    {
+                    if existing_bindings.first().is_some_and(|b| b.contains_key(s)) {
                         Some(s.clone())
                     } else {
                         None
@@ -438,10 +435,7 @@ impl PatternMatcher {
                 // Check value position.
                 match &pattern.value {
                     EdnValue::Symbol(s) if s.starts_with('?') => {
-                        if existing_bindings
-                            .first()
-                            .is_some_and(|b| b.contains_key(s))
-                        {
+                        if existing_bindings.first().is_some_and(|b| b.contains_key(s)) {
                             Some(s.clone())
                         } else {
                             None
@@ -1370,8 +1364,7 @@ mod hash_join_tests {
                 .unwrap(),
             )
             .unwrap();
-        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
-        {
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result {
             // One row per entity — the join must not produce a cross-product.
             assert_eq!(results.len(), n, "expected one row per entity");
         } else {
@@ -1399,7 +1392,10 @@ mod hash_join_tests {
         } = result
         {
             assert_eq!(results.len(), n, "expected one row per entity");
-            let dept_idx = vars.iter().position(|v| v == "?dept").expect("?dept in vars");
+            let dept_idx = vars
+                .iter()
+                .position(|v| v == "?dept")
+                .expect("?dept in vars");
             let val_idx = vars.iter().position(|v| v == "?v").expect("?v in vars");
             // Collect (dept, val) pairs; no entity should appear in both departments.
             let mut d0_vals: Vec<i64> = Vec::new();
