@@ -546,30 +546,236 @@ impl DatalogExecutor {
         let not_filtered: Vec<_> = if not_clauses.is_empty() && not_join_clauses.is_empty() {
             bindings
         } else {
+            // Pre-compute exclusion sets — one evaluation per not-body, not per outer binding.
+            //
+            // For each not-body, run pattern matching once against `filtered_facts` to get
+            // all bindings where the body is satisfiable. Then collect the "join keys" (the
+            // subset of variables that appear in the outer bindings) into a HashSet.
+            // The filter loop below does one O(1) probe per outer binding instead of a full
+            // pattern match.
+            //
+            // Edge case: expr-only bodies (no patterns) produce no pre-computed set and fall
+            // through to `not_body_matches` as before (rare, already fast).
+            use std::collections::HashSet;
+
+            // --- Not bodies ---
+            // Each element: either Some(HashSet of excluded join-key tuples) or None (expr-only,
+            // use slow path).
+            let not_exclusion_sets: Vec<Option<HashSet<Vec<(String, Value)>>>> = not_clauses
+                .iter()
+                .map(|not_body| {
+                    let patterns: Vec<_> = not_body
+                        .iter()
+                        .filter_map(|c| match c {
+                            WhereClause::Pattern(p) => Some(p.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if patterns.is_empty() {
+                        // Expr-only body: no pre-computation possible.
+                        return None;
+                    }
+                    let matcher =
+                        PatternMatcher::from_slice_with_valid_at(
+                            filtered_facts.clone(),
+                            valid_at_value.clone(),
+                        );
+                    let body_bindings = matcher.match_patterns(&patterns);
+                    // Store all body bindings as sorted (key, value) vecs for probing.
+                    let exclusion_set: HashSet<Vec<(String, Value)>> = body_bindings
+                        .into_iter()
+                        .map(|mut b| {
+                            // Drop hidden metadata keys (prefixed `__f`)
+                            b.retain(|k, _| !k.starts_with("__f"));
+                            let mut kv: Vec<(String, Value)> = b.into_iter().collect();
+                            kv.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                            kv
+                        })
+                        .collect();
+                    Some(exclusion_set)
+                })
+                .collect();
+
+            // --- Not-join bodies ---
+            // Each entry: Some((key_vars, HashSet)) where key_vars are the join_vars that
+            // actually appear in the body bindings (the intersection of join_vars and body-bound
+            // vars). This handles cases like `not-join [?u ?r]` where the body only binds `?r`.
+            //
+            // Values are normalized: Value::Keyword(k) that represents an entity keyword is
+            // converted to Value::Ref(uuid) so that probe keys from the outer binding (which
+            // may store entity references as keywords) match the body bindings (which bind
+            // entity fields as Value::Ref).
+            let not_join_exclusion_sets: Vec<Option<(Vec<String>, HashSet<Vec<(String, Value)>>)>> =
+                not_join_clauses
+                    .iter()
+                    .map(|(join_vars, nj_clauses)| {
+                        let patterns: Vec<_> = nj_clauses
+                            .iter()
+                            .filter_map(|c| match c {
+                                WhereClause::Pattern(p) => Some(p.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if patterns.is_empty() {
+                            return None;
+                        }
+                        let matcher =
+                            PatternMatcher::from_slice_with_valid_at(
+                                filtered_facts.clone(),
+                                valid_at_value.clone(),
+                            );
+                        let body_bindings = matcher.match_patterns(&patterns);
+                        if body_bindings.is_empty() {
+                            // No body bindings → no exclusions. Use empty exclusion set with
+                            // all join_vars as key so probe returns not-found for all.
+                            return Some((join_vars.clone(), HashSet::new()));
+                        }
+                        // Determine which join_vars actually appear in body bindings.
+                        // Only those can be used as the exclusion key.
+                        let key_vars: Vec<String> = {
+                            let sample = &body_bindings[0];
+                            join_vars
+                                .iter()
+                                .filter(|v| sample.contains_key(*v))
+                                .cloned()
+                                .collect()
+                        };
+                        // Project to key_vars only (subset of join_vars), normalizing values.
+                        let exclusion_set: HashSet<Vec<(String, Value)>> = body_bindings
+                            .into_iter()
+                            .map(|b| {
+                                let mut kv: Vec<(String, Value)> = key_vars
+                                    .iter()
+                                    .filter_map(|v| {
+                                        b.get(v).map(|val| (v.clone(), normalize_value(val)))
+                                    })
+                                    .collect();
+                                kv.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                                kv
+                            })
+                            .collect();
+                        Some((key_vars, exclusion_set))
+                    })
+                    .collect();
+
             bindings
                 .into_iter()
                 .filter(|binding| {
-                    for not_body in &not_clauses {
-                        if not_body_matches(
-                            not_body,
-                            binding,
-                            filtered_facts.clone(),
-                            valid_at_value.clone(),
-                            &registry,
-                        ) {
-                            return false;
+                    // Check not-bodies via pre-computed exclusion sets (fast path) or
+                    // via not_body_matches (slow path for expr-only bodies).
+                    for (i, not_body) in not_clauses.iter().enumerate() {
+                        match &not_exclusion_sets[i] {
+                            Some(exclusion_set) => {
+                                let has_expr = not_body
+                                    .iter()
+                                    .any(|c| matches!(c, WhereClause::Expr { .. }));
+                                if exclusion_set.is_empty() && !has_expr {
+                                    // No excluding bindings → this outer binding is safe.
+                                    continue;
+                                }
+                                if !has_expr {
+                                    // Fast path: probe exclusion set using the outer binding's
+                                    // values for the join variables.
+                                    if let Some(sample) = exclusion_set.iter().next() {
+                                        let key: Vec<(String, Value)> = sample
+                                            .iter()
+                                            .filter_map(|(var, _)| {
+                                                binding
+                                                    .get(var)
+                                                    .map(|val| (var.clone(), val.clone()))
+                                            })
+                                            .collect();
+                                        // Only probe if all join vars are bound in the outer binding.
+                                        if key.len() == sample.len()
+                                            && exclusion_set.contains(&key)
+                                        {
+                                            return false;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                // Slow path fallback (expr clauses or empty exclusion set with exprs)
+                                if not_body_matches(
+                                    not_body,
+                                    binding,
+                                    filtered_facts.clone(),
+                                    valid_at_value.clone(),
+                                    &registry,
+                                ) {
+                                    return false;
+                                }
+                            }
+                            None => {
+                                // Expr-only body: slow path.
+                                if not_body_matches(
+                                    not_body,
+                                    binding,
+                                    filtered_facts.clone(),
+                                    valid_at_value.clone(),
+                                    &registry,
+                                ) {
+                                    return false;
+                                }
+                            }
                         }
                     }
-                    for (join_vars, nj_clauses) in &not_join_clauses {
-                        // Use the already-acquired registry instead of re-acquiring the lock.
-                        if evaluate_not_join(
-                            join_vars,
-                            nj_clauses,
-                            binding,
-                            filtered_facts.clone(),
-                            &registry,
-                        ) {
-                            return false;
+
+                    // Check not-join-bodies.
+                    for (i, (join_vars, nj_clauses)) in not_join_clauses.iter().enumerate() {
+                        match &not_join_exclusion_sets[i] {
+                            Some((key_vars, exclusion_set)) => {
+                                let has_expr = nj_clauses
+                                    .iter()
+                                    .any(|c| matches!(c, WhereClause::Expr { .. }));
+                                if !has_expr {
+                                    if key_vars.is_empty() {
+                                        // Body bound no join vars: if exclusion set non-empty,
+                                        // exclude all outer bindings (body always succeeds).
+                                        if !exclusion_set.is_empty() {
+                                            return false;
+                                        }
+                                        continue;
+                                    }
+                                    // Build probe key from outer binding using key_vars.
+                                    // Normalize values so keyword entities match ref entities.
+                                    let mut key: Vec<(String, Value)> = key_vars
+                                        .iter()
+                                        .filter_map(|v| {
+                                            binding
+                                                .get(v)
+                                                .map(|val| (v.clone(), normalize_value(val)))
+                                        })
+                                        .collect();
+                                    key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                                    if key.len() == key_vars.len()
+                                        && exclusion_set.contains(&key)
+                                    {
+                                        return false;
+                                    }
+                                    continue;
+                                }
+                                // Fall through to slow path if expr clauses present.
+                                if evaluate_not_join(
+                                    join_vars,
+                                    nj_clauses,
+                                    binding,
+                                    filtered_facts.clone(),
+                                    &registry,
+                                ) {
+                                    return false;
+                                }
+                            }
+                            None => {
+                                if evaluate_not_join(
+                                    join_vars,
+                                    nj_clauses,
+                                    binding,
+                                    filtered_facts.clone(),
+                                    &registry,
+                                ) {
+                                    return false;
+                                }
+                            }
                         }
                     }
                     true
@@ -914,6 +1120,24 @@ impl DatalogExecutor {
     pub fn rules(&self) -> Arc<RwLock<RuleRegistry>> {
         self.rules.clone()
     }
+}
+
+/// Normalize a `Value` for use as a hash-join key.
+///
+/// Entity keywords (`:foo`) and entity refs (`Value::Ref(uuid)`) represent the same
+/// entity but appear as different variants depending on whether the value was stored in
+/// the entity position (→ `Ref`) or the value position (→ `Keyword`) of a fact.
+/// Normalize both to `Value::Ref` so that exclusion-set probes work correctly across
+/// these two representations.
+fn normalize_value(v: &Value) -> Value {
+    if let Value::Keyword(k) = v {
+        use crate::query::datalog::matcher::edn_to_entity_id;
+        use crate::query::datalog::types::EdnValue;
+        if let Ok(uuid) = edn_to_entity_id(&EdnValue::Keyword(k.clone())) {
+            return Value::Ref(uuid);
+        }
+    }
+    v.clone()
 }
 
 /// Evaluate a `not` body against the current outer binding.
@@ -4677,6 +4901,119 @@ mod selective_lookup_tests {
             .unwrap();
         if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result {
             assert!(!results.is_empty(), "expected results from as-of 1 query");
+        } else {
+            panic!("expected QueryResults");
+        }
+    }
+}
+
+#[cfg(test)]
+mod not_hash_join_tests {
+    use crate::graph::FactStorage;
+    use crate::query::datalog::executor::DatalogExecutor;
+
+    fn make_not_db(n: usize, excluded: usize) -> DatalogExecutor {
+        let storage = FactStorage::new();
+        let exec = DatalogExecutor::new(storage);
+        for batch_start in (0..n).step_by(100) {
+            let batch_end = (batch_start + 100).min(n);
+            let mut cmd = String::from("(transact [");
+            for i in batch_start..batch_end {
+                cmd.push_str(&format!("[:e{i} :val {i}]", i = i));
+            }
+            cmd.push_str("])");
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap())
+                .unwrap();
+        }
+        for batch_start in (0..excluded).step_by(100) {
+            let batch_end = (batch_start + 100).min(excluded);
+            let mut cmd = String::from("(transact [");
+            for i in batch_start..batch_end {
+                cmd.push_str(&format!("[:e{i} :banned true]", i = i));
+            }
+            cmd.push_str("])");
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap())
+                .unwrap();
+        }
+        exec
+    }
+
+    #[test]
+    fn not_filter_returns_correct_count() {
+        let n = 1_000;
+        let excluded = n / 10; // 100 banned
+        let exec = make_not_db(n, excluded);
+        let result = exec
+            .execute(
+                crate::query::datalog::parser::parse_datalog_command(
+                    "(query [:find ?e :where [?e :val ?v] (not [?e :banned true])])",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
+        {
+            assert_eq!(
+                results.len(),
+                n - excluded,
+                "expected {} results after not-filter",
+                n - excluded
+            );
+        } else {
+            panic!("expected QueryResults");
+        }
+    }
+
+    #[test]
+    fn not_join_filter_returns_correct_count() {
+        let n = 1_000;
+        let excluded = n / 10;
+        let storage = FactStorage::new();
+        let exec = DatalogExecutor::new(storage);
+        for batch_start in (0..n).step_by(100) {
+            let batch_end = (batch_start + 100).min(n);
+            let mut cmd = String::from("(transact [");
+            for i in batch_start..batch_end {
+                cmd.push_str(&format!("[:e{i} :val {i}]", i = i));
+            }
+            cmd.push_str("])");
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap())
+                .unwrap();
+        }
+        exec.execute(
+            crate::query::datalog::parser::parse_datalog_command(
+                "(transact [[:d-bad :status :bad]])",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for batch_start in (0..excluded).step_by(100) {
+            let batch_end = (batch_start + 100).min(excluded);
+            let mut cmd = String::from("(transact [");
+            for i in batch_start..batch_end {
+                cmd.push_str(&format!("[:e{i} :dep :d-bad]", i = i));
+            }
+            cmd.push_str("])");
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap())
+                .unwrap();
+        }
+        let result = exec
+            .execute(
+                crate::query::datalog::parser::parse_datalog_command(
+                    "(query [:find ?e :where [?e :val ?v] \
+                     (not-join [?e] [?e :dep ?d] [?d :status :bad])])",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
+        {
+            assert_eq!(
+                results.len(),
+                n - excluded,
+                "expected {} results after not-join-filter",
+                n - excluded
+            );
         } else {
             panic!("expected QueryResults");
         }
