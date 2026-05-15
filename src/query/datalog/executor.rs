@@ -1744,13 +1744,58 @@ pub(crate) fn apply_or_clauses(
     for clause in clauses {
         match clause {
             WhereClause::Or(branches) => {
-                let mut seen: std::collections::HashSet<Vec<(String, crate::graph::types::Value)>> =
+                // If any branch contains Not/NotJoin clauses (which need bound variables
+                // from the outer scope to evaluate correctly), fall back to the classic
+                // seeded-branch evaluation to preserve correctness.
+                let any_branch_has_not = branches.iter().any(|b| {
+                    b.iter().any(|c| {
+                        matches!(c, WhereClause::Not(_) | WhereClause::NotJoin { .. })
+                    })
+                });
+
+                if any_branch_has_not {
+                    // Classic O(N·B) seeded evaluation: each incoming binding seeds each branch.
+                    let mut seen: std::collections::HashSet<Vec<(String, Value)>> =
+                        std::collections::HashSet::new();
+                    let mut result: Vec<Binding> = Vec::new();
+                    for branch in branches {
+                        let branch_result = evaluate_branch(
+                            branch,
+                            bindings.clone(),
+                            storage.clone(),
+                            rules,
+                            as_of.clone(),
+                            valid_at.clone(),
+                            registry,
+                        )?;
+                        for b in branch_result {
+                            let mut key: Vec<_> = b
+                                .iter()
+                                .filter(|(k, _)| !k.starts_with("__"))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                            if seen.insert(key) {
+                                result.push(b);
+                            }
+                        }
+                    }
+                    bindings = result;
+                    continue;
+                }
+
+                // Fast path: no Not/NotJoin in any branch.
+                // Evaluate every branch from an empty seed (independent of incoming bindings),
+                // then hash-join the union back onto incoming bindings on shared variables.
+                let empty_seed: Vec<Binding> = vec![HashMap::new()];
+                let mut union_bindings: Vec<Binding> = Vec::new();
+                let mut seen_keys: std::collections::HashSet<Vec<(String, Value)>> =
                     std::collections::HashSet::new();
-                let mut result: Vec<Binding> = Vec::new();
+
                 for branch in branches {
                     let branch_result = evaluate_branch(
                         branch,
-                        bindings.clone(),
+                        empty_seed.clone(),
                         storage.clone(),
                         rules,
                         as_of.clone(),
@@ -1758,31 +1803,96 @@ pub(crate) fn apply_or_clauses(
                         registry,
                     )?;
                     for b in branch_result {
-                        let mut key: Vec<_> =
-                            b.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                        key.sort_unstable();
-                        if seen.insert(key) {
-                            result.push(b);
+                        // Deduplicate on user-visible variables only (exclude internal `__` keys).
+                        let mut key: Vec<_> = b
+                            .iter()
+                            .filter(|(k, _)| !k.starts_with("__"))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        if seen_keys.insert(key) {
+                            union_bindings.push(b);
+                        }
+                    }
+                }
+
+                // Determine shared variable names: variables present in both
+                // incoming bindings and branch results.
+                // Exclude internal metadata keys (prefixed with `__`) — those are
+                // fact-specific and differ between patterns for the same entity.
+                let branch_var_names: std::collections::HashSet<&str> = union_bindings
+                    .iter()
+                    .flat_map(|b| b.keys().map(|k| k.as_str()))
+                    .filter(|k| !k.starts_with("__"))
+                    .collect();
+                let shared_vars: Vec<String> = bindings
+                    .iter()
+                    .flat_map(|b| b.keys().cloned())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .filter(|v| !v.starts_with("__") && branch_var_names.contains(v.as_str()))
+                    .collect();
+
+                if shared_vars.is_empty() {
+                    // No shared variables → replace bindings with branch union entirely.
+                    bindings = union_bindings;
+                    continue;
+                }
+
+                // Build HashMap: shared-key tuple → Vec<branch Binding>
+                let mut branch_map: HashMap<Vec<(String, Value)>, Vec<Binding>> = HashMap::new();
+                for b in union_bindings {
+                    let key: Vec<(String, Value)> = shared_vars
+                        .iter()
+                        .filter_map(|v| b.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+                    branch_map.entry(key).or_default().push(b);
+                }
+
+                // For each incoming binding, look up matching branch results and merge.
+                let mut result: Vec<Binding> = Vec::new();
+                let mut seen_result: std::collections::HashSet<Vec<(String, Value)>> =
+                    std::collections::HashSet::new();
+                for incoming in &bindings {
+                    let key: Vec<(String, Value)> = shared_vars
+                        .iter()
+                        .filter_map(|v| incoming.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+                    if let Some(matches) = branch_map.get(&key) {
+                        for branch_binding in matches {
+                            // Merge: start with incoming, extend with branch-introduced vars.
+                            let mut merged = incoming.clone();
+                            for (k, v) in branch_binding {
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            let mut dedup_key: Vec<_> =
+                                merged.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            dedup_key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                            if seen_result.insert(dedup_key) {
+                                result.push(merged);
+                            }
                         }
                     }
                 }
                 bindings = result;
             }
+
             WhereClause::OrJoin {
                 join_vars,
                 branches,
             } => {
-                // outer_keys: all variable names present in the incoming bindings
                 let outer_keys: std::collections::HashSet<String> =
                     bindings.iter().flat_map(|b| b.keys().cloned()).collect();
 
-                let mut seen: std::collections::HashSet<Vec<(String, crate::graph::types::Value)>> =
+                let empty_seed: Vec<Binding> = vec![HashMap::new()];
+                let mut projected: Vec<Binding> = Vec::new();
+                let mut seen_proj: std::collections::HashSet<Vec<(String, Value)>> =
                     std::collections::HashSet::new();
-                let mut result: Vec<Binding> = Vec::new();
+
                 for branch in branches {
                     let branch_result = evaluate_branch(
                         branch,
-                        bindings.clone(),
+                        empty_seed.clone(),
                         storage.clone(),
                         rules,
                         as_of.clone(),
@@ -1790,23 +1900,56 @@ pub(crate) fn apply_or_clauses(
                         registry,
                     )?;
                     for mut b in branch_result {
-                        // Drop partial bindings (missing any join_var)
                         if !join_vars.iter().all(|v| b.contains_key(v)) {
                             continue;
                         }
-                        // Project to outer_keys (all variables bound before this or-join clause).
-                        // This is equivalent to retaining join_vars because:
-                        // (1) the parser enforces join_vars ⊆ outer_bound, so join_vars ⊆ outer_keys, and
-                        // (2) retaining outer_keys is safe because those variables were stable before the or-join.
+                        // Project to outer_keys (preserves join_vars since join_vars ⊆ outer_keys)
                         b.retain(|k, _| outer_keys.contains(k));
-                        let key: Vec<_> = b.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                        if seen.insert(key) {
-                            result.push(b);
+                        let mut key: Vec<_> =
+                            b.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        if seen_proj.insert(key) {
+                            projected.push(b);
+                        }
+                    }
+                }
+
+                // Build HashMap keyed on join_vars tuple.
+                let mut branch_map: HashMap<Vec<(String, Value)>, Vec<Binding>> = HashMap::new();
+                for b in projected {
+                    let key: Vec<(String, Value)> = join_vars
+                        .iter()
+                        .filter_map(|v| b.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+                    branch_map.entry(key).or_default().push(b);
+                }
+
+                let mut result: Vec<Binding> = Vec::new();
+                let mut seen_result: std::collections::HashSet<Vec<(String, Value)>> =
+                    std::collections::HashSet::new();
+                for incoming in &bindings {
+                    let key: Vec<(String, Value)> = join_vars
+                        .iter()
+                        .filter_map(|v| incoming.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+                    if let Some(matches) = branch_map.get(&key) {
+                        for branch_binding in matches {
+                            let mut merged = incoming.clone();
+                            for (k, v) in branch_binding {
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            let mut dedup_key: Vec<_> =
+                                merged.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            dedup_key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                            if seen_result.insert(dedup_key) {
+                                result.push(merged);
+                            }
                         }
                     }
                 }
                 bindings = result;
             }
+
             _ => {} // Other clause types handled elsewhere
         }
     }
@@ -5047,6 +5190,128 @@ mod not_hash_join_tests {
                 "expected {} results after not-join-filter",
                 n - excluded
             );
+        } else {
+            panic!("expected QueryResults");
+        }
+    }
+}
+
+#[cfg(test)]
+mod or_hash_join_tests {
+    use crate::graph::FactStorage;
+    use crate::query::datalog::executor::DatalogExecutor;
+
+
+    fn make_or_db(n: usize, a_count: usize, b_count: usize) -> DatalogExecutor {
+        let storage = FactStorage::new();
+        let exec = DatalogExecutor::new(storage);
+        for batch_start in (0..n).step_by(100) {
+            let batch_end = (batch_start + 100).min(n);
+            let mut cmd = String::from("(transact [");
+            for i in batch_start..batch_end {
+                cmd.push_str(&format!("[:e{i} :val {i}]", i = i));
+            }
+            cmd.push_str("])");
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap()).unwrap();
+        }
+        for batch_start in (0..a_count).step_by(100) {
+            let batch_end = (batch_start + 100).min(a_count);
+            let mut cmd = String::from("(transact [");
+            for i in batch_start..batch_end {
+                cmd.push_str(&format!("[:e{i} :tag-a true]", i = i));
+            }
+            cmd.push_str("])");
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap()).unwrap();
+        }
+        let b_start = n.saturating_sub(b_count);
+        for batch_start in (b_start..n).step_by(100) {
+            let batch_end = (batch_start + 100).min(n);
+            let mut cmd = String::from("(transact [");
+            for i in batch_start..batch_end {
+                cmd.push_str(&format!("[:e{i} :tag-b true]", i = i));
+            }
+            cmd.push_str("])");
+            exec.execute(crate::query::datalog::parser::parse_datalog_command(&cmd).unwrap()).unwrap();
+        }
+        exec
+    }
+
+    #[test]
+    fn or_clause_returns_correct_count() {
+        // 1000 entities, first 250 have :tag-a, last 250 have :tag-b, no overlap
+        let n = 1_000;
+        let a = n / 4;
+        let b = n / 4;
+        let exec = make_or_db(n, a, b);
+        let result = exec
+            .execute(
+                crate::query::datalog::parser::parse_datalog_command(
+                    "(query [:find ?e :where [?e :val ?v] \
+                     (or [?e :tag-a true] [?e :tag-b true])])",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
+        {
+            assert_eq!(
+                results.len(),
+                a + b,
+                "expected {} results from or (a={} b={} no overlap)",
+                a + b,
+                a,
+                b
+            );
+        } else {
+            panic!("expected QueryResults");
+        }
+    }
+
+    #[test]
+    fn or_join_clause_returns_correct_count() {
+        let n = 1_000;
+        let a = n / 4;
+        let b = n / 4;
+        let exec = make_or_db(n, a, b);
+        let result = exec
+            .execute(
+                crate::query::datalog::parser::parse_datalog_command(
+                    "(query [:find ?e :where [?e :val ?v] \
+                     (or-join [?e] [?e :tag-a true] [?e :tag-b true])])",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
+        {
+            assert_eq!(
+                results.len(),
+                a + b,
+                "expected {} results from or-join",
+                a + b
+            );
+        } else {
+            panic!("expected QueryResults");
+        }
+    }
+
+    #[test]
+    fn or_clause_with_overlap_deduplicates() {
+        // 100 entities, all have both :tag-a and :tag-b → result should be 100, not 200
+        let n = 100;
+        let exec = make_or_db(n, n, n);
+        let result = exec
+            .execute(
+                crate::query::datalog::parser::parse_datalog_command(
+                    "(query [:find ?e :where [?e :val ?v] \
+                     (or [?e :tag-a true] [?e :tag-b true])])",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        if let crate::query::datalog::executor::QueryResult::QueryResults { results, .. } = result
+        {
+            assert_eq!(results.len(), n, "expected {} deduplicated results", n);
         } else {
             panic!("expected QueryResults");
         }
