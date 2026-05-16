@@ -1,8 +1,8 @@
 //! Index corruption recovery tests (#216).
 #![cfg(not(target_arch = "wasm32"))]
 
-use minigraf::db::Minigraf;
 use minigraf::QueryResult;
+use minigraf::db::Minigraf;
 
 const PAGE_SIZE: usize = 4096;
 
@@ -16,18 +16,25 @@ fn count_results(r: QueryResult) -> usize {
 fn build_valid_db(path: &std::path::Path, n_facts: usize) {
     let db = Minigraf::open(path).unwrap();
     for i in 0..n_facts {
-        db.execute(&format!(r#"(transact [[:e{i} :idx {i}]])"#)).unwrap();
+        db.execute(&format!(r#"(transact [[:e{i} :idx {i}]])"#))
+            .unwrap();
     }
     db.checkpoint().unwrap();
 }
 
 fn corrupt_bytes_at(path: &std::path::Path, offset: u64, len: usize) {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
     f.seek(SeekFrom::Start(offset)).unwrap();
     let mut buf = vec![0u8; len];
     f.read_exact(&mut buf).unwrap();
-    for b in &mut buf { *b ^= 0xFF; }
+    for b in &mut buf {
+        *b ^= 0xFF;
+    }
     f.seek(SeekFrom::Start(offset)).unwrap();
     f.write_all(&buf).unwrap();
     f.sync_all().unwrap();
@@ -46,7 +53,10 @@ fn corrupted_header_checksum_does_not_panic() {
                 db.execute("(query [:find ?e :where [?e :idx ?i]])")
                     .unwrap(),
             );
-            assert_eq!(n, 3, "facts must be readable even after header checksum corruption");
+            assert_eq!(
+                n, 3,
+                "facts must be readable even after header checksum corruption"
+            );
         }
         Err(_) => {
             // Rejected at open — also acceptable; either way: no panic.
@@ -94,7 +104,8 @@ fn query_results_after_non_critical_corruption_match_original() {
     let path = dir.path().join("recover_check.graph");
     {
         let db = Minigraf::open(&path).unwrap();
-        db.execute(r#"(transact [[:alice :name "Alice"]])"#).unwrap();
+        db.execute(r#"(transact [[:alice :name "Alice"]])"#)
+            .unwrap();
         db.execute(r#"(transact [[:bob :name "Bob"]])"#).unwrap();
         db.checkpoint().unwrap();
     }
@@ -105,7 +116,10 @@ fn query_results_after_non_critical_corruption_match_original() {
                 db.execute("(query [:find ?n :where [?e :name ?n]])")
                     .unwrap(),
             );
-            assert_eq!(n, 2, "both facts must be visible after non-critical corruption");
+            assert_eq!(
+                n, 2,
+                "both facts must be visible after non-critical corruption"
+            );
         }
         Err(_) => {}
     }

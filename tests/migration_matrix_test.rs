@@ -1,8 +1,8 @@
 //! Migration matrix tests (#215).
 #![cfg(not(target_arch = "wasm32"))]
 
-use minigraf::db::Minigraf;
 use minigraf::QueryResult;
+use minigraf::db::Minigraf;
 
 const PAGE_SIZE: usize = 4096;
 const MAGIC_NUMBER: [u8; 4] = *b"MGRF";
@@ -45,7 +45,10 @@ fn v3_empty_migrates_without_error() {
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(&page).unwrap();
     drop(f);
-    assert!(Minigraf::open(&path).is_ok(), "v3 empty file should open without error");
+    assert!(
+        Minigraf::open(&path).is_ok(),
+        "v3 empty file should open without error"
+    );
 }
 
 #[test]

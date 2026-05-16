@@ -352,7 +352,10 @@ fn test_rwlock_consistency() {
 
 #[test]
 fn stress_readers_during_writer() {
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::thread;
 
     let db = Arc::new(minigraf::db::Minigraf::in_memory().unwrap());
@@ -396,7 +399,10 @@ fn failed_write_followed_by_successful_write() {
     let bad = db.execute("(transact [[NOT VALID SYNTAX");
     assert!(bad.is_err(), "invalid input must return Err");
     db.execute(r#"(transact [[:e1 :ok true]])"#).unwrap();
-    let n = match db.execute("(query [:find ?e :where [?e :ok true]])").unwrap() {
+    let n = match db
+        .execute("(query [:find ?e :where [?e :ok true]])")
+        .unwrap()
+    {
         minigraf::QueryResult::QueryResults { results, .. } => results.len(),
         _ => 0,
     };
@@ -408,7 +414,8 @@ fn rollback_after_partial_work() {
     let db = minigraf::db::Minigraf::in_memory().unwrap();
     {
         let mut tx = db.begin_write().unwrap();
-        tx.execute(r#"(transact [[:a :x 1] [:b :x 2] [:c :x 3]])"#).unwrap();
+        tx.execute(r#"(transact [[:a :x 1] [:b :x 2] [:c :x 3]])"#)
+            .unwrap();
         tx.rollback();
     }
     let n = match db.execute("(query [:find ?v :where [?e :x ?v]])").unwrap() {
@@ -427,11 +434,15 @@ fn open_write_checkpoint_query_loop_per_thread() {
             thread::spawn(move || {
                 let db = minigraf::db::Minigraf::in_memory().unwrap();
                 for i in 0..20 {
-                    db.execute(&format!(r#"(transact [[:t{thread_id}e{i} :thread {thread_id}]])"#))
-                        .unwrap();
+                    db.execute(&format!(
+                        r#"(transact [[:t{thread_id}e{i} :thread {thread_id}]])"#
+                    ))
+                    .unwrap();
                 }
                 let n = match db
-                    .execute(&format!("(query [:find ?e :where [?e :thread {thread_id}]])"))
+                    .execute(&format!(
+                        "(query [:find ?e :where [?e :thread {thread_id}]])"
+                    ))
                     .unwrap()
                 {
                     minigraf::QueryResult::QueryResults { results, .. } => results.len(),
@@ -457,7 +468,8 @@ fn stress_open_write_loop_nightly() {
             thread::spawn(move || {
                 let db = minigraf::db::Minigraf::in_memory().unwrap();
                 for i in 0..200 {
-                    db.execute(&format!(r#"(transact [[:nt{tid}e{i} :n {i}]])"#)).unwrap();
+                    db.execute(&format!(r#"(transact [[:nt{tid}e{i} :n {i}]])"#))
+                        .unwrap();
                 }
                 let n = match db
                     .execute(&format!("(query [:find ?e :where [?e :n {}]])", 199))
