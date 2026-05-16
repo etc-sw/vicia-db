@@ -571,7 +571,8 @@ impl DatalogExecutor {
 
         // Apply not-filter for WhereClause::Not and WhereClause::NotJoin clauses
         // (no rules involved — pure post-filter)
-        let not_clauses: Vec<&Vec<WhereClause>> = query
+        #[cfg_attr(feature = "wasm", allow(unused_mut))]
+        let mut not_clauses: Vec<&Vec<WhereClause>> = query
             .where_clauses
             .iter()
             .filter_map(|c| match c {
@@ -580,7 +581,8 @@ impl DatalogExecutor {
             })
             .collect();
 
-        let not_join_clauses: Vec<(Vec<String>, Vec<WhereClause>)> = query
+        #[cfg_attr(feature = "wasm", allow(unused_mut))]
+        let mut not_join_clauses: Vec<(Vec<String>, Vec<WhereClause>)> = query
             .where_clauses
             .iter()
             .filter_map(|c| match c {
@@ -590,6 +592,18 @@ impl DatalogExecutor {
                 _ => None,
             })
             .collect();
+
+        // WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+        #[cfg(not(feature = "wasm"))]
+        not_clauses.sort_by_key(|body| optimizer::clause_cost(&WhereClause::Not(body.to_vec())));
+        // WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+        #[cfg(not(feature = "wasm"))]
+        not_join_clauses.sort_by_key(|(vars, clauses)| {
+            optimizer::clause_cost(&WhereClause::NotJoin {
+                join_vars: vars.clone(),
+                clauses: clauses.clone(),
+            })
+        });
 
         let not_filtered: Vec<_> = if not_clauses.is_empty() && not_join_clauses.is_empty() {
             bindings
@@ -1039,7 +1053,8 @@ impl DatalogExecutor {
         // in the query body. (The StratifiedEvaluator handles `not`/`not-join` in rule
         // bodies; this handles them appearing directly in the query body alongside rule
         // invocations.)
-        let not_clauses: Vec<&Vec<WhereClause>> = query
+        #[cfg_attr(feature = "wasm", allow(unused_mut))]
+        let mut not_clauses: Vec<&Vec<WhereClause>> = query
             .where_clauses
             .iter()
             .filter_map(|c| match c {
@@ -1048,7 +1063,8 @@ impl DatalogExecutor {
             })
             .collect();
 
-        let not_join_clauses: Vec<(Vec<String>, Vec<WhereClause>)> = query
+        #[cfg_attr(feature = "wasm", allow(unused_mut))]
+        let mut not_join_clauses: Vec<(Vec<String>, Vec<WhereClause>)> = query
             .where_clauses
             .iter()
             .filter_map(|c| match c {
@@ -1058,6 +1074,18 @@ impl DatalogExecutor {
                 _ => None,
             })
             .collect();
+
+        // WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+        #[cfg(not(feature = "wasm"))]
+        not_clauses.sort_by_key(|body| optimizer::clause_cost(&WhereClause::Not(body.to_vec())));
+        // WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+        #[cfg(not(feature = "wasm"))]
+        not_join_clauses.sort_by_key(|(vars, clauses)| {
+            optimizer::clause_cost(&WhereClause::NotJoin {
+                join_vars: vars.clone(),
+                clauses: clauses.clone(),
+            })
+        });
 
         let not_filtered: Vec<_> = if not_clauses.is_empty() && not_join_clauses.is_empty() {
             bindings
@@ -1830,10 +1858,21 @@ pub(crate) fn apply_or_clauses(
     for clause in clauses {
         match clause {
             WhereClause::Or(branches) => {
+                let sorted_or_branches: Vec<&Vec<WhereClause>> = {
+                    #[cfg_attr(feature = "wasm", allow(unused_mut))]
+                    let mut b: Vec<&Vec<WhereClause>> = branches.iter().collect();
+                    // Sort branches by cost ascending so cheaper branches evaluate first.
+                    // WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+                    // Note: all branches still evaluated (no short-circuit); ordering is
+                    // infrastructure for issue #250.
+                    #[cfg(not(feature = "wasm"))]
+                    b.sort_by_key(|br| optimizer::branch_cost(br));
+                    b
+                };
                 // If any branch contains Not/NotJoin clauses (which need bound variables
                 // from the outer scope to evaluate correctly), fall back to the classic
                 // seeded-branch evaluation to preserve correctness.
-                let any_branch_has_not = branches.iter().any(|b| {
+                let any_branch_has_not = sorted_or_branches.iter().any(|b| {
                     b.iter()
                         .any(|c| matches!(c, WhereClause::Not(_) | WhereClause::NotJoin { .. }))
                 });
@@ -1843,7 +1882,7 @@ pub(crate) fn apply_or_clauses(
                     let mut seen: std::collections::HashSet<Vec<(String, Value)>> =
                         std::collections::HashSet::new();
                     let mut result: Vec<Binding> = Vec::new();
-                    for branch in branches {
+                    for branch in &sorted_or_branches {
                         let branch_result = evaluate_branch(
                             branch,
                             bindings.clone(),
@@ -1877,7 +1916,7 @@ pub(crate) fn apply_or_clauses(
                 let mut seen_keys: std::collections::HashSet<Vec<(String, Value)>> =
                     std::collections::HashSet::new();
 
-                for branch in branches {
+                for branch in &sorted_or_branches {
                     let branch_result = evaluate_branch(
                         branch,
                         empty_seed.clone(),
@@ -1975,6 +2014,17 @@ pub(crate) fn apply_or_clauses(
                 join_vars,
                 branches,
             } => {
+                let sorted_oj_branches: Vec<&Vec<WhereClause>> = {
+                    #[cfg_attr(feature = "wasm", allow(unused_mut))]
+                    let mut b: Vec<&Vec<WhereClause>> = branches.iter().collect();
+                    // Sort branches by cost ascending so cheaper branches evaluate first.
+                    // WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+                    // Note: all branches still evaluated (no short-circuit); ordering is
+                    // infrastructure for issue #250.
+                    #[cfg(not(feature = "wasm"))]
+                    b.sort_by_key(|br| optimizer::branch_cost(br));
+                    b
+                };
                 let outer_keys: std::collections::HashSet<String> =
                     bindings.iter().flat_map(|b| b.keys().cloned()).collect();
 
@@ -1992,7 +2042,7 @@ pub(crate) fn apply_or_clauses(
                 let mut seen_proj: std::collections::HashSet<Vec<(String, Value)>> =
                     std::collections::HashSet::new();
 
-                for branch in branches {
+                for branch in &sorted_oj_branches {
                     let branch_result = evaluate_branch(
                         branch,
                         empty_seed.clone(),
@@ -5421,6 +5471,7 @@ mod or_hash_join_tests {
 #[cfg(test)]
 mod pushdown_tests {
     use crate::graph::FactStorage;
+    use crate::graph::types::Value;
     use crate::query::datalog::executor::{DatalogExecutor, QueryResult};
     use crate::query::datalog::parser::parse_datalog_command;
 
@@ -5516,6 +5567,53 @@ mod pushdown_tests {
             assert_eq!(results.len(), 2, "only :e2 and :e3 qualify");
         } else {
             panic!("expected QueryResults");
+        }
+    }
+
+    #[test]
+    fn test_not_clause_ordering_correctness() {
+        // Two `not` clauses given in expensive-first source order; results must be
+        // identical regardless of which order the optimizer chooses to evaluate them.
+        // This is a correctness regression guard — semantics must not change.
+        let storage = FactStorage::new();
+        let executor = DatalogExecutor::new(storage);
+
+        // Transact 3 items: widget, gadget, doohickey
+        executor
+            .execute(
+                parse_datalog_command(
+                    r#"(transact [[:item1 :item/name "widget"]
+                                  [:item2 :item/name "gadget"]
+                                  [:item3 :item/name "doohickey"]])"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Query: find items that are NOT "widget" AND NOT "gadget"
+        // Clauses are given in expensive-first order to exercise the cost-based sort.
+        let result = executor
+            .execute(
+                parse_datalog_command(
+                    r#"(query [:find ?name
+                               :where [?e :item/name ?name]
+                                      (not [?e :item/name "gadget"])
+                                      (not [?e :item/name "widget"])])"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        match result {
+            QueryResult::QueryResults { results, .. } => {
+                assert_eq!(results.len(), 1, "only doohickey should pass");
+                if let Value::String(ref s) = results[0][0] {
+                    assert_eq!(s.as_str(), "doohickey", "result should be doohickey");
+                } else {
+                    panic!("expected a String value for the result");
+                }
+            }
+            _ => panic!("expected QueryResults"),
         }
     }
 }
