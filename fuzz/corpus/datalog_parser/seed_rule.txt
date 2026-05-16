@@ -1,0 +1,1 @@
+(rule [(parent ?x ?y) [?x :parent ?y]])

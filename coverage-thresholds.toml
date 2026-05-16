@@ -1,0 +1,12 @@
+# Coverage thresholds for critical reliability modules.
+# Set at Wave 3 completion — ratchet upward in future waves.
+# Update by running: cargo llvm-cov --text 2>&1 | grep <module>
+
+[modules]
+"src/wal.rs"                              = 75
+"src/db.rs"                               = 70
+"src/storage/persistent_facts.rs"         = 70
+"src/storage/btree_v6.rs"                 = 65
+"src/query/datalog/executor.rs"           = 75
+"src/query/datalog/evaluator.rs"          = 75
+"src/query/datalog/stratification.rs"     = 75
