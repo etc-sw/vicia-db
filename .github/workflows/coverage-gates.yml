@@ -1,0 +1,50 @@
+name: Coverage Gates
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  coverage-gates:
+    name: Per-module coverage gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (text)
+        run: cargo llvm-cov --text 2>&1 > cov_text.txt || true
+
+      - name: Check per-module thresholds
+        run: |
+          FAIL=0
+          check_module() {
+            local file=$1 threshold=$2
+            local pct
+            pct=$(grep "$file" cov_text.txt | grep -oP '\d+\.\d+(?=%)' | tail -1)
+            if [ -z "$pct" ]; then echo "WARNING: $file not found in coverage report"; return 0; fi
+            python3 -c "import sys; sys.exit(0 if float('$pct') >= $threshold else 1)" \
+              && echo "OK: $file: ${pct}% >= ${threshold}%" \
+              || { echo "FAIL: $file: ${pct}% < ${threshold}%"; return 1; }
+          }
+          check_module "wal.rs"            $(python3 -c "import tomllib; d=tomllib.load(open('coverage-thresholds.toml','rb')); print(d['modules']['src/wal.rs'])") || FAIL=1
+          check_module "db.rs"             $(python3 -c "import tomllib; d=tomllib.load(open('coverage-thresholds.toml','rb')); print(d['modules']['src/db.rs'])") || FAIL=1
+          check_module "persistent_facts"  $(python3 -c "import tomllib; d=tomllib.load(open('coverage-thresholds.toml','rb')); print(d['modules']['src/storage/persistent_facts.rs'])") || FAIL=1
+          check_module "btree_v6"          $(python3 -c "import tomllib; d=tomllib.load(open('coverage-thresholds.toml','rb')); print(d['modules']['src/storage/btree_v6.rs'])") || FAIL=1
+          check_module "executor.rs"       $(python3 -c "import tomllib; d=tomllib.load(open('coverage-thresholds.toml','rb')); print(d['modules']['src/query/datalog/executor.rs'])") || FAIL=1
+          check_module "evaluator.rs"      $(python3 -c "import tomllib; d=tomllib.load(open('coverage-thresholds.toml','rb')); print(d['modules']['src/query/datalog/evaluator.rs'])") || FAIL=1
+          check_module "stratification"    $(python3 -c "import tomllib; d=tomllib.load(open('coverage-thresholds.toml','rb')); print(d['modules']['src/query/datalog/stratification.rs'])") || FAIL=1
+          exit $FAIL
