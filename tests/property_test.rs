@@ -7,8 +7,8 @@
 //! More cases: PROPTEST_CASES=500 cargo test --test property_test
 #![cfg(not(target_arch = "wasm32"))]
 
-use minigraf::db::Minigraf;
 use minigraf::QueryResult;
+use minigraf::db::Minigraf;
 use proptest::prelude::*;
 use uuid::Uuid;
 
@@ -106,9 +106,7 @@ fn minigraf_eval(facts: &[TestFact], query: &TestQuery, max_entity: usize) -> Ve
     };
 
     let attr = &query.attribute;
-    let datalog = format!(
-        "(query [:find ?e :where [?e {attr} ?v]{val_clause}{neg_clause}])"
-    );
+    let datalog = format!("(query [:find ?e :where [?e {attr} ?v]{val_clause}{neg_clause}])");
 
     let result = db.execute(&datalog);
     // Skip test cases where the generated query fails to parse/evaluate.
@@ -156,8 +154,10 @@ fn arb_value() -> impl Strategy<Value = TestValue> {
 }
 
 fn arb_fact(max_entity: usize) -> impl Strategy<Value = TestFact> {
-    (0..max_entity, arb_attribute(), arb_value()).prop_map(|(entity, attribute, value)| {
-        TestFact { entity, attribute, value }
+    (0..max_entity, arb_attribute(), arb_value()).prop_map(|(entity, attribute, value)| TestFact {
+        entity,
+        attribute,
+        value,
     })
 }
 
