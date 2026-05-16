@@ -68,9 +68,11 @@ Static 4-tier model derived from the existing `selectivity_score()`:
 In both `execute_query()` and `execute_query_with_rules()`, after extracting `not_clauses` and `not_join_clauses` and before the filter loop, sort each by `clause_cost()` ascending:
 
 ```rust
+// WASM omission: small datasets + determinism — see optimizer::selectivity_score().
 #[cfg(not(feature = "wasm"))]
 not_clauses.sort_by_key(|body| optimizer::clause_cost(&WhereClause::Not(body.clone())));
 
+// WASM omission: small datasets + determinism — see optimizer::selectivity_score().
 #[cfg(not(feature = "wasm"))]
 not_join_clauses.sort_by_key(|(vars, body)| {
     optimizer::clause_cost(&WhereClause::NotJoin {
@@ -87,6 +89,9 @@ not_join_clauses.sort_by_key(|(vars, body)| {
 In `apply_or_clauses()`, before evaluating branches in both the fast path (no Not in branches) and the slow path (seeded), sort branches by `branch_cost()` ascending:
 
 ```rust
+// WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+// Note: all branches are still evaluated (no short-circuit); this ordering is
+// infrastructure for #250. See that issue for the short-circuit optimization.
 #[cfg(not(feature = "wasm"))]
 let sorted_branches: Vec<_> = {
     let mut b = branches.to_vec();
@@ -96,13 +101,26 @@ let sorted_branches: Vec<_> = {
 // iterate sorted_branches instead of branches
 ```
 
-**Note**: In the current executor, all Or branches are always evaluated (no short-circuit). Branch ordering is a no-op for correctness and has no measurable performance impact today. It is infrastructure for #250 (short-circuit optimization). A code comment explains this.
-
 ---
 
 ### 3. Evaluator changes — `evaluator.rs`
 
-The `StratifiedEvaluator` mixed-rules loop applies `not`/`not-join` as post-filters in the `'binding:` loop. After extracting `not_clauses` and `not_join_clauses` (which already happens before the `'binding:` loop), sort both collections by `clause_cost()` ascending, gated behind `#[cfg(not(feature = "wasm"))]`. The sort is identical to the executor call sites.
+The `StratifiedEvaluator` mixed-rules loop applies `not`/`not-join` as post-filters in the `'binding:` loop. After extracting `not_clauses` and `not_join_clauses` (which already happens before the `'binding:` loop), sort both collections by `clause_cost()` ascending:
+
+```rust
+// WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+#[cfg(not(feature = "wasm"))]
+not_clauses.sort_by_key(|body| optimizer::clause_cost(&WhereClause::Not(body.clone())));
+
+// WASM omission: small datasets + determinism — see optimizer::selectivity_score().
+#[cfg(not(feature = "wasm"))]
+not_join_clauses.sort_by_key(|(vars, clauses)| {
+    optimizer::clause_cost(&WhereClause::NotJoin {
+        join_vars: vars.clone(),
+        clauses: clauses.clone(),
+    })
+});
+```
 
 ---
 

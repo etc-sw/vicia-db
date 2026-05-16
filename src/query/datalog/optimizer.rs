@@ -39,6 +39,10 @@ fn attr_is_index_bound(a: &AttributeSpec) -> bool {
 
 /// Count the number of non-variable components in a pattern.
 /// Higher score = more selective.
+///
+/// Gated on non-wasm: WASM/browser targets typically work with small datasets where
+/// the overhead of computing scores and sorting can equal or exceed the benefit.
+/// Source order is preserved on WASM for deterministic, debuggable query behaviour.
 #[cfg(not(feature = "wasm"))]
 fn selectivity_score(p: &Pattern) -> u8 {
     let e = !is_variable(&p.entity);
@@ -145,6 +149,7 @@ pub fn plan(
 
     // Stable sort patterns by selectivity descending (non-wasm only).
     // Preserves original order for ties, ensuring deterministic output.
+    // WASM omission: see selectivity_score() — small datasets, determinism.
     #[cfg(not(feature = "wasm"))]
     patterns.sort_by_key(|(clause, _)| {
         if let WhereClause::Pattern(p) = clause {
