@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "minigraf-ffi", "minigraf-c", "minigraf-node"]
+members = [".", "minigraf-ffi", "minigraf-c", "minigraf-node", "fuzz"]
 resolver = "2"
 
 [package]
@@ -74,6 +74,7 @@ pest_derive = "2"
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 wide = "0.7"
+proptest = "1"
 
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
 wasm-bindgen-test = "0.3"
