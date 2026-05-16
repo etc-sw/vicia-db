@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 06842cd54e6438a54a2509966aa47b3763aa08b4daccf7953647c16767de6703 # shrinks to facts = [TestFact { entity: 0, attribute: ":color", value: Str("red") }, TestFact { entity: 0, attribute: ":color", value: Str("red") }, TestFact { entity: 0, attribute: ":color", value: Str("red") }]
+cc 0cb2c60faac9ad670ed1b43ec1d56273127b4c442301d0425c859ef704510102 # shrinks to facts = [TestFact { entity: 0, attribute: ":color", value: Str("red") }, TestFact { entity: 0, attribute: ":color", value: Str("red") }, TestFact { entity: 0, attribute: ":color", value: Str("red") }]
