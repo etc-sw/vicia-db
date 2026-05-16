@@ -196,6 +196,75 @@ pub fn plan(
     result
 }
 
+/// Static 4-tier cardinality estimate for a single pattern.
+///
+/// Derived from selectivity_score but returns u64 cost (lower = cheaper) rather
+/// than a selectivity score. Available on all targets; on WASM the dead_code lint
+/// is suppressed because the sorting call-sites are omitted there.
+#[cfg_attr(feature = "wasm", allow(dead_code))]
+fn pattern_cost(p: &Pattern) -> u64 {
+    let e = !is_variable(&p.entity);
+    let a = attr_is_index_bound(&p.attribute);
+    let v = !is_variable(&p.value);
+    match (e as u8) + (a as u8) + (v as u8) {
+        3 => 1,
+        2 => 10,
+        1 => 100,
+        _ => 10_000,
+    }
+}
+
+/// Estimated cost for a body/branch slice — the minimum `pattern_cost` across all
+/// Pattern clauses, or 0 if the body contains no patterns (expr-only bodies are
+/// cheap pure computation).
+///
+/// Rationale for `min`: In a multi-pattern join the most selective pattern dominates —
+/// the join cannot produce more rows than the smallest input.
+///
+/// Available on all targets; on WASM the dead_code lint is suppressed because
+/// the sorting call-sites are omitted there.
+#[cfg_attr(feature = "wasm", allow(dead_code))]
+pub fn branch_cost(branch: &[WhereClause]) -> u64 {
+    branch
+        .iter()
+        .filter_map(|c| {
+            if let WhereClause::Pattern(p) = c {
+                Some(pattern_cost(p))
+            } else {
+                None
+            }
+        })
+        .min()
+        .unwrap_or(0)
+}
+
+/// Estimated evaluation cost for any `WhereClause`.
+///
+/// | Clause type        | Cost |
+/// |--------------------|------|
+/// | `Pattern`          | `pattern_cost(p)` |
+/// | `Expr`             | 0 (pure computation) |
+/// | `Not(body)`        | `branch_cost(body)` |
+/// | `NotJoin{clauses}` | `branch_cost(clauses)` |
+/// | `Or(branches)`     | sum of `branch_cost` per branch |
+/// | `OrJoin{branches}` | sum of `branch_cost` per branch |
+/// | other              | `u64::MAX` (defensive; not expected in practice) |
+///
+/// Available on all targets; on WASM the dead_code lint is suppressed because
+/// the sorting call-sites are omitted there.
+#[cfg_attr(feature = "wasm", allow(dead_code))]
+pub fn clause_cost(clause: &WhereClause) -> u64 {
+    match clause {
+        WhereClause::Pattern(p) => pattern_cost(p),
+        WhereClause::Expr { .. } => 0,
+        WhereClause::Not(body) => branch_cost(body),
+        WhereClause::NotJoin { clauses, .. } => branch_cost(clauses),
+        WhereClause::Or(branches) => branches.iter().map(|b| branch_cost(b)).sum(),
+        WhereClause::OrJoin { branches, .. } => branches.iter().map(|b| branch_cost(b)).sum(),
+        _ => u64::MAX,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +524,197 @@ mod tests {
             matches!(planned[1].0, WhereClause::Expr { .. }),
             "Expr with unbound var must be last"
         );
+    }
+
+    // ── cost model tests ──────────────────────────────────────────────────
+    // These tests call pattern_cost / branch_cost / clause_cost which are
+    // unconditional (available on all targets).
+
+    #[test]
+    fn test_pattern_cost_fully_bound() {
+        // entity bound (UUID), attribute real keyword, value bound literal — 3 bound → cost 1
+        let p = Pattern::new(
+            EdnValue::Uuid(Uuid::new_v4()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        );
+        assert_eq!(pattern_cost(&p), 1);
+    }
+
+    #[test]
+    fn test_pattern_cost_two_bound() {
+        // attribute + value bound, entity variable — 2 bound → cost 10
+        let p = Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        );
+        assert_eq!(pattern_cost(&p), 10);
+    }
+
+    #[test]
+    fn test_pattern_cost_one_bound() {
+        // only attribute bound — 1 bound → cost 100
+        let p = Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::Symbol("?v".to_string()),
+        );
+        assert_eq!(pattern_cost(&p), 100);
+    }
+
+    #[test]
+    fn test_pattern_cost_unbound() {
+        // all variables — 0 bound → cost 10_000
+        let p = Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Symbol("?a".to_string()),
+            EdnValue::Symbol("?v".to_string()),
+        );
+        assert_eq!(pattern_cost(&p), 10_000);
+    }
+
+    #[test]
+    fn test_clause_cost_pattern_two_bound() {
+        // clause_cost delegates to pattern_cost for Pattern variant
+        // attr + value bound = 2 → cost 10
+        let p = Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        );
+        assert_eq!(clause_cost(&WhereClause::Pattern(p)), 10);
+    }
+
+    #[test]
+    fn test_clause_cost_expr_is_zero() {
+        // Expr is pure computation — cost 0
+        let clause = WhereClause::Expr {
+            expr: Expr::Lit(Value::Integer(42)),
+            binding: None,
+        };
+        assert_eq!(clause_cost(&clause), 0);
+    }
+
+    #[test]
+    fn test_clause_cost_not_body_uses_min() {
+        // Not body: one cost-10 pattern + one cost-10_000 pattern → min = 10
+        let selective = Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        );
+        let full_scan = Pattern::new(
+            EdnValue::Symbol("?x".to_string()),
+            EdnValue::Symbol("?a".to_string()),
+            EdnValue::Symbol("?v".to_string()),
+        );
+        let clause = WhereClause::Not(vec![
+            WhereClause::Pattern(selective),
+            WhereClause::Pattern(full_scan),
+        ]);
+        assert_eq!(clause_cost(&clause), 10);
+    }
+
+    #[test]
+    fn test_clause_cost_not_body_expr_only_is_zero() {
+        // Not body with no patterns (expr only) → cost 0
+        let clause = WhereClause::Not(vec![WhereClause::Expr {
+            expr: Expr::Lit(Value::Integer(1)),
+            binding: None,
+        }]);
+        assert_eq!(clause_cost(&clause), 0);
+    }
+
+    #[test]
+    fn test_branch_cost_empty_branch() {
+        // Empty branch → 0
+        assert_eq!(branch_cost(&[]), 0);
+    }
+
+    #[test]
+    fn test_branch_cost_expr_only_is_zero() {
+        // Branch with only Expr clauses → 0
+        let branch = vec![WhereClause::Expr {
+            expr: Expr::Lit(Value::Integer(99)),
+            binding: None,
+        }];
+        assert_eq!(branch_cost(&branch), 0);
+    }
+
+    #[test]
+    fn test_clause_cost_or_sums_branch_costs() {
+        // Or with two branches:
+        // branch 1: one pattern with cost 10 (attr+value bound)
+        // branch 2: one pattern with cost 100 (attr only bound)
+        // clause_cost(Or) = sum = 110
+        let b1 = vec![WhereClause::Pattern(Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        ))];
+        let b2 = vec![WhereClause::Pattern(Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/age".to_string()),
+            EdnValue::Symbol("?v".to_string()),
+        ))];
+        let clause = WhereClause::Or(vec![b1, b2]);
+        assert_eq!(clause_cost(&clause), 110); // 10 + 100
+    }
+
+    #[test]
+    fn test_clause_cost_not_join_uses_branch_cost() {
+        // NotJoin with one selective pattern (cost 10) → cost 10
+        let p = Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        );
+        let clause = WhereClause::NotJoin {
+            join_vars: vec!["?e".to_string()],
+            clauses: vec![WhereClause::Pattern(p)],
+        };
+        assert_eq!(clause_cost(&clause), 10);
+    }
+
+    #[test]
+    fn test_clause_cost_or_join_sums_branch_costs() {
+        // OrJoin with two branches: cost 10 + cost 100 = 110
+        let b1 = vec![WhereClause::Pattern(Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        ))];
+        let b2 = vec![WhereClause::Pattern(Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/age".to_string()),
+            EdnValue::Symbol("?v".to_string()),
+        ))];
+        let clause = WhereClause::OrJoin {
+            join_vars: vec!["?e".to_string()],
+            branches: vec![b1, b2],
+        };
+        assert_eq!(clause_cost(&clause), 110);
+    }
+
+    #[test]
+    fn test_clause_cost_not_body_fully_bound_min_is_one() {
+        // Not body: one fully-bound pattern (cost 1) + one full-scan (cost 10_000)
+        // clause_cost → min = 1
+        let fully_bound = Pattern::new(
+            EdnValue::Uuid(Uuid::new_v4()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::String("Alice".to_string()),
+        );
+        let full_scan = Pattern::new(
+            EdnValue::Symbol("?x".to_string()),
+            EdnValue::Symbol("?a".to_string()),
+            EdnValue::Symbol("?v".to_string()),
+        );
+        let clause = WhereClause::Not(vec![
+            WhereClause::Pattern(full_scan),
+            WhereClause::Pattern(fully_bound),
+        ]);
+        assert_eq!(clause_cost(&clause), 1);
     }
 }
