@@ -1602,6 +1602,16 @@ Push `Expr` predicate clauses (e.g. `[(> ?age 30)]`) down to filter bindings as 
 - Migration tools for any format changes
 - Long-term support
 
+### v2.0 — File Format Policy
+
+**v2.0 supports file format v7 only.** Support for v1–v6 is dropped. The v1–v6 → v7 auto-migration code in `persistent_facts.rs` can be removed when cutting 2.0. Any database that was opened at least once under a v1.x release will already be on v7; there are no known users on older formats.
+
+v2.0 scope (GitHub milestone "2.0"):
+- `lag`/`lead` window functions (#182)
+- Sliding row frames — `:rows N preceding` (#183)
+- PreparedQuery over UniFFI (#181)
+- UDF registration over UniFFI (#180)
+
 ---
 
 ## Decision Framework
@@ -1662,6 +1672,9 @@ When evaluating features, ask:
 - ✅ Phase 8.3d: Complete (April 2026) — Node.js `minigraf` on npm, 795 tests
 - ✅ Phase 8: Complete (May 2026) — v1.0.0
 - ✅ Wave 1 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
+- ✅ Wave 2 Performance: Complete (May 2026) — secondary perf (#207, #206, #205, #229)
+- ✅ Wave 3 Reliability & Testing: Complete (May 2026) — WAL, storage/migration, query correctness, long-haul, CI coverage (#209, #210, #214, #215, #216, #217, #212, #213, #221, #220, #219)
+- ✅ Wave 4 Deferred Features: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to Wave 6
 - 🎯 Phase 9: Ongoing (Ecosystem — integration examples, cookbook, GraphRAG/LangChain examples)
 
 **Note**: This is a hobby project. Timeline is flexible but realistic.
@@ -1697,4 +1710,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: Wave 1 Performance Complete (May 2026) — 850 tests passing, v1.0.0
+**Last Updated**: Wave 4 Complete (May 2026) — 850 tests passing, v1.0.0; milestone 2.0 issues queued; #231 repo-split is next gate
