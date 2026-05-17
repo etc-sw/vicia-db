@@ -1683,18 +1683,21 @@ When evaluating features, ask:
 
 ## Current Focus
 
-**Phase 8**: ✅ COMPLETE — v1.0.0 released (May 2026)
+**Current release**: v1.1.1 (May 2026) — drop-in replacement for v1.0.0; all changes internal
 
-**All Phase 8 sub-phases complete**:
-- ✅ 8.1a: Browser WASM (`@minigraf/browser` npm) — v0.20.0
-- ✅ 8.1b: WASI (`wasm32-wasip1`) + `@minigraf/wasi` npm — v1.0.0
-- ✅ 8.2: Mobile (Android `.aar` + iOS `.xcframework`) — v0.21.0
-- ✅ 8.3a: Python (PyPI) — v0.22.0
-- ✅ 8.3b: Java/JVM (Maven Central) — v0.23.0
-- ✅ 8.3c: C FFI (GitHub Releases) — v0.24.0
-- ✅ 8.3d: Node.js (npm) — v0.25.0
+**Completed waves**:
+- ✅ Phase 8 / v1.0.0: Cross-platform release (WASM, WASI, Mobile, Python, Java, C FFI, Node.js)
+- ✅ Wave 1: Performance — hash-join, selective B+Tree lookup (#202–#204, #208)
+- ✅ Wave 2: Optimizer & Benchmarks — predicate push-down, cost-based ordering, SIMD analysis (#205–#207, #229)
+- ✅ Wave 3: Reliability — WAL fault injection, migration matrix, index corruption resilience, XTDB/Datomic compat, coverage gates (#209, #210, #212–#217, #219–#221)
+- ✅ Wave 4: Deferred Features — #180, #181, #182, #183 tagged milestone 2.0; #187 closed; #201 deferred
 
-**Next**: Phase 9 — Ecosystem & Tooling (Wave 3 Reliability complete; moving to ecosystem, examples, and cookbook)
+**Next gate**: #231 — Repo Split (gates Wave 5 and beyond; ecosystem work is cleaner post-split)
+
+**Pending waves** (post-split):
+- Wave 5: Query profiler (#185) — stays in this repo; #184 → `minigraf-inspector`, #186 → `minigraf-visualizer`
+- Wave 6+7: Integration examples (#193–#200) → `minigraf-examples` repo (stub created)
+- Wave 8: Documentation — cookbook (#190), perf tuning guide (#191), error message guide (#192)
 
 **Key Decisions Made**:
 - ✅ Datalog query language (simpler, better for temporal)
@@ -1705,6 +1708,7 @@ When evaluating features, ask:
 - ✅ Packed pages over one-per-page (philosophy: small binary, efficient storage)
 - ✅ Approximate LRU (read-lock on hits — avoids write-lock contention)
 - ✅ Phase 8 = v1.0.0 (cross-platform completion is the 1.0 milestone)
+- ✅ v2.0 = v7-only file format; migration code for v1–v6 dropped
 
 See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for specific tasks.
 
