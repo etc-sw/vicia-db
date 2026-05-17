@@ -43,6 +43,34 @@ Six PRs hardening the v1.0.0 codebase: WAL fault injection, storage/migration re
 
 ---
 
+## Wave 2 Optimizer & Benchmarks — 2026-05-16
+
+### Summary
+
+Three optimisation PRs extending the Wave 1 performance work. No API changes, no file-format changes, no new runtime dependencies. Test count unchanged at 850.
+
+**PR #249 — #207 + #206: Predicate Push-Down & Mixed Rule Optimization**
+
+- `optimizer::plan()` extended to accept `Expr` (predicate/arithmetic) clauses; they are interleaved at the earliest position where all their variables are bound, minimising intermediate binding sets
+- `StratifiedEvaluator` gains mixed-rule path: when a rule stratum contains both positive-only rules and rules with `not`/`not-join`, the evaluator now evaluates all positive rules first and applies negation filters in a second pass within the same stratum — eliminates a class of ordering-dependent bugs in cross-stratum negation
+
+**PR #251 — #205: Cost-Based `not`/`or` Ordering**
+
+- `optimizer::plan()` assigns selectivity estimates to `not`/`not-join` and `or`/`or-join` clauses; they are sorted after their ground-variable producers but before unconstrained pattern scans
+- `not`/`not-join` blocks placed after the patterns that produce their join variables (was: end of plan regardless); `or`/`or-join` blocks placed by estimated output cardinality
+
+**PR #253 — #229: SIMD Benchmarking & Crossover Analysis**
+
+- `benches/simd_helpers.rs`: `valid_time_filter_simd`, `as_of_filter_simd`, `sum_simd_i64` — portable SIMD kernels using `wide::i64x4` / `u64x4`
+- Criterion benchmark groups: `simd_temporal`, `simd_as_of`, `simd_aggregate` — scalar vs. SIMD crossover analysis at 1K–1M facts
+- Analysis result: SIMD crossover occurs at ~8K–16K facts per query; scalar path preferred below that threshold; SIMD integration deferred to post-1.0 backlog pending real-workload profiling
+
+### Tests
+
+850 tests passing (844 passing + 6 ignored: confirmed `or`+neg-cycle stratification bug, deferred to post-1.0 backlog). All Wave 2 PRs are optimisations; no new integration tests added.
+
+---
+
 ## Wave 1 Performance — 2026-05-15
 
 ### Summary

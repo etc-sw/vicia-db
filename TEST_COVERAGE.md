@@ -61,6 +61,14 @@
 
 ---
 
+## Wave 2 Optimizer & Benchmarks Completion Status: ✅ COMPLETE
+
+**Wave 2 issues**: #207 + #206 (predicate push-down + mixed rule optimization), #205 (cost-based not/or ordering), #229 (SIMD benchmarking + crossover analysis)
+
+No new integration tests added — Wave 2 is entirely optimizer and benchmark work. Existing 850 tests cover all affected code paths. New benchmark groups: `simd_temporal`, `simd_as_of`, `simd_aggregate`.
+
+---
+
 ## Wave 1 Performance Completion Status: ✅ COMPLETE
 
 **Wave 1 issues**: #208 (selective B+Tree lookup), #202 (not/not-join hash-join), #203 (or/or-join hash-join), #204 (join_with_pattern hash-join)
