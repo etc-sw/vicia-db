@@ -1662,6 +1662,8 @@ When evaluating features, ask:
 - ✅ Phase 8.3d: Complete (April 2026) — Node.js `minigraf` on npm, 795 tests
 - ✅ Phase 8: Complete (May 2026) — v1.0.0
 - ✅ Wave 1 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
+- ✅ Wave 2 Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
+- ✅ Wave 3 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 935 tests
 - 🎯 Phase 9: Ongoing (Ecosystem — integration examples, cookbook, GraphRAG/LangChain examples)
 
 **Note**: This is a hobby project. Timeline is flexible but realistic.
@@ -1681,7 +1683,7 @@ When evaluating features, ask:
 - ✅ 8.3c: C FFI (GitHub Releases) — v0.24.0
 - ✅ 8.3d: Node.js (npm) — v0.25.0
 
-**Next**: Phase 9 — Ecosystem & Tooling (post-release optimisation and benchmarking first)
+**Next**: Phase 9 — Ecosystem & Tooling (Wave 3 Reliability complete; moving to ecosystem, examples, and cookbook)
 
 **Key Decisions Made**:
 - ✅ Datalog query language (simpler, better for temporal)
@@ -1697,4 +1699,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: Wave 1 Performance Complete (May 2026) — 850 tests passing, v1.0.0
+**Last Updated**: Wave 3 Reliability Complete (May 2026) — 935 tests passing, v1.0.0
