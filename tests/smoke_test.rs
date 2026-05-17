@@ -141,7 +141,10 @@ fn smoke_large_graph_10_cycles() {
             .prepare("(query [:find ?e :where [?e :region $region]])")
             .unwrap();
         let r0 = prep
-            .execute(&[("region", BindValue::Val(Value::String("region-0".to_string())))])
+            .execute(&[(
+                "region",
+                BindValue::Val(Value::String("region-0".to_string())),
+            )])
             .unwrap();
         let n_region0 = count_results(r0);
         // region-0: entities where i % 8 == 0 → 0,8,16,...,496 → 63 entities.
@@ -151,8 +154,10 @@ fn smoke_large_graph_10_cycles() {
         );
 
         // Invariant 7: write a new fact each cycle.
-        db.execute(&format!(r#"(transact [[:cycle{cycle} :cycle-fact {cycle}]])"#))
-            .unwrap();
+        db.execute(&format!(
+            r#"(transact [[:cycle{cycle} :cycle-fact {cycle}]])"#
+        ))
+        .unwrap();
 
         // Checkpoint to flush all to disk.
         db.checkpoint().unwrap();
