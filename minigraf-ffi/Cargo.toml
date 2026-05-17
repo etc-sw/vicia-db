@@ -3,6 +3,12 @@ name = "minigraf-ffi"
 version = "1.1.1"
 edition = "2024"
 description = "UniFFI bridge for Minigraf — bi-temporal graph database"
+license = "MIT OR Apache-2.0"
+authors = ["Aditya Mukhopadhyay"]
+repository = "https://github.com/project-minigraf/minigraf"
+documentation = "https://docs.rs/minigraf-ffi"
+keywords = ["graph", "datalog", "bitemporal", "embedded", "database"]
+categories = ["database-implementations", "embedded"]
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
