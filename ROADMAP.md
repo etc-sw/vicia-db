@@ -1673,7 +1673,7 @@ When evaluating features, ask:
 - ✅ Phase 8: Complete (May 2026) — v1.0.0
 - ✅ Wave 1 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
 - ✅ Wave 2 Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
-- ✅ Wave 3 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 935 tests
+- ✅ Wave 3 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 962 tests
 - ✅ Wave 4 Deferred Features: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to Wave 6
 - 🎯 Phase 9: Ongoing (Ecosystem — integration examples, cookbook, GraphRAG/LangChain examples)
 
@@ -1716,4 +1716,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: #231 Repo Split Complete (May 2026) — 935 tests passing, v1.1.1; Phase 1 bindings (Python, Node, WASM) in separate repos; Wave 5 is next
+**Last Updated**: #231 Repo Split Complete (May 2026) — 962 tests passing, v1.1.1; Phase 1 bindings (Python, Node, WASM) in separate repos; Wave 5 is next
