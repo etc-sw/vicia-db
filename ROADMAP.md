@@ -1602,6 +1602,16 @@ Push `Expr` predicate clauses (e.g. `[(> ?age 30)]`) down to filter bindings as 
 - Migration tools for any format changes
 - Long-term support
 
+### v2.0 — File Format Policy
+
+**v2.0 supports file format v7 only.** Support for v1–v6 is dropped. The v1–v6 → v7 auto-migration code in `persistent_facts.rs` can be removed when cutting 2.0. Any database that was opened at least once under a v1.x release will already be on v7; there are no known users on older formats.
+
+v2.0 scope (GitHub milestone "2.0"):
+- `lag`/`lead` window functions (#182)
+- Sliding row frames — `:rows N preceding` (#183)
+- PreparedQuery over UniFFI (#181)
+- UDF registration over UniFFI (#180)
+
 ---
 
 ## Decision Framework
@@ -1664,6 +1674,7 @@ When evaluating features, ask:
 - ✅ Wave 1 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
 - ✅ Wave 2 Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
 - ✅ Wave 3 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 935 tests
+- ✅ Wave 4 Deferred Features: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to Wave 6
 - 🎯 Phase 9: Ongoing (Ecosystem — integration examples, cookbook, GraphRAG/LangChain examples)
 
 **Note**: This is a hobby project. Timeline is flexible but realistic.
@@ -1699,4 +1710,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: Wave 3 Reliability Complete (May 2026) — 935 tests passing, v1.0.0
+**Last Updated**: Wave 4 Complete (May 2026) — 935 tests passing, v1.0.0; milestone 2.0 issues queued; #231 repo-split is next gate

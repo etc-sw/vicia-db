@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add XTDB and Datomic compatibility test suites (#219) by porting semantically equivalent test cases from each corpus, with license review documented inline.
+**Goal:** Add XTDB and Datomic compatibility test suites (#221) by porting semantically equivalent test cases from each corpus, with license review documented inline.
 
 **Architecture:** Two new test files — `tests/xtdb_compat_test.rs` and `tests/datomic_compat_test.rs`. Each test case is a semantic port of a known test from the source corpus. XTDB (Apache 2.0) allows direct semantic porting; Datomic test material is restricted so all cases are independently rewritten from the semantic intent. Unsupported or intentionally divergent cases are listed with rationale.
 
@@ -10,7 +10,7 @@
 
 **Prerequisites:** PRs 2, 3, 4, 5 all merged
 
-**Closes:** #219
+**Closes:** #221
 
 ---
 
@@ -58,7 +58,7 @@ If the XTDB repo is inaccessible, the tests below are independently written sema
 Create `tests/xtdb_compat_test.rs`:
 
 ```rust
-//! XTDB compatibility tests (#219).
+//! XTDB compatibility tests (#221).
 //!
 //! License: XTDB is Apache 2.0. These tests are semantic ports of query
 //! concepts from the XTDB documentation and test suite. Each test is
@@ -338,7 +338,7 @@ Expected: all tests pass. If any fail due to syntax differences (e.g., `:valid-a
 
 ```bash
 git add tests/xtdb_compat_test.rs
-git commit -m "test(compat): add XTDB compatibility tests (#219)"
+git commit -m "test(compat): add XTDB compatibility tests (#221)"
 ```
 
 ---
@@ -355,7 +355,7 @@ All Datomic-inspired tests are independently written semantic ports — they tes
 Create `tests/datomic_compat_test.rs`:
 
 ```rust
-//! Datomic-inspired compatibility tests (#219).
+//! Datomic-inspired compatibility tests (#221).
 //!
 //! License notice: Datomic is a commercial product. These tests are
 //! INDEPENDENTLY WRITTEN semantic ports — they test concepts from Datomic's
@@ -630,7 +630,7 @@ Expected: all tests pass.
 
 ```bash
 git add tests/datomic_compat_test.rs
-git commit -m "test(compat): add Datomic-inspired compatibility tests (#219)"
+git commit -m "test(compat): add Datomic-inspired compatibility tests (#221)"
 ```
 
 ---
@@ -642,11 +642,11 @@ git commit -m "test(compat): add Datomic-inspired compatibility tests (#219)"
 ```bash
 git push -u origin HEAD
 gh pr create \
-  --title "test(compat): XTDB and Datomic compatibility test corpus (#219)" \
+  --title "test(compat): XTDB and Datomic compatibility test corpus (#221)" \
   --body "$(cat <<'EOF'
 ## Wave 3 PR 6 — Compat Gate
 
-Closes #219.
+Closes #221.
 
 ### XTDB (`tests/xtdb_compat_test.rs`)
 - License: Apache 2.0 — semantic ports permitted
@@ -678,8 +678,8 @@ After this PR merges, all 11 Wave 3 issues are closed:
 - ✅ #215 Migration matrix fixtures
 - ✅ #216 Index corruption recovery
 - ✅ #217 Concurrency stress tests
-- ✅ #219 XTDB/Datomic compat corpus
+- ✅ #221 XTDB/Datomic compat corpus
 - ✅ #220 Long-haul smoke suite
-- ✅ #221 Cross-feature property tests
+- ✅ #212 Cross-feature property tests
 
 Update `CLAUDE.md` test count and `CHANGELOG.md` with Wave 3 completion after all PRs merge.
