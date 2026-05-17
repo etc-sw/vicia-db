@@ -1710,4 +1710,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: Wave 4 Complete (May 2026) — 935 tests passing, v1.0.0; milestone 2.0 issues queued; #231 repo-split is next gate
+**Last Updated**: Wave 4 Complete (May 2026) — 935 tests passing, v1.1.1; milestone 2.0 issues queued; #231 repo-split is next gate
