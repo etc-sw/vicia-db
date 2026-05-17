@@ -1673,7 +1673,7 @@ When evaluating features, ask:
 - ✅ Phase 8: Complete (May 2026) — v1.0.0
 - ✅ Wave 1 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
 - ✅ Wave 2 Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
-- ✅ Wave 3 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 935 tests
+- ✅ Wave 3 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 962 tests
 - ✅ Wave 4 Deferred Features: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to Wave 6
 - 🎯 Phase 9: Ongoing (Ecosystem — integration examples, cookbook, GraphRAG/LangChain examples)
 
@@ -1692,9 +1692,11 @@ When evaluating features, ask:
 - ✅ Wave 3: Reliability — WAL fault injection, migration matrix, index corruption resilience, XTDB/Datomic compat, coverage gates (#209, #210, #212–#217, #219–#221)
 - ✅ Wave 4: Deferred Features — #180, #181, #182, #183 tagged milestone 2.0; #187 closed; #201 deferred
 
-**Next gate**: #231 — Repo Split (gates Wave 5 and beyond; ecosystem work is cleaner post-split)
+**Completed gate**: #231 — Repo Split complete (Phase 1: Python, Node, WASM split out; Phase 2: Java/Android/Swift deferred)
 
-**Pending waves** (post-split):
+**Next**: Wave 5 — Query profiler (#185); #184 → `minigraf-inspector`, #186 → `minigraf-visualizer`
+
+**Pending waves**:
 - Wave 5: Query profiler (#185) — stays in this repo; #184 → `minigraf-inspector`, #186 → `minigraf-visualizer`
 - Wave 6+7: Integration examples (#193–#200) → `minigraf-examples` repo (stub created)
 - Wave 8: Documentation — cookbook (#190), perf tuning guide (#191), error message guide (#192)
@@ -1714,4 +1716,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: Wave 4 Complete (May 2026) — 935 tests passing, v1.1.1; milestone 2.0 issues queued; #231 repo-split is next gate
+**Last Updated**: #231 Repo Split Complete (May 2026) — 962 tests passing, v1.1.1; Phase 1 bindings (Python, Node, WASM) in separate repos; Wave 5 is next
