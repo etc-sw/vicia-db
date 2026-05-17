@@ -1,0 +1,26 @@
+name: Smoke Suite (nightly)
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Long-haul smoke suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run smoke suite
+        run: cargo test --test smoke_test -- --include-ignored --nocapture
+        env:
+          RUST_BACKTRACE: 1
