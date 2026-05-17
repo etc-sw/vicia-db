@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Wave 3 Reliability — 2026-05-17
+
+### Summary
+
+Six PRs hardening the v1.0.0 codebase: WAL fault injection, storage/migration resilience, query correctness (property-based + coverage gates), long-haul smoke testing, and XTDB/Datomic semantic compatibility. No API changes, no file-format changes, no new runtime dependencies.
+
+**PR #254 — #209 + #210 + #214: WAL Fault Injection**
+
+- `FaultInjectingBackend` (`#[cfg(test)]`-only wrapper around `StorageBackend`) — configurable write-fail, flush-fail, read-fault injection
+- 9 new WAL fault tests: write-fail propagation, flush-fail without data corruption, read-fault on WAL replay, CRC corruption discard, checkpoint atomicity under backend failure, partial checkpoint recovery via WAL replay, multi-writer serialisation, concurrent write+checkpoint, backend error propagation as `Err` not panic
+
+**PR #257 — #215 + #216 + #217: Storage & Migration Resilience**
+
+- `tests/migration_matrix_test.rs` — 5 migration tests: v7 round-trip, v3 empty migrate, corrupt magic returns `Err`, unsupported version returns `Err`, WAL replay idempotent
+- `tests/index_corruption_test.rs` — 5 corruption-resilience tests: checksum mismatch triggers index rebuild, btree leaf/internal corrupt pages return `Err` without panic, root pointer mismatch handled, non-critical corruption still serves queries on good data
+- 5 new concurrency stress tests in `tests/concurrency_test.rs`: stress readers during writer, failed write then success, rollback after partial work, open/write/checkpoint/query loop per thread, nightly stress loop (`#[ignore]`)
+
+**PR #256 — #212 + #213 + #219: Property-Based Testing & Coverage Gates**
+
+- `tests/property_test.rs` (proptest, `cfg(not(wasm32))`): 3 property tests — EAV model correctness vs naive reference evaluator, bi-temporal monotonicity, retract visibility invariant
+- `.github/workflows/coverage-gates.yml` — per-module branch coverage thresholds; CI fails if coverage drops below gate
+
+**PR #258 — #220: Long-Haul Smoke Suite**
+
+- `tests/smoke_test.rs` (`#[ignore]` nightly): `smoke_large_graph_10_cycles` — 500 entities × 10 attributes × 10 update cycles; 7 invariants: active count (333), retracted count, fact count bounds, temporal snapshot integrity, prepared query consistency, recursive rule transitive closure, WAL checkpoint round-trip
+- `.github/workflows/smoke.yml` — nightly 5am UTC, 15-min timeout, runs `--include-ignored`
+
+**PR #259 — #221: XTDB & Datomic Compatibility Corpus**
+
+- `tests/xtdb_compat_test.rs` — 10 semantic ports (Apache 2.0): EAV, tx-time `:as-of`, valid-time `:valid-at`, retraction (current + historical), Datalog join, negation, recursive rules, parameterised queries, combined bi-temporal
+- `tests/datomic_compat_test.rs` — 9 independently written semantic ports: datom model, multi-entity attribute, tx-time `:as-of`, retract-entity, multi-variable `:find`, ground-value binding, parameterised query (prepared), named reusable rules, predicate expression filter
+
+### Tests
+
+935 tests passing (943 total, 8 ignored: 6 or+neg-cycle stratification doc tests, 1 nightly concurrency stress, 1 nightly smoke).
+
+---
+
 ## Wave 1 Performance — 2026-05-15
 
 ### Summary
