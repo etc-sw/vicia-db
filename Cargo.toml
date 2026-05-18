@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "minigraf-ffi", "minigraf-c"]
+members = ["."]
 exclude = ["fuzz"]
 resolver = "2"
 
