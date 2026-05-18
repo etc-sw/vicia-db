@@ -27,6 +27,7 @@ jobs:
         run: cargo tarpaulin --out Xml --timeout 300 --fail-under 75 --exclude-files "src/main.rs"
 
       - name: Upload coverage to Codecov
+        if: github.actor != 'dependabot[bot]'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
