@@ -1328,8 +1328,7 @@ MinigrafKit-v0.9.0.zip            ← Swift Package Manager checksum source
 **Features**:
 - 🎯 Database inspector/debugger
 - 🎯 Query profiler
-- 🎯 Time travel visualizer
-- 🎯 Migration tools
+- 🎯 Time travel visualizer (separate repo: [minigraf-visualizer](https://github.com/project-minigraf/minigraf-visualizer))
 
 ### 9.2 Documentation
 
@@ -1599,7 +1598,7 @@ Push `Expr` predicate clauses (e.g. `[(> ?age 30)]`) down to filter bindings as 
 **Stability Promise**: After v1.0.0, we commit to:
 - Backwards-compatible file format (decades)
 - Stable public API (semantic versioning)
-- Migration tools for any format changes
+- Built-in auto-migration on open (v7 is the baseline; v1–v6 migration dropped in v2.0)
 - Long-term support
 
 ### v2.0 — File Format Policy
