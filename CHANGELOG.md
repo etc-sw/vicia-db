@@ -63,7 +63,7 @@ Drop-in replacement for v1.0.0. No file-format changes, no public API changes, n
 - Grammar conformance test harness: pest shadow grammar + EDN corpus (#233)
 - CI: codecov-action v3→v5, actions-rs→dtolnay migration
 
-## Wave 3 Reliability — 2026-05-17
+## Post-1.0 Reliability — 2026-05-17
 
 ### Summary
 
@@ -101,11 +101,11 @@ Six PRs hardening the v1.0.0 codebase: WAL fault injection, storage/migration re
 
 ---
 
-## Wave 2 Optimizer & Benchmarks — 2026-05-16
+## Post-1.0 Optimizer & Benchmarks — 2026-05-16
 
 ### Summary
 
-Three optimisation PRs extending the Wave 1 performance work. No API changes, no file-format changes, no new runtime dependencies. Test count unchanged at 850.
+Three optimisation PRs extending the post-1.0 performance work. No API changes, no file-format changes, no new runtime dependencies. Test count unchanged at 850.
 
 **PR #249 — #207 + #206: Predicate Push-Down & Mixed Rule Optimization**
 
@@ -125,11 +125,11 @@ Three optimisation PRs extending the Wave 1 performance work. No API changes, no
 
 ### Tests
 
-850 tests passing (844 passing + 6 ignored: confirmed `or`+neg-cycle stratification bug, deferred to post-1.0 backlog). All Wave 2 PRs are optimisations; no new integration tests added.
+850 tests passing (844 passing + 6 ignored: confirmed `or`+neg-cycle stratification bug, deferred to post-1.0 backlog). All optimizer PRs are optimisations; no new integration tests added.
 
 ---
 
-## Wave 1 Performance — 2026-05-15
+## Post-1.0 Performance — 2026-05-15
 
 ### Summary
 

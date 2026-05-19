@@ -1326,20 +1326,22 @@ MinigrafKit-v0.9.0.zip            ← Swift Package Manager checksum source
 ### 9.1 Developer Tools
 
 **Features**:
-- 🎯 Database inspector/debugger
+- 🎯 Database inspector/debugger (separate repo: [minigraf-inspector](https://github.com/project-minigraf/minigraf-inspector))
 - 🎯 Query profiler
 - 🎯 Time travel visualizer (separate repo: [minigraf-visualizer](https://github.com/project-minigraf/minigraf-visualizer))
 
 ### 9.2 Documentation
 
 **Features**:
-- 🎯 Complete API reference (auto-generated via docs.rs; supplement with narrative guides)
-- 🎯 Datalog language specification
-- 🎯 Cookbook: common patterns (graph traversal, audit queries, time travel idioms)
-- 🎯 Performance tuning guide
+- ✅ API reference — auto-generated and published on [docs.rs/minigraf](https://docs.rs/minigraf)
+- ✅ Datalog language specification — full EBNF grammar + semantic constraints in [wiki: Datalog Reference](https://github.com/project-minigraf/minigraf/wiki/Datalog-Reference)
+- ✅ Cookbook: common patterns (graph traversal, audit queries, time travel idioms) (#190)
+- ✅ Performance tuning guide (#191)
 - ✅ Error message guide — every user-facing error has a documented cause and resolution (#192)
 
 ### 9.3 Integration Examples
+
+**Tracked in**: [`minigraf-examples`](https://github.com/project-minigraf/minigraf-examples) — fully delegated; no remaining work in this repo.
 
 **Goal**: Close the gap between "interesting concept" and "I can use this today" for the agent and mobile audiences.
 
@@ -1349,7 +1351,7 @@ MinigrafKit-v0.9.0.zip            ← Swift Package Manager checksum source
 - 🎯 LlamaIndex integration example — Minigraf as a knowledge graph store
 - 🎯 Standalone `examples/` crate with annotated end-to-end scenarios (agentic memory, offline-first mobile, audit log)
 
-**Note**: These are documentation and example artifacts, not library features. They are the difference between "technically impressive" and "I can adopt this." Prioritise before or alongside the Phase 8 platform launch so the new audiences arriving via npm/PyPI/Swift Package Index have something runnable to start from.
+**Note**: These are documentation and example artifacts, not library features. They are tracked and maintained in the `minigraf-examples` repository.
 
 ### 9.4 Ecosystem Libraries
 
@@ -1401,7 +1403,7 @@ branched_db.execute("(transact [[:x :y 1]])")?;
 
 ## Post-1.0 Performance Backlog
 
-Known O(N²) hotspots discovered during benchmarking (v0.13.0). Wave 1 (#208, #202, #203, #204) eliminated four of them.
+Known O(N²) hotspots discovered during benchmarking (v0.13.0). The first post-1.0 performance batch (#208, #202, #203, #204) eliminated four of them.
 
 ### ✅ Hash-Join for Negation Inner Loop (#202) — COMPLETE
 
@@ -1670,11 +1672,12 @@ When evaluating features, ask:
 - ✅ Phase 8.3c: Complete (April 2026) — C FFI `minigraf.h` + platform tarballs, 795 tests
 - ✅ Phase 8.3d: Complete (April 2026) — Node.js `minigraf` on npm, 795 tests
 - ✅ Phase 8: Complete (May 2026) — v1.0.0
-- ✅ Wave 1 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
-- ✅ Wave 2 Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
-- ✅ Wave 3 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 962 tests
-- ✅ Wave 4 Deferred Features: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to 2.0
-- 🎯 Phase 9: Ongoing (Ecosystem — tracked in `minigraf-examples` repo; documentation #190–#192 remain here)
+- ✅ Post-1.0 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
+- ✅ Post-1.0 Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
+- ✅ Post-1.0 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 962 tests
+- ✅ Post-1.0 Deferred Features: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to 2.0
+- ✅ Post-1.0 Documentation: Complete (May 2026) — cookbook (#190), perf tuning guide (#191), error message guide (#192)
+- 🎯 Phase 9: Ongoing (Ecosystem — tracked in `minigraf-examples` repo; developer tools in `minigraf-inspector` and `minigraf-visualizer`)
 
 **Note**: This is a hobby project. Timeline is flexible but realistic.
 
@@ -1684,17 +1687,18 @@ When evaluating features, ask:
 
 **Current release**: v1.1.1 (May 2026) — drop-in replacement for v1.0.0; all changes internal
 
-**Completed waves**:
+**Completed post-1.0 work**:
 - ✅ Phase 8 / v1.0.0: Cross-platform release (WASM, WASI, Mobile, Python, Java, C FFI, Node.js)
-- ✅ Wave 1: Performance — hash-join, selective B+Tree lookup (#202–#204, #208)
-- ✅ Wave 2: Optimizer & Benchmarks — predicate push-down, cost-based ordering, SIMD analysis (#205–#207, #229)
-- ✅ Wave 3: Reliability — WAL fault injection, migration matrix, index corruption resilience, XTDB/Datomic compat, coverage gates (#209, #210, #212–#217, #219–#221)
-- ✅ Wave 4: Deferred Features — #180, #181, #182, #183 tagged milestone 2.0; #187 closed; #201 deferred to 2.0
+- ✅ Performance — hash-join, selective B+Tree lookup (#202–#204, #208)
+- ✅ Optimizer & Benchmarks — predicate push-down, cost-based ordering, SIMD analysis (#205–#207, #229)
+- ✅ Reliability — WAL fault injection, migration matrix, index corruption resilience, XTDB/Datomic compat, coverage gates (#209, #210, #212–#217, #219–#221)
+- ✅ Deferred Features — #180, #181, #182, #183 tagged milestone 2.0; #187 closed; #201 deferred to 2.0
+- ✅ #231 Repo Split — Python, Node, WASM, Java, Android, Swift, C all in separate repos under [project-minigraf](https://github.com/project-minigraf)
+- ✅ Documentation — cookbook (#190), perf tuning guide (#191), error message guide (#192)
 
-**Completed gate**: #231 — Repo Split complete (Phase 1: Python, Node, WASM split out; Phase 2: Java/Android/Swift deferred)
-
-**Pending waves (this repo)**:
-- Wave 8: Documentation — cookbook (#190), perf tuning guide (#191), error message guide (#192)
+**Transferred to other repos**:
+- Developer tools: `minigraf-inspector` (#184), `minigraf-visualizer` (#186); #185 (query profiler) deferred to 2.0
+- Ecosystem libraries (#196–#200) and integration examples (#193–#195): `minigraf-examples`
 
 **Ecosystem work**: Tracked in [`minigraf-examples`](https://github.com/project-minigraf/minigraf-examples)
 
@@ -1713,4 +1717,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: May 2026 — 962 tests passing, v1.1.1; #185 deferred to 2.0; ecosystem work (#193–#200) fully transferred to `minigraf-examples`; Wave 8 (Documentation) is next in this repo
+**Last Updated**: May 2026 — 962 tests passing, v1.1.1; all post-1.0 work complete; #185 deferred to 2.0; ecosystem, developer tools, and integration examples fully transferred to external repos
