@@ -221,11 +221,10 @@ Open / Replay (startup cost), Batch Insert Throughput (ingestion planning), Nega
 
 ### `Home.md`
 
-Add a **Performance** entry in the Reference section (not a new section — it is a reference page):
+Add a **Performance Tuning** entry in the `## Pages` section:
 
 ```markdown
-- [Performance Tuning](Performance-Tuning) — cost model, configuration knobs, query patterns,
-  and benchmark reference
+- **[Performance Tuning](Performance-Tuning)** — cost model, configuration knobs, query patterns, and benchmark reference
 ```
 
 ### `_Sidebar.md`
