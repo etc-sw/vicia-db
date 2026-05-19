@@ -154,7 +154,7 @@ already-parsed plan. Especially valuable for AI agents that issue the same query
 ```rust
 let pq = db.prepare("(query [:find ?name :where [?e :person/name $name]])")?;
 for name in names {
-    let results = pq.execute([BindValue::Val(Value::String(name))])?;
+    let results = pq.execute(&[("name", BindValue::Val(Value::String(name)))])?;
 }
 ```
 
