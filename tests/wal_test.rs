@@ -533,7 +533,7 @@ fn test_implicit_tx_execute_survives_replay() {
     );
 }
 
-// ══ Wave 3: #209 WAL crash-recovery matrix ════════════════════════════════
+// ══ #209 WAL crash-recovery matrix ════════════════════════════════════════
 
 fn read_wal_bytes(db_path: &std::path::Path) -> Vec<u8> {
     std::fs::read(wal_path_for(db_path)).unwrap_or_default()
@@ -704,7 +704,7 @@ fn wal_corrupt_tail_never_applied() {
     assert_eq!(names.len(), 1, "fake entry must not create phantom facts");
 }
 
-// ══ Wave 3: #214 lock-leak tests ═════════════════════════════════════════
+// ══ #214 lock-leak tests ══════════════════════════════════════════════════
 
 #[test]
 fn write_lock_not_leaked_after_rollback() {

@@ -1401,7 +1401,7 @@ branched_db.execute("(transact [[:x :y 1]])")?;
 
 ---
 
-## Post-1.0 Performance Backlog
+## Performance Backlog
 
 Known O(N²) hotspots discovered during benchmarking (v0.13.0). The first post-1.0 performance batch (#208, #202, #203, #204) eliminated four of them.
 
@@ -1672,11 +1672,11 @@ When evaluating features, ask:
 - ✅ Phase 8.3c: Complete (April 2026) — C FFI `minigraf.h` + platform tarballs, 795 tests
 - ✅ Phase 8.3d: Complete (April 2026) — Node.js `minigraf` on npm, 795 tests
 - ✅ Phase 8: Complete (May 2026) — v1.0.0
-- ✅ Post-1.0 Performance: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
-- ✅ Post-1.0 Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
-- ✅ Post-1.0 Reliability: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 962 tests
-- ✅ Post-1.0 Deferred Features: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to 2.0
-- ✅ Post-1.0 Documentation: Complete (May 2026) — cookbook (#190), perf tuning guide (#191), error message guide (#192)
+- ✅ Performance improvements: Complete (May 2026) — hash-join cluster + selective B+Tree lookup (#202, #203, #204, #208), 850 tests
+- ✅ Optimizer & Benchmarks: Complete (May 2026) — predicate push-down (#207, #206), cost-based not/or ordering (#205), SIMD crossover analysis (#229), 850 tests
+- ✅ Reliability hardening: Complete (May 2026) — WAL fault injection, migration matrix, index corruption resilience, property-based testing, coverage gates, long-haul smoke, XTDB/Datomic compat (#209, #210, #212, #213, #214, #215, #216, #217, #219, #220, #221), 962 tests
+- ✅ Deferred features tagged: Complete (May 2026) — #182, #183, #180, #181 tagged milestone 2.0; #187 closed (no pre-1.0 users); #201 deferred to 2.0
+- ✅ Documentation: Complete (May 2026) — cookbook (#190), perf tuning guide (#191), error message guide (#192)
 - 🎯 Phase 9: Ongoing (Ecosystem — tracked in `minigraf-examples` repo; developer tools in `minigraf-inspector` and `minigraf-visualizer`)
 
 **Note**: This is a hobby project. Timeline is flexible but realistic.
@@ -1687,7 +1687,7 @@ When evaluating features, ask:
 
 **Current release**: v1.1.1 (May 2026) — drop-in replacement for v1.0.0; all changes internal
 
-**Completed post-1.0 work**:
+**Completed**:
 - ✅ Phase 8 / v1.0.0: Cross-platform release (WASM, WASI, Mobile, Python, Java, C FFI, Node.js)
 - ✅ Performance — hash-join, selective B+Tree lookup (#202–#204, #208)
 - ✅ Optimizer & Benchmarks — predicate push-down, cost-based ordering, SIMD analysis (#205–#207, #229)

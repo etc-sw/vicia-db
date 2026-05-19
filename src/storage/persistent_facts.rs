@@ -2133,7 +2133,7 @@ mod tests {
         drop(backend);
     }
 
-    // ══ Wave 3: #214 fault-injection unit tests ═══════════════════════════
+    // ══ #214 fault-injection unit tests ══════════════════════════════════
 
     mod fault_injection_tests {
         use super::*;

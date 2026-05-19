@@ -348,7 +348,7 @@ fn test_rwlock_consistency() {
     }
 }
 
-// ══ Wave 3: #217 concurrency stress tests ════════════════════════════════════
+// ══ #217 concurrency stress tests ════════════════════════════════════════════
 
 #[test]
 fn stress_readers_during_writer() {
