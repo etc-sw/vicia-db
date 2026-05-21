@@ -207,7 +207,7 @@ Benchmarks on Intel Core i7-1065G7 @ 1.30GHz, 16 GB RAM, Rust 1.92.0. See [BENCH
 |---|---|
 | Insert (in-memory, single fact) | ~2.7 µs — flat across 1K–100K facts |
 | Insert (file-backed, WAL) | ~3.6 µs — flat across 1K–100K facts |
-| Point query at 1M facts | 4.3–4.5 s (O(N) scan; Phase 7 target: predicate pushdown) |
+| Point query at 1M facts | 4.3–4.5 s (selective B+tree lookup for bounded patterns; O(N) for full-attribute scans) |
 | Open time at 1M facts | 1.31 s (2.4× faster than v5 — indexes no longer loaded into RAM) |
 | Peak heap at 1M facts | 1.05 GB (~21% less than v5 — indexes paged in on demand) |
 

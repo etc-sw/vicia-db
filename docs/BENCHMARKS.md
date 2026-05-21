@@ -1,10 +1,14 @@
 # Minigraf Benchmarks
 
-## Phase 8 Note
+## Post-1.0 Updates
 
-Phase 8 (v0.20.0–v1.0.0) added cross-platform targets: Browser WASM, WASI, Android, iOS,
-Python, Node.js, Java, and C bindings. No changes were made to the native query or storage path.
-All benchmark numbers below are unchanged from Phase 7 (v0.19.0).
+v1.1.x shipped several query and storage path changes that affect benchmark numbers:
+
+- **Selective B+tree lookup** (#208, v1.1.0): `filter_facts_for_query` now uses index-backed per-FactRef resolution for patterns with a bound entity or attribute, instead of streaming all packed pages. Point-attribute and join queries at ≥10K now call `resolve()` once per matching fact — trading lower per-query I/O against higher per-fact call overhead at large N.
+- **Backend mutex fix** (#279, v1.1.1): `CommittedFactLoaderImpl::resolve` was holding the backend mutex across `PageCache::get_or_load`, serialising concurrent readers even on cache hits. Fixed by deferring mutex acquisition to `read_page` (cache misses only).
+- **Per-resolve overhead fix** (#281, v1.1.1): #279 introduced `Arc::clone` per `resolve()` call. With 10k+ FactRefs per query iteration, this caused measurable single-threaded regressions (+22% on `point_attribute/10k`). Fixed by pre-building `MutexStorageBackend` once per `CommittedFactLoaderImpl` instance.
+
+Numbers updated below reflect the Bencher CI baseline (ubuntu-latest runner) where noted. Local re-measurement on the i7 machine will follow.
 
 **Live benchmark history**: [https://bencher.dev/perf/minigraf/plots](https://bencher.dev/perf/minigraf/plots)
 
@@ -104,12 +108,14 @@ Measures single-query latency against databases pre-loaded with 1K / 10K / 100K 
 | Benchmark | 1K | 10K | 100K | 1M |
 |---|---|---|---|---|
 | `point_entity` (query by entity + attribute) | 1.26 ms | **8.6 ms** | 266 ms | 4.33 s |
-| `point_attribute` (query by attribute only) | 1.16 ms | 14.7 ms | 258 ms | 4.29 s |
-| `join_3pattern` (3-clause join) | 4.38 ms | 53.6 ms | 857 ms | 12.93 s |
+| `point_attribute` (query by attribute only) | 2.5 ms† | 24 ms† | 258 ms | 4.29 s |
+| `join_3pattern` (3-clause join) | 6.7 ms† | 75 ms† | 857 ms | 12.93 s |
 
-10K `point_entity` updated in v0.13.1 (Phase 7.4 — snapshot fix, -61.5% vs pre-fix baseline of 22 ms, -45% vs Phase 6.5 v0.8.0). `point_attribute` and `join_3pattern` 10K numbers are from v0.8.0 and will be updated when re-benchmarked. 100K and 1M numbers are unchanged (from v0.8.0).
+† Updated to v1.1.1 Bencher CI baseline (ubuntu-latest runner). Local i7 re-run pending.
 
-Query performance scales linearly with dataset size. The query executor resolves committed facts via the on-disk B+tree range scan and page cache, then filters in memory. Starting from Phase 7.4, the non-rules query path no longer rebuilds in-memory EAVT/AEVT/AVET/VAET indexes on each call — facts are passed as a pre-filtered `Arc<[Fact]>` slice. Range-scan selectivity is not yet exploited to skip non-matching facts — that optimisation is in the post-1.0 backlog (B+Tree Selective Lookup).
+`point_entity` 1K/10K: local i7, last measured v0.13.1 (Phase 7.4 — snapshot fix, -61.5% vs pre-fix 22 ms). `point_attribute` and `join_3pattern` 1K/10K: Bencher CI baseline (v1.1.1, post-#208/#281). 100K and 1M: unchanged from v0.8.0, local i7.
+
+Query performance scales linearly with dataset size. The query executor resolves committed facts via the on-disk B+tree range scan and page cache, then filters in memory. Starting from Phase 7.4, the non-rules query path no longer rebuilds in-memory EAVT/AEVT/AVET/VAET indexes on each call — facts are passed as a pre-filtered `Arc<[Fact]>` slice. Starting from v1.1.0 (#208), patterns with a bound entity or attribute use selective B+tree index lookups (EAVT/AEVT/AVET) — O(k) where k = matching facts — instead of a full page scan. `point_attribute` at 10K is now slower than the v0.8.0 baseline because it calls `resolve()` once per FactRef (N = 10K calls) rather than streaming all pages sequentially; the selective path is faster for sparse queries but higher-overhead at full-attribute scans.
 
 ---
 
@@ -336,6 +342,20 @@ Measures the expression evaluation pass overhead. `filter_scale` keeps half of e
 
 ---
 
+## Query: Predicate Pushdown
+
+Measures the combined cost of a multi-pattern query with a selective `Expr` predicate pushed down to the earliest binding point (#207). Fixture: N entities each with `:val` (integer) and `:name` (string). Query: `(query [:find ?e ?n :where [?e :val ?v] [?e :name ?n] [(> ?v <threshold>)]])` with threshold at the 90th percentile — ~10% of entities pass the filter.
+
+| Benchmark | 1K | 10K | 100K |
+|---|---|---|---|
+| `predicate_pushdown` | 5.9 ms† | 66 ms† | 204 ms† |
+
+† Bencher CI baseline (v1.1.1, ubuntu-latest). Local i7 re-run pending.
+
+Predicate pushdown evaluates `(> ?v threshold)` immediately after binding `?v` from the `:val` scan, before joining `:name`. At 10K this eliminates ~90% of the `:name` lookups. Scales approximately linearly with N — the 10× cost increase from 1K to 10K reflects the full-attribute scan over N `:val` facts plus the join for the 10% that pass.
+
+---
+
 ## Window Functions (Phase 7.7a)
 
 Measures window function evaluation overhead (running aggregates, ranking functions). Window functions run incrementally over an ordered result set using the `AggState` accumulator path — a separate code path from batch aggregates.
@@ -383,8 +403,9 @@ Measures regex evaluation overhead via the `matches?` predicate. Regexes are pre
 
 | Benchmark | 1K | 10K |
 |---|---|---|
-| `regex_filter` (matches? with pattern) | ~3-5 ms | ~30-50 ms |
-| `count_distinct_scale` (50% duplicates) | ~3-5 ms | ~30-50 ms |
+| `regex_filter` (matches? with pattern) | 2.5 ms† | 28 ms† |
+
+† Bencher CI baseline (v1.1.1, ubuntu-latest). Local i7 re-run pending.
 
 ---
 
@@ -452,7 +473,7 @@ Negation and disjunction improvements are smaller because those paths are O(N²)
 ## Known Limitations
 
 - **Query scan**: Queries with a concrete entity or attribute keyword in at least one pattern use selective index-backed fetches — O(k), where k = facts for that entity/attribute (#208). Queries with no bound entity or attribute fall back to a full scan — O(facts). Expression predicates are pushed down to the earliest point where their variables are bound (#207). `not` / `not-join` and `or` / `or-join` mid-query remain O(N²) in the worst case — no hash-join step yet.
-- **Backend mutex held on cache-cold page reads**: Concurrent B+tree scans serialise only when a page must be loaded from disk (cache miss). Cache-warm reads are fully parallel. Further per-page I/O parallelism is deferred to Phase 8.
+- **Backend mutex held on cache-cold page reads**: Concurrent B+tree scans serialise only when a page must be loaded from disk (cache miss). Cache-warm reads are fully parallel (#279/#281). Further per-page I/O parallelism is deferred to a future release.
 - **1M recursion not benchmarked**: `chain/depth_100` takes 16 s; `chain/depth_1000` was not run.
 
 ---
