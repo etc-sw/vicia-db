@@ -276,6 +276,12 @@ impl DatalogExecutor {
     fn execute_retract(&self, tx: Transaction) -> Result<QueryResult> {
         let mut fact_tuples = Vec::new();
 
+        let tx_opts = if tx.valid_from.is_some() || tx.valid_to.is_some() {
+            Some(TransactOptions::new(tx.valid_from, tx.valid_to))
+        } else {
+            None
+        };
+
         for pattern in tx.facts {
             let entity_id =
                 edn_to_entity_id(&pattern.entity).map_err(|e| anyhow!("Invalid entity: {}", e))?;
@@ -291,12 +297,18 @@ impl DatalogExecutor {
             let value =
                 edn_to_value(&pattern.value).map_err(|e| anyhow!("Invalid value: {}", e))?;
 
-            fact_tuples.push((entity_id, attribute, value));
+            let per_fact_opts = if pattern.valid_from.is_some() || pattern.valid_to.is_some() {
+                Some(TransactOptions::new(pattern.valid_from, pattern.valid_to))
+            } else {
+                None
+            };
+
+            fact_tuples.push((entity_id, attribute, value, per_fact_opts));
         }
 
         let (tx_id, _tx_count) = self
             .storage
-            .retract(fact_tuples)
+            .retract_batch(fact_tuples, tx_opts)
             .map_err(|e| anyhow!("Retraction failed: {}", e))?;
 
         Ok(QueryResult::Retracted(tx_id))

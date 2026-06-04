@@ -3,9 +3,8 @@ use crate::graph::FactStorage;
 ///
 /// This module bridges the gap between high-level fact operations and
 /// low-level page-based storage backends.
-use crate::graph::types::Fact;
+use crate::graph::types::{Fact, RETRACT_ALL_VALID_FROM, VALID_TIME_FOREVER};
 use crate::storage::FACT_PAGE_FORMAT_PACKED;
-use crate::storage::btree::{read_aevt_index, read_avet_index, read_eavt_index, read_vaet_index};
 use crate::storage::btree_v6::{
     MutexStorageBackend, OnDiskIndexReader, btree_entries, build_btree, merge_sorted_vecs,
     stream_all_entries,
@@ -18,6 +17,15 @@ use anyhow::Result;
 use crc32fast::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+fn normalize_legacy_retractions(facts: &mut [Fact]) {
+    for fact in facts {
+        if !fact.asserted {
+            fact.valid_from = RETRACT_ALL_VALID_FROM;
+            fact.valid_to = VALID_TIME_FOREVER;
+        }
+    }
+}
 
 /// Compute the CRC32 sync checksum over all facts (used in tests only).
 ///
@@ -273,8 +281,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         // New files (post-fix): checksum covers ALL pages (facts + indexes).
         // Old files (pre-fix): checksum covers only fact pages.
         // Try full checksum first; fall back to fact-only for backwards compat.
-        let old_index_key_format = header.version < crate::storage::FORMAT_VERSION;
-        let needs_rebuild = if old_index_key_format && num_fact_pages > 0 {
+        let needs_format_upgrade = header.version < crate::storage::FORMAT_VERSION;
+        let needs_rebuild = if needs_format_upgrade && num_fact_pages > 0 {
             true
         } else if num_fact_pages == 0 || header.eavt_root_page == 0 {
             num_fact_pages > 0 // rebuild if facts exist but no index root
@@ -317,16 +325,23 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         if needs_rebuild {
             // Rebuild indexes by re-reading all packed facts. This covers checksum
-            // mismatches and older on-disk index key layouts.
-            let all_facts = {
+            // mismatches and older on-disk format semantics.
+            let mut all_facts = {
                 let backend = self
                     .backend
                     .lock()
                     .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
                 crate::storage::packed_pages::read_all_from_pages(&*backend, 1, num_fact_pages)?
             };
-            // Re-pack to derive correct FactRefs (same deterministic layout as on disk)
-            let (_, real_refs) = pack_facts(&all_facts, 1)?;
+            if header.version < 9 {
+                normalize_legacy_retractions(&mut all_facts);
+            }
+
+            // Re-pack to derive correct FactRefs, and rewrite fact pages when
+            // upgrading semantics so the v9 sentinel is durable on disk.
+            let (fact_pages, real_refs) = pack_facts(&all_facts, 1)?;
+            let num_fact_pages = u64::try_from(fact_pages.len())
+                .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
 
             // Build sorted index entries
             let (eavt_entries, aevt_entries, avet_entries, vaet_entries) =
@@ -344,6 +359,15 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 .backend
                 .lock()
                 .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+            self.page_cache.invalidate_from(1);
+            for (i, page_data) in fact_pages.iter().enumerate() {
+                let page_offset = u64::try_from(i)
+                    .map_err(|_| anyhow::anyhow!("page index {i} exceeds u64::MAX"))?;
+                let page_id = 1u64
+                    .checked_add(page_offset)
+                    .ok_or_else(|| anyhow::anyhow!("page id overflow writing fact pages"))?;
+                backend.write_page(page_id, page_data)?;
+            }
             let (eavt_root, next1) = build_btree(
                 btree_entries(eavt_entries.into_iter())?.into_iter(),
                 &mut *backend,
@@ -395,6 +419,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             drop(backend);
 
             self.last_checkpointed_tx_count = max_tx;
+            self.committed_fact_pages
+                .store(num_fact_pages, Ordering::SeqCst);
 
             // Wire OnDiskIndexReader
             let index_reader: std::sync::Arc<dyn crate::storage::CommittedIndexReader> =
@@ -458,7 +484,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             let page = backend.read_page(page_id)?;
             // Try to deserialize a fact from this page (legacy format: raw postcard bytes)
             match postcard::from_bytes::<Fact>(&page) {
-                Ok(fact) => {
+                Ok(mut fact) => {
+                    if header.version < 9 && !fact.asserted {
+                        fact.valid_from = RETRACT_ALL_VALID_FROM;
+                        fact.valid_to = VALID_TIME_FOREVER;
+                    }
                     self.storage.load_fact(fact)?;
                     loaded = loaded.saturating_add(1);
                 }
@@ -551,6 +581,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             );
             // Preserve the asserted flag (with_valid_time sets asserted=true by default)
             fact.asserted = v1.asserted;
+            if !fact.asserted {
+                fact.valid_from = RETRACT_ALL_VALID_FROM;
+                fact.valid_to = VALID_TIME_FOREVER;
+            }
             migrated.push(fact);
         }
 
@@ -607,147 +641,55 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             num_fact_pages
         };
 
-        self.committed_fact_pages
-            .store(validated_num_fact_pages, Ordering::SeqCst);
-
-        // Verify index integrity via checksum before trusting the old indexes.
-        // Try full checksum (facts + indexes) first, then fact-only for old files.
-        let use_old_indexes = validated_num_fact_pages > 0 && header.index_checksum > 0 && {
+        let mut all_facts = if validated_num_fact_pages > 0 {
             let backend = self
                 .backend
                 .lock()
                 .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-            let total_data_pages = header.page_count.saturating_sub(1);
-            let full = compute_page_checksum(&*backend, 1, total_data_pages)?;
-            if full == header.index_checksum {
-                true
-            } else {
-                let fact_only = compute_page_checksum(&*backend, 1, validated_num_fact_pages)?;
-                fact_only == header.index_checksum
-            }
-        };
-
-        let (eavt, aevt, avet, vaet) = if use_old_indexes {
-            // Read and trust the old v5 indexes
-            let backend = self
-                .backend
-                .lock()
-                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-            let e = if header.eavt_root_page > 0 {
-                read_eavt_index(header.eavt_root_page, &*backend)?
-            } else {
-                std::collections::BTreeMap::new()
-            };
-            let a = if header.aevt_root_page > 0 {
-                read_aevt_index(header.aevt_root_page, &*backend)?
-            } else {
-                std::collections::BTreeMap::new()
-            };
-            let av = if header.avet_root_page > 0 {
-                read_avet_index(header.avet_root_page, &*backend)?
-            } else {
-                std::collections::BTreeMap::new()
-            };
-            let v = if header.vaet_root_page > 0 {
-                read_vaet_index(header.vaet_root_page, &*backend)?
-            } else {
-                std::collections::BTreeMap::new()
-            };
-            (e, a, av, v)
+            crate::storage::packed_pages::read_all_from_pages(
+                &*backend,
+                1,
+                validated_num_fact_pages,
+            )?
         } else {
-            // Checksum mismatch or missing - rebuild indexes from facts
-            let all_facts = {
-                let backend = self
-                    .backend
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-                crate::storage::packed_pages::read_all_from_pages(
-                    &*backend,
-                    1,
-                    validated_num_fact_pages,
-                )?
-            };
-            // Build indexes from fact data
-            let mut eavt_map = std::collections::BTreeMap::new();
-            let mut aevt_map = std::collections::BTreeMap::new();
-            let mut avet_map = std::collections::BTreeMap::new();
-            let mut vaet_map = std::collections::BTreeMap::new();
-            for (i, fact) in all_facts.iter().enumerate() {
-                let slot_index = u16::try_from(i)
-                    .map_err(|_| anyhow::anyhow!("fact index {i} exceeds u16::MAX"))?;
-                let fr = FactRef {
-                    page_id: 1,
-                    slot_index,
-                };
-                eavt_map.insert(
-                    EavtKey {
-                        entity: fact.entity,
-                        attribute: fact.attribute.clone(),
-                        valid_from: fact.valid_from,
-                        valid_to: fact.valid_to,
-                        tx_count: fact.tx_count,
-                        value_bytes: encode_value(&fact.value),
-                        tx_id: fact.tx_id,
-                        asserted: fact.asserted,
-                    },
-                    fr,
-                );
-                aevt_map.insert(
-                    AevtKey {
-                        attribute: fact.attribute.clone(),
-                        entity: fact.entity,
-                        valid_from: fact.valid_from,
-                        valid_to: fact.valid_to,
-                        tx_count: fact.tx_count,
-                        value_bytes: encode_value(&fact.value),
-                        tx_id: fact.tx_id,
-                        asserted: fact.asserted,
-                    },
-                    fr,
-                );
-                avet_map.insert(
-                    AvetKey {
-                        attribute: fact.attribute.clone(),
-                        value_bytes: encode_value(&fact.value),
-                        valid_from: fact.valid_from,
-                        valid_to: fact.valid_to,
-                        entity: fact.entity,
-                        tx_count: fact.tx_count,
-                        tx_id: fact.tx_id,
-                        asserted: fact.asserted,
-                    },
-                    fr,
-                );
-                if let crate::graph::types::Value::Ref(target) = &fact.value {
-                    vaet_map.insert(
-                        VaetKey {
-                            ref_target: *target,
-                            attribute: fact.attribute.clone(),
-                            valid_from: fact.valid_from,
-                            valid_to: fact.valid_to,
-                            source_entity: fact.entity,
-                            tx_count: fact.tx_count,
-                            tx_id: fact.tx_id,
-                            asserted: fact.asserted,
-                        },
-                        fr,
-                    );
-                }
-            }
-            (eavt_map, aevt_map, avet_map, vaet_map)
+            Vec::new()
         };
+        normalize_legacy_retractions(&mut all_facts);
+
+        let (fact_pages, fact_refs) = pack_facts(&all_facts, 1)?;
+        let new_fact_page_count = u64::try_from(fact_pages.len())
+            .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
+        self.committed_fact_pages
+            .store(new_fact_page_count, Ordering::SeqCst);
+        let (eavt, aevt, avet, vaet) = build_sorted_index_entries(&all_facts, &fact_refs);
+        let node_count = u64::try_from(all_facts.len())
+            .map_err(|_| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
+        let max_tx = all_facts
+            .iter()
+            .map(|fact| fact.tx_count)
+            .max()
+            .unwrap_or(header.last_checkpointed_tx_count);
 
         let mut backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        self.page_cache.invalidate_from(1);
+        for (i, page_data) in fact_pages.iter().enumerate() {
+            let page_offset =
+                u64::try_from(i).map_err(|_| anyhow::anyhow!("page index {i} exceeds u64::MAX"))?;
+            let page_id = 1u64
+                .checked_add(page_offset)
+                .ok_or_else(|| anyhow::anyhow!("page id overflow writing fact pages"))?;
+            backend.write_page(page_id, page_data)?;
+        }
         // Use the actual end of fact pages as the start for new index pages, NOT
         // header.page_count — that field comes from the (possibly untrusted) file
         // on disk and may be a huge fuzz-crafted value that causes build_btree to
         // write leaf pages at a ~TB offset, then compute_page_checksum to loop
         // over billions of pages.
         let next_free = 1u64
-            .checked_add(validated_num_fact_pages)
+            .checked_add(new_fact_page_count)
             .ok_or_else(|| anyhow::anyhow!("page count overflow computing next_free"))?;
 
         let (eavt_root, next_free2) = build_btree(
@@ -777,8 +719,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         let mut new_header = FileHeader::new(); // current format
         new_header.page_count = final_next_free;
-        new_header.node_count = header.node_count;
-        new_header.last_checkpointed_tx_count = header.last_checkpointed_tx_count;
+        new_header.node_count = node_count;
+        new_header.last_checkpointed_tx_count = max_tx;
         new_header.eavt_root_page = eavt_root;
         new_header.aevt_root_page = aevt_root;
         new_header.avet_root_page = avet_root;
@@ -787,8 +729,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let total_data_pages = final_next_free.saturating_sub(1);
         let computed_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
         new_header.index_checksum = computed_checksum;
-        new_header.fact_page_format = header.fact_page_format;
-        new_header.fact_page_count = validated_num_fact_pages;
+        new_header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
+        new_header.fact_page_count = new_fact_page_count;
         new_header.header_checksum = compute_header_checksum(&new_header);
 
         let mut header_page = new_header.to_bytes();
@@ -797,7 +739,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         backend.sync()?;
         drop(backend);
 
-        self.last_checkpointed_tx_count = header.last_checkpointed_tx_count;
+        self.last_checkpointed_tx_count = max_tx;
 
         let loader: Arc<dyn crate::storage::CommittedFactReader> =
             Arc::new(CommittedFactLoaderImpl {
@@ -820,8 +762,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             ));
         self.storage.set_committed_index_reader(index_reader);
 
-        self.storage
-            .restore_tx_counter_from(header.last_checkpointed_tx_count);
+        self.storage.restore_tx_counter_from(max_tx);
         self.dirty = false;
         Ok(())
     }

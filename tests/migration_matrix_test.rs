@@ -65,7 +65,7 @@ fn v7_fixture_migrates_to_current_index_format() -> TestResult {
 
     let raw = std::fs::read(&path)?;
     let version = read_u32_le(&raw, 4..8)?;
-    assert_eq!(version, 8, "v7 fixture must migrate to current format");
+    assert_eq!(version, 9, "v7 fixture must migrate to current format");
     Ok(())
 }
 

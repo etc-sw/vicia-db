@@ -227,6 +227,13 @@ impl Value {
 /// Used as the default `valid_to` when no end time is specified.
 pub(crate) const VALID_TIME_FOREVER: i64 = i64::MAX;
 
+/// Sentinel valid-from for legacy retractions that cancel every valid-time
+/// window of the same EAV triple.
+///
+/// `i64::MIN` is reserved by `db.rs` as the "use tx time at commit" sentinel,
+/// so unscoped retractions use the next impossible Unix-millis value.
+pub(crate) const RETRACT_ALL_VALID_FROM: i64 = i64::MIN + 1;
+
 /// A Datalog fact: (Entity, Attribute, Value) triple with transaction metadata
 ///
 /// This is the core data structure for Phase 3+. Facts are immutable and versioned
@@ -320,7 +327,11 @@ impl Fact {
         }
     }
 
-    /// Create a retraction with default valid time.
+    /// Create a legacy/unscoped retraction.
+    ///
+    /// This cancels every valid-time window for the same EAV triple. Use
+    /// `retract_with_valid_time` when the retraction should only cancel one
+    /// exact valid-time interval.
     pub(crate) fn retract(
         entity: EntityId,
         attribute: Attribute,
@@ -333,8 +344,30 @@ impl Fact {
             value,
             tx_id,
             tx_count: 0,
-            valid_from: i64::try_from(tx_id).unwrap_or(i64::MAX),
+            valid_from: RETRACT_ALL_VALID_FROM,
             valid_to: VALID_TIME_FOREVER,
+            asserted: false,
+        }
+    }
+
+    /// Create a scoped retraction for one exact valid-time interval.
+    pub(crate) fn retract_with_valid_time(
+        entity: EntityId,
+        attribute: Attribute,
+        value: Value,
+        tx_id: TxId,
+        tx_count: u64,
+        valid_from: i64,
+        valid_to: i64,
+    ) -> Self {
+        Fact {
+            entity,
+            attribute,
+            value,
+            tx_id,
+            tx_count,
+            valid_from,
+            valid_to,
             asserted: false,
         }
     }
@@ -520,6 +553,8 @@ mod tests {
         assert_eq!(fact.entity, entity);
         assert_eq!(fact.attribute, ":person/name");
         assert_eq!(fact.tx_id, 2);
+        assert_eq!(fact.valid_from, RETRACT_ALL_VALID_FROM);
+        assert_eq!(fact.valid_to, VALID_TIME_FOREVER);
         assert!(!fact.is_asserted());
         assert!(fact.is_retracted());
     }

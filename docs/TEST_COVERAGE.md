@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: indexed multi-value regression fix (#287) complete (June 2026), 984 tests ✅
+**Last Updated**: Vetch ledger identity + scoped retract valid-time parity (June 2026), 992 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 984 ✅ (976 passing, 8 ignored)
-- ✅ 655 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287)
+**Total Tests**: 992 ✅ (984 passing, 8 ignored)
+- ✅ 658 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -29,8 +29,9 @@
 - ✅ 10 UDF tests (integration, Phase 7.7b — custom aggregates, custom predicates, UDF as window function, name collision guards, runtime errors, thread safety)
 - ✅ 17 prepared statement tests (integration, Phase 7.8 — entity/value/as-of/valid-at slots, combined temporal+entity, AnyValidTime, error paths, plan reuse)
 - ✅ 3 grammar conformance tests (integration, Phase 7.9 — pest shadow grammar + EDN corpus)
-- ✅ 6 migration matrix tests (integration, Wave 3 #215 + v7→v8 index-format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
+- ✅ 6 migration matrix tests (integration, Wave 3 #215 + v7/v8→v9 format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
 - ✅ 7 multi-value index tests (integration, #287 — same entity+attribute batch values survive indexed public query paths, ref edges, `:as-of`, `:valid-at`, retraction, checkpoint/reopen)
+- ✅ 5 retract valid-time tests (integration, Vetch ledger parity — scoped retract removes only the matching valid-time window, legacy retract still wipes all windows, Ref edge value, WriteTransaction parity, checkpoint/reopen)
 - ✅ 5 index corruption tests (integration, Wave 3 #216 — checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)
@@ -39,7 +40,7 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 976 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
+**Status**: ✅ **All 984 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -462,18 +463,18 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 
 ### 9. FileHeader (`src/storage/mod.rs`) - ✅ Excellent (10 tests)
 
-- ✅ v6 serialisation: 80 bytes, correct field offsets
-- ✅ v6 roundtrip with all index root pages, checksum, and `fact_page_count`
+- ✅ v9 serialisation: 84 bytes, correct field offsets
+- ✅ v9 roundtrip with all index root pages, checksum, header checksum, and `fact_page_count`
 - ✅ v3/v4/v5 headers accepted with appropriate zero-filling
-- ✅ v6 header with <80 bytes rejected
-- ✅ Header validation (magic, version range 1-6)
-- ✅ Version 0 and 7 rejected
-- ✅ `FORMAT_VERSION == 6`
-- ✅ **Byte-layout pin**: all 11 fields at exact offsets with LE encoding verified (Phase 6.4b / v6 update)
+- ✅ v9 header with <84 bytes rejected
+- ✅ Header validation (magic, version range 1-9)
+- ✅ Version 0 and 10 rejected
+- ✅ `FORMAT_VERSION == 9`
+- ✅ **Byte-layout pin**: all fields at exact offsets with LE encoding verified (v9 update)
 
 **Coverage**: ~98%
 
-### 10. Datalog Parser (`src/query/datalog/parser.rs`) - ✅ Excellent (25 tests)
+### 10. Datalog Parser (`src/query/datalog/parser.rs`) - ✅ Excellent (27 tests)
 
 - ✅ All tokens, numbers, strings, booleans, UUIDs, nil
 - ✅ Transact/Retract/Query/Rule commands
@@ -481,6 +482,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `:valid-at` (timestamp + `:any-valid-time`)
 - ✅ EDN map `{:key val}` with transaction-level valid time
 - ✅ Per-fact valid time override (4-element fact vector)
+- ✅ Retract transaction-level and per-fact valid-time maps
 - ✅ Reject negative `:as-of` counter and invalid timestamps
 
 **Coverage**: ~98%
@@ -683,10 +685,10 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `execute_with_extra_bindings` — extra `BindValue`s beyond declared slots are silently ignored
 - ✅ `multiple_slots_same_execute` — multiple distinct `$slot` names resolved in a single `execute()` call
 
-### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 6 tests (Wave 3 #215 + v8 index migration)
+### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 6 tests (Wave 3 #215 + v9 migration)
 
 - ✅ current format round-trip — facts written and read back correctly after save/load
-- ✅ v7 fixture migrate — committed v7 fixture opens and upgrades to current v8 index format
+- ✅ v7 fixture migrate — committed v7 fixture opens and upgrades to current v9 format
 - ✅ v3 empty migrate — empty v3 database opens cleanly
 - ✅ corrupt magic — file with bad magic header returns `Err`, not panic
 - ✅ unsupported version — file with unrecognised format version returns `Err`
@@ -701,6 +703,14 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `:as-of` replay sees every pre-retraction value; current view hides all retracted values
 - ✅ per-fact valid windows remain queryable with `:valid-at`
 - ✅ checkpoint/reopen committed indexes preserve every same entity+attribute value
+
+### Retract Valid-Time Regression (`tests/retract_valid_time_test.rs`) - ✅ 5 tests
+
+- ✅ per-fact scoped retract removes only the matching valid-time window
+- ✅ transaction-level scoped retract options apply to Ref edge values
+- ✅ legacy retract still removes every valid-time window for the same EAV triple
+- ✅ explicit `WriteTransaction` scoped retract matches implicit `Minigraf::execute`
+- ✅ checkpoint/reopen preserves scoped retraction semantics
 
 ### Index Corruption (`tests/index_corruption_test.rs`) - ✅ 5 tests (Wave 3 #216)
 
@@ -938,8 +948,9 @@ cargo test -- --nocapture
 - Prepared statements verified: entity/value/as-of/valid-at slot positions, AnyValidTime, combined temporal+entity (agentic loop pattern), plan reuse, all error paths (Phase 7.8)
 - Public API surface verified via rustdoc doctests: `Minigraf::open`, `execute`, `prepare`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9)
 - WAL fault injection verified: write-fail, flush-fail, read-fault, CRC corruption, checkpoint atomicity, concurrent write+checkpoint (Wave 3)
-- Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v8 index migration)
+- Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v9 migration)
 - Multi-value index regression verified: same entity+attribute batch values survive indexed public query paths, ref edge lookups, temporal replay, retraction, and checkpoint/reopen (#287)
+- Retract valid-time parity verified: scoped retractions remove only the matching valid-time window while legacy retractions still wipe every valid-time window for the same EAV triple
 - Index corruption resilience verified: checksum corruption triggers rebuild, btree corruption returns Err not panic (Wave 3)
 - Property-based testing verified: EAV model, bi-temporal monotonicity, retract visibility (Wave 3)
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)

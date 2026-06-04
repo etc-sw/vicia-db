@@ -480,7 +480,7 @@ impl Minigraf {
                     f.tx_id = tx_id;
                     f.tx_count = tx_count;
                     // Fix valid_from if it was left as the sentinel
-                    if f.asserted && f.valid_from == VALID_FROM_USE_TX_TIME {
+                    if f.valid_from == VALID_FROM_USE_TX_TIME {
                         f.valid_from = tx_id.cast_signed();
                     }
                     f
@@ -759,6 +759,8 @@ impl Minigraf {
         use crate::query::datalog::matcher::{edn_to_entity_id, edn_to_value};
         use crate::query::datalog::types::EdnValue;
 
+        let tx_valid_from = tx.valid_from;
+        let tx_valid_to = tx.valid_to;
         let mut facts = Vec::new();
 
         for pattern in &tx.facts {
@@ -774,9 +776,24 @@ impl Minigraf {
             let value = edn_to_value(&pattern.value)
                 .map_err(|e| anyhow::anyhow!("invalid value: {}", e))?;
 
-            let mut f = Fact::retract(entity, attr, value, 0);
-            f.tx_count = 0;
-            facts.push(f);
+            let valid_from = pattern.valid_from.or(tx_valid_from);
+            let valid_to = pattern.valid_to.or(tx_valid_to);
+
+            if valid_from.is_some() || valid_to.is_some() {
+                facts.push(Fact::retract_with_valid_time(
+                    entity,
+                    attr,
+                    value,
+                    0,
+                    0,
+                    valid_from.unwrap_or(VALID_FROM_USE_TX_TIME),
+                    valid_to.unwrap_or(VALID_TIME_FOREVER),
+                ));
+            } else {
+                let mut f = Fact::retract(entity, attr, value, 0);
+                f.tx_count = 0;
+                facts.push(f);
+            }
         }
 
         Ok(facts)
@@ -1023,7 +1040,7 @@ impl<'a> WriteTransaction<'a> {
                     f.tx_id = tx_id;
                     f.tx_count = tx_count;
                     // Fix valid_from if it was left as the sentinel (placeholder for "use tx time")
-                    if f.valid_from == VALID_FROM_USE_TX_TIME && f.asserted {
+                    if f.valid_from == VALID_FROM_USE_TX_TIME {
                         f.valid_from = tx_id.cast_signed();
                     }
                     f
@@ -1109,7 +1126,7 @@ impl<'a> WriteTransaction<'a> {
 
     /// Build a merged fact snapshot for transactional reads.
     ///
-    /// Pending facts still carry `VALID_FROM_USE_TX_TIME` for assertions where no
+    /// Pending facts still carry `VALID_FROM_USE_TX_TIME` where no
     /// explicit `valid_from` was supplied (the sentinel is left intact so `commit()`
     /// can stamp it with the real commit timestamp).  We resolve it here using each
     /// fact's own staged `tx_id` so transactional queries see a coherent valid-time.
@@ -1119,7 +1136,7 @@ impl<'a> WriteTransaction<'a> {
             Vec::with_capacity(committed.len().saturating_add(self.pending_facts.len()));
         merged.extend(committed);
         merged.extend(self.pending_facts.iter().cloned().map(|mut f| {
-            if f.asserted && f.valid_from == VALID_FROM_USE_TX_TIME {
+            if f.valid_from == VALID_FROM_USE_TX_TIME {
                 f.valid_from = f.tx_id.cast_signed();
             }
             f

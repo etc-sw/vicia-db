@@ -25,8 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix indexed public Datalog queries silently collapsing same entity+attribute multi-value facts inserted in one transaction (#287)
   - `EAVT`, `AEVT`, `AVET`, and `VAET` index keys now include canonical value bytes plus `tx_id`/`asserted` identity so BTree-backed lookups preserve ledger-distinct facts sharing one `tx_count`
   - `selective_fact_fetch` deduplicates by full fact identity, including value bytes, valid-time window, `tx_id`, and `asserted`
-  - File format bumped to v8; v7 packed files rebuild persisted indexes from fact pages on open
+  - Current file format is v9; v7/v8 packed files rebuild persisted indexes from fact pages on open
   - Added `tests/multivalue_index_test.rs` coverage for N=3/N=10 batches, mixed value types, ref edges, `:as-of`, `:valid-at`, retraction, and checkpoint/reopen
+- Add valid-time scoped retract parity for public Datalog and explicit transactions
+  - `(retract {:valid-from ... :valid-to ...} [...])` and per-fact `[e a v {:valid-from ...}]` maps now parse and execute like transact valid-time maps
+  - Legacy `(retract [[e a v]])` remains an unscoped ledger retraction that removes every valid-time window for the same EAV triple
+  - Scoped retractions remove only the exact valid-time window they name, including `Value::Ref` edge values
+  - File format bumped to v9; v1–v8 legacy retractions are normalized to an explicit unscoped sentinel during migration/rebuild
+  - Added `tests/retract_valid_time_test.rs` coverage for implicit execute, `WriteTransaction`, checkpoint/reopen, transaction-level options, and Ref edge values
 
 ## v1.1.1 — 2026-05-17
 

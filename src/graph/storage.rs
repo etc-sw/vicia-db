@@ -1,5 +1,6 @@
 use crate::graph::types::{
-    Attribute, EntityId, Fact, TransactOptions, TxId, VALID_TIME_FOREVER, Value, tx_id_now,
+    Attribute, EntityId, Fact, RETRACT_ALL_VALID_FROM, TransactOptions, TxId, VALID_TIME_FOREVER,
+    Value, tx_id_now,
 };
 use crate::query::datalog::types::AsOf;
 use crate::storage::index::{FactRef, Indexes, encode_value};
@@ -241,22 +242,53 @@ impl FactStorage {
     /// # Returns
     /// `(tx_id, tx_count)` — the Unix-ms timestamp and the monotonic counter
     /// assigned to these retractions.
+    #[cfg(test)]
     pub(crate) fn retract(
         &self,
         fact_tuples: Vec<(EntityId, Attribute, Value)>,
+    ) -> Result<(TxId, u64)> {
+        let fact_tuples = fact_tuples
+            .into_iter()
+            .map(|(entity, attribute, value)| (entity, attribute, value, None))
+            .collect();
+        self.retract_batch(fact_tuples, None)
+    }
+
+    /// Retract a batch of facts where each fact may carry its own valid-time opts.
+    ///
+    /// No valid-time opts means legacy/unscoped retraction: cancel every
+    /// valid-time window of the same EAV triple. Any transaction-level or
+    /// per-fact valid-time opts make the retraction scoped to that exact window.
+    pub(crate) fn retract_batch(
+        &self,
+        fact_tuples: Vec<(EntityId, Attribute, Value, Option<TransactOptions>)>,
+        default_opts: Option<TransactOptions>,
     ) -> Result<(TxId, u64)> {
         let tx_id = tx_id_now();
         let tx_count = self
             .tx_counter
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
+        let has_default_opts = default_opts.is_some();
+        let default_opts = default_opts.unwrap_or_default();
 
         let retractions: Vec<Fact> = fact_tuples
             .into_iter()
-            .map(|(entity, attribute, value)| {
-                let mut f = Fact::retract(entity, attribute, value, tx_id);
-                f.tx_count = tx_count;
-                f
+            .map(|(entity, attribute, value, per_fact_opts)| {
+                if per_fact_opts.is_some() || has_default_opts {
+                    let opts = per_fact_opts.unwrap_or_else(|| default_opts.clone());
+                    let valid_from = opts
+                        .valid_from
+                        .unwrap_or_else(|| i64::try_from(tx_id).unwrap_or(i64::MAX));
+                    let valid_to = opts.valid_to.unwrap_or(VALID_TIME_FOREVER);
+                    Fact::retract_with_valid_time(
+                        entity, attribute, value, tx_id, tx_count, valid_from, valid_to,
+                    )
+                } else {
+                    let mut f = Fact::retract(entity, attribute, value, tx_id);
+                    f.tx_count = tx_count;
+                    f
+                }
             })
             .collect();
 
@@ -493,15 +525,18 @@ pub(crate) fn filter_facts_as_of(facts: Vec<Fact>, as_of: &AsOf) -> Vec<Fact> {
 /// Compute the net-asserted view of a fact set.
 ///
 /// For each unique `(entity, attribute, value)` triple:
-/// 1. Find the retraction with the highest `tx_count` (if any).
-/// 2. Keep all assertions whose `tx_count` is greater than that retraction.
-/// 3. Deduplicate surviving assertions by `(valid_from, valid_to)`, keeping the
+/// 1. Track legacy/unscoped retractions that cancel every valid-time window.
+/// 2. Track scoped retractions that cancel only one exact valid-time window.
+/// 3. Keep assertions whose `tx_count` is greater than both applicable
+///    retraction counters.
+/// 4. Deduplicate surviving assertions by `(valid_from, valid_to)`, keeping the
 ///    one with the highest `tx_count` for each validity window.
 ///
 /// This allows the same EAV triple to be asserted at multiple non-overlapping
 /// valid-time intervals (e.g., salary=$100k valid 2020–2022 AND 2024–2026).
-/// A retraction still cancels all prior assertions of that triple, but
-/// re-assertions after the retraction are preserved.
+/// A legacy retraction still cancels all prior assertions of that triple, but a
+/// valid-time scoped retraction cancels only the matching interval.
+/// Re-assertions after either retraction are preserved.
 ///
 /// Uses [`encode_value`] for the value key to handle floating-point edge cases
 /// (NaN canonicalisation, ±0.0 disambiguation) consistently with the rest of
@@ -514,12 +549,13 @@ pub(crate) fn filter_facts_as_of(facts: Vec<Fact>, as_of: &AsOf) -> Vec<Fact> {
 ///
 /// This function uses two flat `HashMap`s in a single pass over the input:
 ///
-/// - `max_retract_tx`: EAV → highest retraction `tx_count` seen so far.
+/// - `max_unscoped_retract_tx`: EAV → highest unscoped retraction `tx_count`.
+/// - `max_scoped_retract_tx`: EAV + window → highest scoped retraction `tx_count`.
 /// - `by_window`: (EAV + valid_from + valid_to) → highest-`tx_count` assertion
 ///   for that time window.
 ///
-/// The retraction filter (`fact.tx_count > max_retract_tx`) is applied in the
-/// final `filter_map` rather than eagerly.  This means `by_window` temporarily
+/// The retraction filter is applied in the final `filter_map` rather than
+/// eagerly. This means `by_window` temporarily
 /// holds assertions that will be filtered out, so on workloads where most
 /// EAV triples are immediately retracted it uses more peak memory than the
 /// previous per-group approach.  The trade-off is intentional: eliminating the
@@ -531,7 +567,8 @@ pub(crate) fn net_asserted_facts(facts: Vec<Fact>) -> Vec<Fact> {
     type EavKey = (EntityId, Attribute, Vec<u8>);
     type WindowKey = (EntityId, Attribute, Vec<u8>, i64, i64);
 
-    let mut max_retract_tx: HashMap<EavKey, u64> = HashMap::new();
+    let mut max_unscoped_retract_tx: HashMap<EavKey, u64> = HashMap::new();
+    let mut max_scoped_retract_tx: HashMap<WindowKey, u64> = HashMap::new();
     let mut by_window: HashMap<WindowKey, Fact> = HashMap::new();
 
     for fact in facts {
@@ -560,20 +597,39 @@ pub(crate) fn net_asserted_facts(facts: Vec<Fact>) -> Vec<Fact> {
             }
         } else {
             let tx_count = fact.tx_count;
-            max_retract_tx
-                .entry(eav_key)
-                .and_modify(|max_tx| *max_tx = (*max_tx).max(tx_count))
-                .or_insert(tx_count);
+            if fact.valid_from == RETRACT_ALL_VALID_FROM && fact.valid_to == VALID_TIME_FOREVER {
+                max_unscoped_retract_tx
+                    .entry(eav_key)
+                    .and_modify(|max_tx| *max_tx = (*max_tx).max(tx_count))
+                    .or_insert(tx_count);
+            } else {
+                let window_key = (
+                    eav_key.0,
+                    eav_key.1,
+                    eav_key.2,
+                    fact.valid_from,
+                    fact.valid_to,
+                );
+                max_scoped_retract_tx
+                    .entry(window_key)
+                    .and_modify(|max_tx| *max_tx = (*max_tx).max(tx_count))
+                    .or_insert(tx_count);
+            }
         }
     }
 
     by_window
         .into_iter()
-        .filter_map(|((entity, attribute, value, _, _), fact)| {
-            let retract_tx = max_retract_tx
-                .get(&(entity, attribute, value))
+        .filter_map(|((entity, attribute, value, valid_from, valid_to), fact)| {
+            let unscoped_retract_tx = max_unscoped_retract_tx
+                .get(&(entity, attribute.clone(), value.clone()))
                 .copied()
                 .unwrap_or(0);
+            let scoped_retract_tx = max_scoped_retract_tx
+                .get(&(entity, attribute, value, valid_from, valid_to))
+                .copied()
+                .unwrap_or(0);
+            let retract_tx = unscoped_retract_tx.max(scoped_retract_tx);
             (fact.tx_count > retract_tx).then_some(fact)
         })
         .collect()
@@ -1868,8 +1924,29 @@ mod tests {
             value,
             tx_id: tx_count as u64,
             tx_count,
-            valid_from: 0,
+            valid_from: RETRACT_ALL_VALID_FROM,
             valid_to: VALID_TIME_FOREVER,
+            asserted: false,
+        }
+    }
+
+    /// Helper: build a scoped retraction with explicit tx_count and valid window.
+    fn make_scoped_retract(
+        entity: uuid::Uuid,
+        attr: &str,
+        value: Value,
+        tx_count: u64,
+        valid_from: i64,
+        valid_to: i64,
+    ) -> Fact {
+        Fact {
+            entity,
+            attribute: attr.to_string(),
+            value,
+            tx_id: tx_count as u64,
+            tx_count,
+            valid_from,
+            valid_to,
             asserted: false,
         }
     }
@@ -1946,5 +2023,31 @@ mod tests {
             0,
             "retraction should wipe all windows for the EAV triple"
         );
+    }
+
+    /// A scoped retraction only wipes the matching valid-time window of the
+    /// same EAV triple. Other windows with the same E/A/V must survive.
+    #[test]
+    fn test_net_asserted_scoped_retraction_only_wipes_matching_window() {
+        let entity = uuid::Uuid::new_v4();
+        let attr = ":salary";
+        let value = Value::Integer(100_000);
+        let w1 = (1_577_836_800_000, 1_640_995_200_000);
+        let w2 = (1_704_067_200_000, VALID_TIME_FOREVER);
+
+        let facts = vec![
+            make_assert(entity, attr, value.clone(), 1, w1.0, w1.1),
+            make_assert(entity, attr, value.clone(), 2, w2.0, w2.1),
+            make_scoped_retract(entity, attr, value.clone(), 3, w1.0, w1.1),
+        ];
+
+        let result = net_asserted_facts(facts);
+        assert_eq!(
+            result.len(),
+            1,
+            "scoped retraction should only remove one valid-time window"
+        );
+        assert_eq!(result[0].valid_from, w2.0);
+        assert_eq!(result[0].valid_to, w2.1);
     }
 }

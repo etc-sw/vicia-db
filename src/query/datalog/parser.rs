@@ -960,10 +960,12 @@ fn parse_query(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
     Ok(DatalogCommand::Query(query))
 }
 
-fn parse_transact(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
-    // Parse (transact [facts]) or (transact {opts} [facts])
+fn parse_transaction_elements(
+    elements: &[EdnValue],
+    command_name: &str,
+) -> Result<Transaction, String> {
     if elements.is_empty() {
-        return Err("Transact requires a vector of facts".to_string());
+        return Err(format!("{command_name} requires a vector of facts"));
     }
 
     // SAFETY: is_empty() check above guarantees index 0 exists
@@ -977,7 +979,7 @@ fn parse_transact(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
         })?;
         let (from, to) = parse_valid_time_map(map)?;
         let facts_elem = elements.get(1).ok_or_else(|| {
-            "Transact with options requires a facts vector after the map".to_string()
+            format!("{command_name} with options requires a facts vector after the map")
         })?;
         (from, to, facts_elem)
     } else {
@@ -986,7 +988,7 @@ fn parse_transact(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
 
     let facts_vector = facts_element
         .as_vector()
-        .ok_or("Transact argument must be a vector of facts")?;
+        .ok_or_else(|| format!("{command_name} argument must be a vector of facts"))?;
 
     let mut patterns = Vec::new();
     for fact in facts_vector {
@@ -1044,7 +1046,14 @@ fn parse_transact(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
     let mut tx = Transaction::new(patterns);
     tx.valid_from = tx_valid_from;
     tx.valid_to = tx_valid_to;
-    Ok(DatalogCommand::Transact(tx))
+    Ok(tx)
+}
+
+fn parse_transact(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
+    // Parse (transact [facts]) or (transact {opts} [facts])
+    Ok(DatalogCommand::Transact(parse_transaction_elements(
+        elements, "Transact",
+    )?))
 }
 
 /// Parse a valid-time map `{:valid-from "ts" :valid-to "ts"}` into millisecond timestamps.
@@ -1094,26 +1103,10 @@ fn parse_valid_time_map(
 }
 
 fn parse_retract(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
-    // Same structure as transact
-    if elements.is_empty() {
-        return Err("Retract requires a vector of facts".to_string());
-    }
-
-    // SAFETY: is_empty() check above guarantees index 0 exists
-    #[allow(clippy::indexing_slicing)]
-    let facts_vector = elements[0]
-        .as_vector()
-        .ok_or("Retract argument must be a vector")?;
-
-    let mut patterns = Vec::new();
-    for fact in facts_vector {
-        let fact_vec = fact
-            .as_vector()
-            .ok_or("Each fact must be a vector [e a v]")?;
-        patterns.push(Pattern::from_edn(fact_vec)?);
-    }
-
-    Ok(DatalogCommand::Retract(Transaction::new(patterns)))
+    // Parse (retract [facts]) or (retract {opts} [facts])
+    Ok(DatalogCommand::Retract(parse_transaction_elements(
+        elements, "Retract",
+    )?))
 }
 
 /// Convert a single EDN token to an Expr leaf, or recurse for a nested list.
@@ -2326,6 +2319,39 @@ mod tests {
         assert!(tx.facts[0].valid_from.is_some());
         assert!(tx.facts[0].valid_to.is_some());
         // Second fact inherits tx-level valid_from only
+        assert!(tx.facts[1].valid_from.is_some());
+        assert!(tx.facts[1].valid_to.is_none());
+    }
+
+    #[test]
+    fn test_parse_retract_with_tx_level_valid_time() {
+        let cmd = parse_datalog_command(
+            r#"(retract {:valid-from "2023-01-01" :valid-to "2023-06-30"} [[:alice :employment/status :active]])"#,
+        )
+        .unwrap();
+        let tx = match cmd {
+            DatalogCommand::Retract(t) => t,
+            _ => panic!("expected Retract"),
+        };
+        assert!(tx.valid_from.is_some());
+        assert!(tx.valid_to.is_some());
+        assert!(tx.facts[0].valid_from.is_some());
+        assert!(tx.facts[0].valid_to.is_some());
+    }
+
+    #[test]
+    fn test_parse_retract_with_per_fact_valid_time() {
+        let cmd = parse_datalog_command(
+            r#"(retract {:valid-from "2023-01-01"} [[:alice :employment/status :active {:valid-to "2023-06-30"}] [:alice :person/name "Alice"]])"#,
+        )
+        .unwrap();
+        let tx = match cmd {
+            DatalogCommand::Retract(t) => t,
+            _ => panic!("expected Retract"),
+        };
+        assert_eq!(tx.facts.len(), 2);
+        assert!(tx.facts[0].valid_from.is_some());
+        assert!(tx.facts[0].valid_to.is_some());
         assert!(tx.facts[1].valid_from.is_some());
         assert!(tx.facts[1].valid_to.is_none());
     }

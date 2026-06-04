@@ -269,7 +269,7 @@ impl BrowserDb {
                 .map(|mut f| {
                     f.tx_id = tx_id;
                     f.tx_count = tx_count;
-                    if f.asserted && f.valid_from == VALID_FROM_USE_TX_TIME {
+                    if f.valid_from == VALID_FROM_USE_TX_TIME {
                         f.valid_from = tx_id as i64;
                     }
                     f
