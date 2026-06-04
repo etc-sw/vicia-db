@@ -789,7 +789,7 @@ fn test_v2_file_opens_and_upgrades_to_v3_on_checkpoint() {
         // Drop runs another checkpoint, but that's idempotent.
     }
 
-    // ── Read the raw header and assert version = 7 ───────────────────────
+    // ── Read the raw header and assert current version ───────────────────
     // Reads raw bytes: magic at 0..4, version at 4..8 (u32 LE),
     // last_checkpointed_tx_count at 24..32 (u64 LE).
     let raw = std::fs::read(&db_path).unwrap();
@@ -800,7 +800,7 @@ fn test_v2_file_opens_and_upgrades_to_v3_on_checkpoint() {
     let magic = &raw[0..4];
     let version = u32::from_le_bytes(raw[4..8].try_into().unwrap());
     let last_checkpointed_tx_count = u64::from_le_bytes(raw[24..32].try_into().unwrap());
-    assert_eq!(version, 7, "file must be upgraded to v7 on checkpoint");
+    assert_eq!(version, 8, "file must be upgraded on checkpoint");
     assert_eq!(magic, b"MGRF", "magic number must be preserved");
     assert!(
         last_checkpointed_tx_count > 0,

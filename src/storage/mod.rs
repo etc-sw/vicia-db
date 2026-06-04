@@ -57,8 +57,12 @@ pub const PAGE_SIZE: usize = 4096;
 /// Magic number for .graph files: "MGRF" (Minigraf)
 pub const MAGIC_NUMBER: [u8; 4] = *b"MGRF";
 
-/// Current file format version
-pub const FORMAT_VERSION: u32 = 7;
+/// Current file format version.
+///
+/// v8 keeps the v7 header layout but rebuilds persisted EAVT/AEVT indexes with
+/// value bytes in their keys so same entity+attribute multi-value facts cannot
+/// collapse in indexed public query paths.
+pub const FORMAT_VERSION: u32 = 8;
 
 /// fact_page_format: legacy one-per-page (v4 and earlier, or unset byte = 0x00).
 pub const FACT_PAGE_FORMAT_ONE_PER_PAGE: u8 = 0x01;
@@ -108,7 +112,7 @@ pub trait StorageBackend: Send + Sync {
     fn is_new(&self) -> bool;
 }
 
-/// File header for .graph files — 84 bytes in v7.
+/// File header for .graph files — 84 bytes in v8.
 ///
 /// Layout (all fields little-endian):
 ///   0..4    magic ("MGRF")
@@ -262,7 +266,7 @@ impl FileHeader {
 
         let header_checksum = if version >= 7 {
             if bytes.len() < 84 {
-                anyhow::bail!("Invalid v7 header: expected 84 bytes, got {}", bytes.len());
+                anyhow::bail!("Invalid v7+ header: expected 84 bytes, got {}", bytes.len());
             }
             read_u32_le(bytes, 80)?
         } else {
@@ -426,14 +430,14 @@ mod tests {
     }
 
     #[test]
-    fn test_format_version_is_7() {
-        assert_eq!(FORMAT_VERSION, 7);
+    fn test_format_version_is_8() {
+        assert_eq!(FORMAT_VERSION, 8);
     }
 
     #[test]
-    fn test_validate_accepts_version_7() {
+    fn test_validate_accepts_version_8() {
         let mut h = FileHeader::new();
-        h.version = 7;
+        h.version = 8;
         assert!(h.validate().is_ok());
     }
 
@@ -479,21 +483,21 @@ mod tests {
     }
 
     #[test]
-    fn test_new_header_has_version_7() {
+    fn test_new_header_has_version_8() {
         let header = FileHeader::new();
         assert_eq!(header.version, FORMAT_VERSION);
-        assert_eq!(header.version, 7);
+        assert_eq!(header.version, 8);
     }
 
     #[test]
-    fn test_file_header_serialization_v7() {
+    fn test_file_header_serialization_v8() {
         let header = FileHeader::new();
         let bytes = header.to_bytes();
         assert_eq!(bytes.len(), 84);
     }
 
     #[test]
-    fn test_file_header_roundtrip_v7() {
+    fn test_file_header_roundtrip_v8() {
         let mut header = FileHeader::new();
         header.header_checksum = 0xDEAD_BEEF;
         let bytes = header.to_bytes();
@@ -502,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn test_file_header_v7_byte_layout_all_fields() {
+    fn test_file_header_v8_byte_layout_all_fields() {
         let mut h = FileHeader::new();
         h.page_count = 0x0102_0304_0506_0708_u64;
         h.node_count = 0x1112_1314_1516_1718_u64;
@@ -518,10 +522,10 @@ mod tests {
         h.header_checksum = 0xC1C2_C3C4_u32;
 
         let b = h.to_bytes();
-        assert_eq!(b.len(), 84, "v7 header must be exactly 84 bytes");
+        assert_eq!(b.len(), 84, "v8 header must be exactly 84 bytes");
 
         assert_eq!(&b[0..4], b"MGRF");
-        assert_eq!(&b[4..8], &7u32.to_le_bytes());
+        assert_eq!(&b[4..8], &8u32.to_le_bytes());
         assert_eq!(&b[8..16], &0x0102_0304_0506_0708_u64.to_le_bytes());
         assert_eq!(&b[16..24], &0x1112_1314_1516_1718_u64.to_le_bytes());
         assert_eq!(&b[24..32], &0x2122_2324_2526_2728_u64.to_le_bytes());
@@ -556,16 +560,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_accepts_versions_1_to_7() {
+    fn test_validate_accepts_versions_1_to_8() {
         let mut h = FileHeader::new();
-        for v in 1u32..=7 {
+        for v in 1u32..=8 {
             h.version = v;
             assert!(h.validate().is_ok(), "version {} should be accepted", v);
         }
     }
 
     #[test]
-    fn test_file_header_v7_header_checksum_roundtrip() {
+    fn test_file_header_v8_header_checksum_roundtrip() {
         let mut h = FileHeader::new();
         h.header_checksum = 42;
         let bytes = h.to_bytes();

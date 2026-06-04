@@ -104,7 +104,7 @@ cargo run < demos/demo_negation.txt
    - `storage.rs`: `FactStorage` — in-memory store, `transact_batch`, `retract`, `get_facts_as_of`, `get_facts_valid_at`, `net_asserted_facts`
 
 2. **`src/storage/`** — Persistence layer
-   - `mod.rs`: `StorageBackend` trait, `FileHeader` v7 (84 bytes), `CommittedFactReader` / `CommittedIndexReader` traits
+   - `mod.rs`: `StorageBackend` trait, `FileHeader` v8 (84 bytes), `CommittedFactReader` / `CommittedIndexReader` traits
    - `backend/file.rs`: Single `.graph` file backend (4KB pages, cross-platform)
    - `backend/memory.rs`: In-memory backend for testing
    - `index.rs`: EAVT / AEVT / AVET / VAET key types, `FactRef`, `encode_value`
@@ -112,7 +112,7 @@ cargo run < demos/demo_negation.txt
    - `btree.rs`: Legacy v5 B+tree (migration only)
    - `cache.rs`: LRU page cache (`PageCache`, default 256 pages)
    - `packed_pages.rs`: Packed fact pages (~25 facts/4KB page), `MAX_FACT_BYTES`
-   - `persistent_facts.rs`: `PersistentFactStorage` — v7 save/load, auto-migration v1–v6→v7
+   - `persistent_facts.rs`: `PersistentFactStorage` — v8 save/load, auto-migration v1–v7→v8
 
 3. **`src/query/datalog/`** — Datalog engine
    - `parser.rs`: EDN/Datalog parser — `transact`, `retract`, `query`, `rule`, `:as-of`, `:valid-at`, `not`, `not-join`
@@ -153,7 +153,7 @@ enum Value { String(String), Integer(i64), Float(f64), Boolean(bool),
 
 **Important**: `tx_count` (sequential 1, 2, 3…) is what `:as-of N` compares against. The REPL displays `tx_id` (Unix ms). A single `(transact [...])` command increments `tx_count` once regardless of how many facts it contains (`transact_batch`).
 
-### File Format (v7)
+### File Format (v8)
 
 ```
 Page 0:  Header (84 bytes) — magic "MGRF", version, page/fact counts,
@@ -163,11 +163,11 @@ After:   On-disk B+tree index pages (one node per 4KB page)
 Sidecar: <db>.wal — CRC32-protected WAL entries; replayed on open; deleted on checkpoint
 ```
 
-Auto-migrates v1/v2/v3/v4/v5/v6 → v7 on open/checkpoint.
+Auto-migrates v1/v2/v3/v4/v5/v6/v7 → v8 on open/checkpoint.
 
 ## Test Coverage
 
-**974 tests passing** (unit + integration + doc).
+**984 tests total** (976 passing, 8 ignored).
 See `docs/TEST_COVERAGE.md` for the full per-file breakdown.
 
 **Testing conventions** — see the Testing Conventions section below before writing any tests.

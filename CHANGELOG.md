@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `docs/ERROR_REFERENCE.md`: full inventory of user-facing errors (PRS/QRY/STG/WAL/API categories, 113 entries) with cause, resolution steps, and bad-input examples; docs-only reference codes PRS-001…API-009 (#192)
 
+### Bug fixes
+
+- Fix indexed public Datalog queries silently collapsing same entity+attribute multi-value facts inserted in one transaction (#287)
+  - `EAVT`, `AEVT`, `AVET`, and `VAET` index keys now include canonical value bytes plus `tx_id`/`asserted` identity so BTree-backed lookups preserve ledger-distinct facts sharing one `tx_count`
+  - `selective_fact_fetch` deduplicates by full fact identity, including value bytes, valid-time window, `tx_id`, and `asserted`
+  - File format bumped to v8; v7 packed files rebuild persisted indexes from fact pages on open
+  - Added `tests/multivalue_index_test.rs` coverage for N=3/N=10 batches, mixed value types, ref edges, `:as-of`, `:valid-at`, retraction, and checkpoint/reopen
+
 ## v1.1.1 — 2026-05-17
 
 Patch release. Fixes cargo-dist Windows build failure that prevented REPL binaries and crates.io publish from completing for v1.1.0. No code changes to the library itself.

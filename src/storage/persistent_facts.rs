@@ -249,7 +249,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             return Ok(());
         }
 
-        // v6 packed format
+        // Packed fact-page format (v6+).
         let num_fact_pages = if header.version >= 6 && header.fact_page_count > 0 {
             header.fact_page_count
         } else {
@@ -273,7 +273,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         // New files (post-fix): checksum covers ALL pages (facts + indexes).
         // Old files (pre-fix): checksum covers only fact pages.
         // Try full checksum first; fall back to fact-only for backwards compat.
-        let needs_rebuild = if num_fact_pages == 0 || header.eavt_root_page == 0 {
+        let old_index_key_format = header.version < crate::storage::FORMAT_VERSION;
+        let needs_rebuild = if old_index_key_format && num_fact_pages > 0 {
+            true
+        } else if num_fact_pages == 0 || header.eavt_root_page == 0 {
             num_fact_pages > 0 // rebuild if facts exist but no index root
         } else {
             let backend = self
@@ -313,7 +316,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .restore_tx_counter_from(header.last_checkpointed_tx_count);
 
         if needs_rebuild {
-            // Checksum mismatch: rebuild indexes by re-reading all packed facts
+            // Rebuild indexes by re-reading all packed facts. This covers checksum
+            // mismatches and older on-disk index key layouts.
             let all_facts = {
                 let backend = self
                     .backend
@@ -682,6 +686,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                         valid_from: fact.valid_from,
                         valid_to: fact.valid_to,
                         tx_count: fact.tx_count,
+                        value_bytes: encode_value(&fact.value),
+                        tx_id: fact.tx_id,
+                        asserted: fact.asserted,
                     },
                     fr,
                 );
@@ -692,6 +699,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                         valid_from: fact.valid_from,
                         valid_to: fact.valid_to,
                         tx_count: fact.tx_count,
+                        value_bytes: encode_value(&fact.value),
+                        tx_id: fact.tx_id,
+                        asserted: fact.asserted,
                     },
                     fr,
                 );
@@ -703,6 +713,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                         valid_to: fact.valid_to,
                         entity: fact.entity,
                         tx_count: fact.tx_count,
+                        tx_id: fact.tx_id,
+                        asserted: fact.asserted,
                     },
                     fr,
                 );
@@ -715,6 +727,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                             valid_to: fact.valid_to,
                             source_entity: fact.entity,
                             tx_count: fact.tx_count,
+                            tx_id: fact.tx_id,
+                            asserted: fact.asserted,
                         },
                         fr,
                     );
@@ -761,7 +775,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             next_free4,
         )?;
 
-        let mut new_header = FileHeader::new(); // version=7
+        let mut new_header = FileHeader::new(); // current format
         new_header.page_count = final_next_free;
         new_header.node_count = header.node_count;
         new_header.last_checkpointed_tx_count = header.last_checkpointed_tx_count;
@@ -965,7 +979,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
 
         // ── Step E: write header (last write = crash-safe boundary) ─────────────
-        let mut header = FileHeader::new(); // version=7
+        let mut header = FileHeader::new(); // current format
         header.page_count = next4;
         let pending_len = u64::try_from(pending_facts.len())
             .map_err(|_| anyhow::anyhow!("pending fact count exceeds u64::MAX"))?;
@@ -1179,6 +1193,9 @@ fn build_sorted_index_entries(
                     valid_from: f.valid_from,
                     valid_to: f.valid_to,
                     tx_count: f.tx_count,
+                    value_bytes: encode_value(&f.value),
+                    tx_id: f.tx_id,
+                    asserted: f.asserted,
                 },
                 fr,
             )
@@ -1197,6 +1214,9 @@ fn build_sorted_index_entries(
                     valid_from: f.valid_from,
                     valid_to: f.valid_to,
                     tx_count: f.tx_count,
+                    value_bytes: encode_value(&f.value),
+                    tx_id: f.tx_id,
+                    asserted: f.asserted,
                 },
                 fr,
             )
@@ -1216,6 +1236,8 @@ fn build_sorted_index_entries(
                     valid_to: f.valid_to,
                     entity: f.entity,
                     tx_count: f.tx_count,
+                    tx_id: f.tx_id,
+                    asserted: f.asserted,
                 },
                 fr,
             )
@@ -1236,6 +1258,8 @@ fn build_sorted_index_entries(
                         valid_to: f.valid_to,
                         source_entity: f.entity,
                         tx_count: f.tx_count,
+                        tx_id: f.tx_id,
+                        asserted: f.asserted,
                     },
                     fr,
                 ))
@@ -1674,12 +1698,12 @@ mod tests {
             pfs.save().unwrap();
         }
 
-        // Verify: header says v6, fact_page_format = PACKED
+        // Verify: header says current format, fact_page_format = PACKED
         {
             let backend = FileBackend::open(&path).unwrap();
             let header_bytes = backend.read_page(0).unwrap();
             let header = crate::storage::FileHeader::from_bytes(&header_bytes).unwrap();
-            assert_eq!(header.version, 7);
+            assert_eq!(header.version, crate::storage::FORMAT_VERSION);
             assert_eq!(
                 header.fact_page_format,
                 crate::storage::FACT_PAGE_FORMAT_PACKED
@@ -1773,7 +1797,7 @@ mod tests {
             backend.sync().unwrap();
         }
 
-        // Open — should auto-migrate to v7
+        // Open — should auto-migrate to the current format
         {
             let pfs = PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
             assert_eq!(
@@ -1783,12 +1807,16 @@ mod tests {
             );
         }
 
-        // Verify file is now v7
+        // Verify file is now current format
         {
             let backend = FileBackend::open(&path).unwrap();
             let header_bytes = backend.read_page(0).unwrap();
             let header = crate::storage::FileHeader::from_bytes(&header_bytes).unwrap();
-            assert_eq!(header.version, 7, "file must be upgraded to v7");
+            assert_eq!(
+                header.version,
+                crate::storage::FORMAT_VERSION,
+                "file must be upgraded to current format"
+            );
             assert_eq!(header.fact_page_format, FACT_PAGE_FORMAT_PACKED);
         }
     }
@@ -1834,7 +1862,7 @@ mod tests {
     // ── v6 on-disk B+tree tests ─────────────────────────────────────────────
 
     #[test]
-    fn test_save_writes_v6_header() {
+    fn test_save_writes_current_header() {
         let backend = MemoryBackend::new();
         let mut storage = PersistentFactStorage::new(backend, 256).unwrap();
         storage
@@ -1854,8 +1882,12 @@ mod tests {
         let backend = storage.into_backend().unwrap();
         let header_page = backend.read_page(0).unwrap();
         let header = crate::storage::FileHeader::from_bytes(&header_page).unwrap();
-        assert_eq!(header.version, 7, "save() must write v7 header");
-        assert_eq!(header.to_bytes().len(), 84, "v7 header must be 84 bytes");
+        assert_eq!(
+            header.version,
+            crate::storage::FORMAT_VERSION,
+            "save() must write current header"
+        );
+        assert_eq!(header.to_bytes().len(), 84, "header must be 84 bytes");
         assert!(header.fact_page_count > 0, "fact_page_count must be set");
         assert!(
             header.eavt_root_page > 0,
@@ -1954,8 +1986,12 @@ mod tests {
         let b = s.into_backend().unwrap();
         let header_page = b.read_page(0).unwrap();
         let header = crate::storage::FileHeader::from_bytes(&header_page).unwrap();
-        assert_eq!(header.version, 7, "migration must upgrade header to v7");
-        assert_eq!(header.to_bytes().len(), 84, "v7 header must be 84 bytes");
+        assert_eq!(
+            header.version,
+            crate::storage::FORMAT_VERSION,
+            "migration must upgrade header to current format"
+        );
+        assert_eq!(header.to_bytes().len(), 84, "header must be 84 bytes");
         // page_count=2 means 1 fact page (page 1), even if empty
         assert_eq!(
             header.fact_page_count, 1,
@@ -1980,7 +2016,8 @@ mod tests {
         let header_bytes = b.read_page(0).unwrap();
         let header = crate::storage::FileHeader::from_bytes(&header_bytes).unwrap();
         assert_eq!(
-            header.version, 7,
+            header.version,
+            crate::storage::FORMAT_VERSION,
             "migration must complete despite prior partial run"
         );
     }
@@ -1995,7 +2032,7 @@ mod tests {
     /// (each read_exact returns zeros, no error), hanging the process.
     ///
     /// After the fix, next_free = 1 + validated_num_fact_pages (= 1 here),
-    /// so migration completes in constant time and produces a sane v7 header.
+    /// so migration completes in constant time and produces a sane current header.
     #[test]
     fn test_v5_migration_large_page_count_does_not_hang() {
         use crate::storage::backend::FileBackend;
@@ -2020,7 +2057,11 @@ mod tests {
         let b = s.into_backend().unwrap();
         let header_bytes = b.read_page(0).unwrap();
         let header = crate::storage::FileHeader::from_bytes(&header_bytes).unwrap();
-        assert_eq!(header.version, 7, "migration must upgrade to v7");
+        assert_eq!(
+            header.version,
+            crate::storage::FORMAT_VERSION,
+            "migration must upgrade to current format"
+        );
         // Resulting page_count must be small (0 fact pages + 4 index pages + header),
         // NOT the crafted 3.6-billion-page value.
         assert!(

@@ -104,7 +104,7 @@ appear in runtime output today — runtime codes are tracked in
 | STG-002 | Invalid magic number: not a .graph file | Storage |
 | STG-003 | Invalid v4/v5/v6 header too short | Storage |
 | STG-004 | Invalid v6 header too short | Storage |
-| STG-005 | Invalid v7 header too short | Storage |
+| STG-005 | Invalid v7+ header too short | Storage |
 | STG-006 | Unsupported format version | Storage |
 | STG-007 | page_count must be greater than 0 | Storage |
 | STG-008 | eavt_root_page must be less than page_count | Storage |
@@ -1569,16 +1569,16 @@ See the [file format section in README](../README.md#file-format) for version hi
 
 **Scenario**: A v6-format `.graph` file was written by an older pre-release version and its header is incomplete.
 
-### STG-005 Invalid v7 header too short
+### STG-005 Invalid v7+ header too short
 
-**Error text**: `Invalid v7 header: expected 84 bytes, got 80`
+**Error text**: `Invalid v7+ header: expected 84 bytes, got 80`
 
-**Cause**: A file identified as format version 7 (current format) is shorter than the required 84-byte header. The file is truncated.
+**Cause**: A file identified as format version 7 or later is shorter than the required 84-byte header. The file is truncated.
 
 **Resolution**:
 - Restore from backup. If the file is newly created, delete it. See the [file format section in README](../README.md#file-format).
 
-**Scenario**: A v7-format `.graph` file was partially written by a crash during header initialisation.
+**Scenario**: A v7+ `.graph` file was partially written by a crash during header initialisation.
 
 ### STG-006 Unsupported format version
 

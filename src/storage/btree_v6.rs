@@ -719,8 +719,9 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::types::Value;
     use crate::storage::backend::MemoryBackend;
-    use crate::storage::index::{EavtKey, FactRef};
+    use crate::storage::index::{EavtKey, FactRef, encode_value};
     use uuid::Uuid;
 
     fn make_eavt(n: u128, attr: &str, tx: u64) -> (EavtKey, FactRef) {
@@ -731,6 +732,9 @@ mod tests {
                 valid_from: 0,
                 valid_to: i64::MAX,
                 tx_count: tx,
+                value_bytes: encode_value(&Value::Integer(tx.cast_signed())),
+                tx_id: tx,
+                asserted: true,
             },
             FactRef {
                 page_id: tx + 1,
@@ -1000,6 +1004,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let next_entity = Uuid::from_u128(43);
         let end = EavtKey {
@@ -1008,6 +1015,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
 
         let refs = range_scan(root, &start, Some(&end), &backend, &cache).unwrap();
@@ -1038,6 +1048,9 @@ mod tests {
             valid_from: 0,
             valid_to: 0,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let refs = range_scan::<EavtKey>(root, &start, None, &backend, &cache).unwrap();
         assert_eq!(refs.len(), 0);
@@ -1059,6 +1072,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let refs = range_scan::<EavtKey>(root, &start, None, &backend, &cache).unwrap();
         assert_eq!(refs.len(), 5, "entities 5..9 = 5 entries");
@@ -1080,6 +1096,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let end = EavtKey {
             entity: Uuid::from_u128(200),
@@ -1087,6 +1106,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let refs = range_scan(root, &start, Some(&end), &backend, &cache).unwrap();
         // NOTE: The end key has attribute="" which sorts BEFORE ":a". So entity 200's
@@ -1121,6 +1143,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let end = EavtKey {
             entity: Uuid::from_u128(10),
@@ -1128,6 +1153,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let refs = reader.range_scan_eavt(&start, Some(&end)).unwrap();
         // Same exclusion logic: entity 10's entry {10, ":x", ...} > end {10, "", ...}
@@ -1169,6 +1197,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let end = EavtKey {
             entity: Uuid::from_u128(20),
@@ -1176,6 +1207,9 @@ mod tests {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
 
         let barrier = Arc::new(Barrier::new(8));

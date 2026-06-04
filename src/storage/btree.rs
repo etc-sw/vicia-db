@@ -339,8 +339,9 @@ pub fn write_all_indexes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::types::Value;
     use crate::storage::backend::memory::MemoryBackend;
-    use crate::storage::index::{EavtKey, FactRef};
+    use crate::storage::index::{EavtKey, FactRef, encode_value};
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -352,6 +353,9 @@ mod tests {
                 valid_from: 0,
                 valid_to: i64::MAX,
                 tx_count: tx,
+                value_bytes: encode_value(&Value::Integer(tx.cast_signed())),
+                tx_id: tx,
+                asserted: true,
             },
             FactRef {
                 page_id: tx,

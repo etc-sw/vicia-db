@@ -9,6 +9,7 @@ use super::types::{
 };
 use crate::graph::FactStorage;
 use crate::graph::types::{Fact, TransactOptions, TxId, Value, tx_id_now};
+use crate::storage::index::encode_value;
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -374,9 +375,24 @@ impl DatalogExecutor {
     /// selective, but multi-pattern joins still need attribute candidates for patterns that do not
     /// bind an entity. If any pattern has neither a bound entity nor a bound attribute, or if the
     /// distinct lookup count exceeds `threshold`, returns `None` to use a full scan. Otherwise
-    /// returns `Some(facts)`, deduplicated by `(entity, attribute, tx_count, asserted)`.
+    /// returns `Some(facts)`, deduplicated by full fact identity.
     fn selective_fact_fetch(&self, patterns: &[Pattern], threshold: usize) -> Option<Vec<Fact>> {
         use std::collections::HashSet;
+
+        type SelectiveDedupKey = (uuid::Uuid, String, Vec<u8>, i64, i64, u64, u64, bool);
+
+        fn dedup_key(fact: &Fact) -> SelectiveDedupKey {
+            (
+                fact.entity,
+                fact.attribute.clone(),
+                encode_value(&fact.value),
+                fact.valid_from,
+                fact.valid_to,
+                fact.tx_count,
+                fact.tx_id,
+                fact.asserted,
+            )
+        }
 
         let mut entity_ids: HashSet<uuid::Uuid> = HashSet::new();
         let mut attributes: HashSet<String> = HashSet::new();
@@ -405,23 +421,16 @@ impl DatalogExecutor {
             return None;
         }
 
-        // Dedup key: (entity uuid, attribute string, tx_count, asserted) — avoids Value debug
-        // formatting. Including `asserted` ensures that a retraction and an assertion committed in
-        // the same WriteTransaction (same tx_count) are both retained, since they differ only by
-        // the `asserted` flag.
-        let mut seen: HashSet<(uuid::Uuid, String, u64, bool)> = HashSet::new();
+        // Include full fact identity so same entity+attribute batches do not
+        // collapse distinct facts that share one tx_count.
+        let mut seen: HashSet<SelectiveDedupKey> = HashSet::new();
         let mut all_facts: Vec<Fact> = Vec::new();
 
         for uid in &entity_ids {
             match self.storage.get_facts_by_entity(uid) {
                 Ok(facts) => {
                     for fact in facts {
-                        let key = (
-                            fact.entity,
-                            fact.attribute.clone(),
-                            fact.tx_count,
-                            fact.asserted,
-                        );
+                        let key = dedup_key(&fact);
                         if seen.insert(key) {
                             all_facts.push(fact);
                         }
@@ -435,12 +444,7 @@ impl DatalogExecutor {
             match self.storage.get_facts_by_attribute(attr) {
                 Ok(facts) => {
                     for fact in facts {
-                        let key = (
-                            fact.entity,
-                            fact.attribute.clone(),
-                            fact.tx_count,
-                            fact.asserted,
-                        );
+                        let key = dedup_key(&fact);
                         if seen.insert(key) {
                             all_facts.push(fact);
                         }

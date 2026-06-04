@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: magic sets (#289) complete (June 2026), 974 tests ✅
+**Last Updated**: indexed multi-value regression fix (#287) complete (June 2026), 984 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 974 ✅ (966 passing, 8 ignored)
-- ✅ 653 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289)
+**Total Tests**: 984 ✅ (976 passing, 8 ignored)
+- ✅ 655 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -29,7 +29,8 @@
 - ✅ 10 UDF tests (integration, Phase 7.7b — custom aggregates, custom predicates, UDF as window function, name collision guards, runtime errors, thread safety)
 - ✅ 17 prepared statement tests (integration, Phase 7.8 — entity/value/as-of/valid-at slots, combined temporal+entity, AnyValidTime, error paths, plan reuse)
 - ✅ 3 grammar conformance tests (integration, Phase 7.9 — pest shadow grammar + EDN corpus)
-- ✅ 5 migration matrix tests (integration, Wave 3 #215 — v7 round-trip, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
+- ✅ 6 migration matrix tests (integration, Wave 3 #215 + v7→v8 index-format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
+- ✅ 7 multi-value index tests (integration, #287 — same entity+attribute batch values survive indexed public query paths, ref edges, `:as-of`, `:valid-at`, retraction, checkpoint/reopen)
 - ✅ 5 index corruption tests (integration, Wave 3 #216 — checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)
@@ -38,7 +39,7 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 966 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
+**Status**: ✅ **All 976 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -46,7 +47,7 @@
 
 **New tests added by Wave 3** (+87 total):
 - ✅ `wal_test.rs` — 9 new fault-injection tests (FaultInjectingBackend: write fail, flush fail, read fault, WAL CRC corruption, checkpoint atomicity, partial checkpoint recovery, multi-writer serialisation, concurrent write+checkpoint, backend error propagation)
-- ✅ `tests/migration_matrix_test.rs` — 5 migration tests (v7 round-trip, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
+- ✅ `tests/migration_matrix_test.rs` — 6 migration tests (current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
 - ✅ `tests/index_corruption_test.rs` — 5 corruption-resilience tests (checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
 - ✅ `tests/concurrency_test.rs` — 5 new stress tests (stress readers during writer, failed write then success, rollback after partial work, open/write/checkpoint/query loop per thread, nightly stress loop)
 - ✅ `tests/property_test.rs` — 3 proptest property tests (EAV fact model, bi-temporal monotonicity, retract visibility)
@@ -414,7 +415,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 
 **Coverage**: ~93%
 
-### 5. Covering Indexes (`src/storage/index.rs`) - ✅ Excellent (11 tests)
+### 5. Covering Indexes (`src/storage/index.rs`) - ✅ Excellent (12 tests)
 
 - ✅ `FactRef` field access
 - ✅ `encode_value` sort order: integers, cross-type, floats, NaN canonicalization
@@ -422,6 +423,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ AVET key ordering by value bytes
 - ✅ VAET only populated for `Value::Ref`
 - ✅ `Indexes::insert` populates all four indexes
+- ✅ Asserted/retracted ref facts with the same E/A/V/window/tx identity stay distinct in all four indexes
 
 **Coverage**: ~98%
 
@@ -681,13 +683,24 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `execute_with_extra_bindings` — extra `BindValue`s beyond declared slots are silently ignored
 - ✅ `multiple_slots_same_execute` — multiple distinct `$slot` names resolved in a single `execute()` call
 
-### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 5 tests (Wave 3 #215)
+### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 6 tests (Wave 3 #215 + v8 index migration)
 
-- ✅ v7 round-trip — facts written and read back correctly after save/load
-- ✅ v3 empty migrate — empty v3 database opens and migrates to v7 cleanly
+- ✅ current format round-trip — facts written and read back correctly after save/load
+- ✅ v7 fixture migrate — committed v7 fixture opens and upgrades to current v8 index format
+- ✅ v3 empty migrate — empty v3 database opens cleanly
 - ✅ corrupt magic — file with bad magic header returns `Err`, not panic
 - ✅ unsupported version — file with unrecognised format version returns `Err`
 - ✅ WAL replay idempotent — replaying a WAL twice produces the same result as replaying once
+
+### Multi-Value Index Regression (`tests/multivalue_index_test.rs`) - ✅ 7 tests (#287)
+
+- ✅ entity-bound indexed query keeps N=3 same entity+attribute values from one batch
+- ✅ N=10 same entity+attribute values survive one transaction
+- ✅ mixed string/integer/boolean/keyword values survive one same-attribute batch
+- ✅ ref edge values survive same entity+attribute batch and attribute+ref-value lookups
+- ✅ `:as-of` replay sees every pre-retraction value; current view hides all retracted values
+- ✅ per-fact valid windows remain queryable with `:valid-at`
+- ✅ checkpoint/reopen committed indexes preserve every same entity+attribute value
 
 ### Index Corruption (`tests/index_corruption_test.rs`) - ✅ 5 tests (Wave 3 #216)
 
@@ -884,7 +897,8 @@ cargo test --test predicate_expr_test  # arithmetic & predicate expr (28)
 cargo test --test window_functions_test # window functions (12)
 cargo test --test udf_test             # user-defined functions (9)
 cargo test --test prepared_statements_test # prepared statements (17)
-cargo test --test migration_matrix_test    # migration matrix (5)
+cargo test --test migration_matrix_test    # migration matrix (6)
+cargo test --test multivalue_index_test    # same entity+attribute multi-value regression (7)
 cargo test --test index_corruption_test    # index corruption (5)
 cargo test --test property_test            # property-based (3)
 cargo test --test xtdb_compat_test         # XTDB compat (10)
@@ -924,7 +938,8 @@ cargo test -- --nocapture
 - Prepared statements verified: entity/value/as-of/valid-at slot positions, AnyValidTime, combined temporal+entity (agentic loop pattern), plan reuse, all error paths (Phase 7.8)
 - Public API surface verified via rustdoc doctests: `Minigraf::open`, `execute`, `prepare`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9)
 - WAL fault injection verified: write-fail, flush-fail, read-fault, CRC corruption, checkpoint atomicity, concurrent write+checkpoint (Wave 3)
-- Migration matrix verified: v7 round-trip, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3)
+- Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v8 index migration)
+- Multi-value index regression verified: same entity+attribute batch values survive indexed public query paths, ref edge lookups, temporal replay, retraction, and checkpoint/reopen (#287)
 - Index corruption resilience verified: checksum corruption triggers rebuild, btree corruption returns Err not panic (Wave 3)
 - Property-based testing verified: EAV model, bi-temporal monotonicity, retract visibility (Wave 3)
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)

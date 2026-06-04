@@ -11,10 +11,10 @@ use std::sync::{Arc, RwLock};
 /// Compact key for O(1) duplicate detection in `FactData::pending_keys`.
 ///
 /// Mirrors the equality predicate used by `load_fact`:
-/// (entity, attribute, encoded_value, valid_from, valid_to, tx_count, asserted).
+/// (entity, attribute, encoded_value, valid_from, valid_to, tx_count, tx_id, asserted).
 /// `encode_value` is used for the value field because `Value` contains `f64`
 /// and therefore cannot implement `Hash` directly.
-type PendingKey = (EntityId, String, Vec<u8>, i64, i64, u64, bool);
+type PendingKey = (EntityId, String, Vec<u8>, i64, i64, u64, TxId, bool);
 
 fn pending_key(f: &Fact) -> PendingKey {
     (
@@ -24,6 +24,7 @@ fn pending_key(f: &Fact) -> PendingKey {
         f.valid_from,
         f.valid_to,
         f.tx_count,
+        f.tx_id,
         f.asserted,
     )
 }
@@ -287,7 +288,7 @@ impl FactStorage {
     /// counter so subsequent `transact()` calls get correct tx_count values.
     ///
     /// Checks for duplicate facts before loading (based on entity, attribute, value,
-    /// valid_from, valid_to, tx_count, and asserted).
+    /// valid_from, valid_to, tx_count, tx_id, and asserted).
     pub(crate) fn load_fact(&self, fact: Fact) -> Result<bool> {
         let mut d = self
             .data
@@ -629,6 +630,9 @@ impl FactStorage {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let next_entity = uuid::Uuid::from_u128(entity_id.as_u128().wrapping_add(1));
         let end = EavtKey {
@@ -637,6 +641,9 @@ impl FactStorage {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
 
         // Fallback: no indexes built yet
@@ -707,6 +714,9 @@ impl FactStorage {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let end_opt: Option<AevtKey> = next_string_prefix(attribute).map(|next_attr| AevtKey {
             attribute: next_attr,
@@ -714,6 +724,9 @@ impl FactStorage {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         });
 
         let mut facts = Vec::new();
@@ -1781,6 +1794,45 @@ mod tests {
 
         // Both facts should be present
         assert_eq!(storage.fact_count(), 2);
+    }
+
+    #[test]
+    fn test_indexes_preserve_same_ref_assert_and_retract_identity() -> Result<()> {
+        let storage = FactStorage::new();
+        let entity = uuid::Uuid::new_v4();
+        let target = uuid::Uuid::new_v4();
+        let attr = ":edge/to".to_string();
+        let mut asserted = Fact::with_valid_time(
+            entity,
+            attr.clone(),
+            Value::Ref(target),
+            100,
+            7,
+            0,
+            VALID_TIME_FOREVER,
+        );
+        asserted.asserted = true;
+        let mut retracted = Fact::with_valid_time(
+            entity,
+            attr,
+            Value::Ref(target),
+            100,
+            7,
+            0,
+            VALID_TIME_FOREVER,
+        );
+        retracted.asserted = false;
+
+        assert!(storage.load_fact(asserted)?);
+        assert!(storage.load_fact(retracted)?);
+        assert_eq!(storage.index_counts(), (2, 2, 2, 2));
+        assert_eq!(
+            storage.get_facts_by_entity(&entity)?.len(),
+            2,
+            "entity index lookup must preserve both ledger facts"
+        );
+
+        Ok(())
     }
 
     // -------------------------------------------------------------------------

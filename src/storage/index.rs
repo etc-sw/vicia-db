@@ -5,7 +5,7 @@
 //! occupies one page (`slot_index` is always 0). In Phase 6.2, `slot_index`
 //! identifies the record slot within a packed page.
 
-use crate::graph::types::{Attribute, EntityId, Fact, Value};
+use crate::graph::types::{Attribute, EntityId, Fact, TxId, Value};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -97,7 +97,7 @@ pub fn encode_value(v: &Value) -> Vec<u8> {
 
 // ─── Index Key Types ─────────────────────────────────────────────────────────
 
-/// EAVT: sort by (Entity, Attribute, ValidFrom, ValidTo, TxCount)
+/// EAVT: sort by (Entity, Attribute, ValidFrom, ValidTo, TxCount, ValueBytes, TxId, Asserted)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EavtKey {
     pub entity: EntityId,
@@ -105,9 +105,12 @@ pub struct EavtKey {
     pub valid_from: i64,
     pub valid_to: i64,
     pub tx_count: u64,
+    pub value_bytes: Vec<u8>,
+    pub tx_id: TxId,
+    pub asserted: bool,
 }
 
-/// AEVT: sort by (Attribute, Entity, ValidFrom, ValidTo, TxCount)
+/// AEVT: sort by (Attribute, Entity, ValidFrom, ValidTo, TxCount, ValueBytes, TxId, Asserted)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AevtKey {
     pub attribute: Attribute,
@@ -115,9 +118,12 @@ pub struct AevtKey {
     pub valid_from: i64,
     pub valid_to: i64,
     pub tx_count: u64,
+    pub value_bytes: Vec<u8>,
+    pub tx_id: TxId,
+    pub asserted: bool,
 }
 
-/// AVET: sort by (Attribute, ValueBytes, ValidFrom, ValidTo, Entity, TxCount)
+/// AVET: sort by (Attribute, ValueBytes, ValidFrom, ValidTo, Entity, TxCount, TxId, Asserted)
 ///
 /// `value_bytes` is the canonical encoding from `encode_value`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -128,9 +134,11 @@ pub struct AvetKey {
     pub valid_to: i64,
     pub entity: EntityId,
     pub tx_count: u64,
+    pub tx_id: TxId,
+    pub asserted: bool,
 }
 
-/// VAET: sort by (RefTarget, Attribute, ValidFrom, ValidTo, SourceEntity, TxCount)
+/// VAET: sort by (RefTarget, Attribute, ValidFrom, ValidTo, SourceEntity, TxCount, TxId, Asserted)
 ///
 /// Only facts with `Value::Ref` are indexed here.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -141,6 +149,8 @@ pub struct VaetKey {
     pub valid_to: i64,
     pub source_entity: EntityId,
     pub tx_count: u64,
+    pub tx_id: TxId,
+    pub asserted: bool,
 }
 
 // ─── Indexes ─────────────────────────────────────────────────────────────────
@@ -174,6 +184,9 @@ impl Indexes {
                 valid_from: fact.valid_from,
                 valid_to: fact.valid_to,
                 tx_count: fact.tx_count,
+                value_bytes: encode_value(&fact.value),
+                tx_id: fact.tx_id,
+                asserted: fact.asserted,
             },
             fact_ref,
         );
@@ -185,6 +198,9 @@ impl Indexes {
                 valid_from: fact.valid_from,
                 valid_to: fact.valid_to,
                 tx_count: fact.tx_count,
+                value_bytes: encode_value(&fact.value),
+                tx_id: fact.tx_id,
+                asserted: fact.asserted,
             },
             fact_ref,
         );
@@ -197,6 +213,8 @@ impl Indexes {
                 valid_to: fact.valid_to,
                 entity: fact.entity,
                 tx_count: fact.tx_count,
+                tx_id: fact.tx_id,
+                asserted: fact.asserted,
             },
             fact_ref,
         );
@@ -210,6 +228,8 @@ impl Indexes {
                     valid_to: fact.valid_to,
                     source_entity: fact.entity,
                     tx_count: fact.tx_count,
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
                 },
                 fact_ref,
             );
@@ -224,6 +244,9 @@ impl Indexes {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         // Use exclusive range with a very high attribute string
         let end = EavtKey {
@@ -232,6 +255,9 @@ impl Indexes {
             valid_from: i64::MAX,
             valid_to: i64::MAX,
             tx_count: u64::MAX,
+            value_bytes: vec![0xFF],
+            tx_id: u64::MAX,
+            asserted: true,
         };
         self.eavt.range(start..end).map(|(_, v)| *v).collect()
     }
@@ -245,6 +271,9 @@ impl Indexes {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let end = EavtKey {
             entity,
@@ -252,6 +281,9 @@ impl Indexes {
             valid_from: i64::MAX,
             valid_to: i64::MAX,
             tx_count: u64::MAX,
+            value_bytes: vec![0xFF],
+            tx_id: u64::MAX,
+            asserted: true,
         };
         self.eavt.range(start..=end).map(|(_, v)| *v).collect()
     }
@@ -265,6 +297,9 @@ impl Indexes {
             valid_from: i64::MIN,
             valid_to: i64::MIN,
             tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
         };
         let end = AevtKey {
             attribute: attribute.to_string(),
@@ -272,6 +307,9 @@ impl Indexes {
             valid_from: i64::MAX,
             valid_to: i64::MAX,
             tx_count: u64::MAX,
+            value_bytes: vec![0xFF],
+            tx_id: u64::MAX,
+            asserted: true,
         };
         self.aevt.range(start..=end).map(|(_, v)| *v).collect()
     }
@@ -287,6 +325,8 @@ impl Indexes {
             valid_to: i64::MIN,
             entity: EntityId::default(),
             tx_count: 0,
+            tx_id: 0,
+            asserted: false,
         };
         let end = AvetKey {
             attribute: attribute.to_string(),
@@ -295,6 +335,8 @@ impl Indexes {
             valid_to: i64::MAX,
             entity: max_uuid,
             tx_count: u64::MAX,
+            tx_id: u64::MAX,
+            asserted: true,
         };
         self.avet.range(start..=end).map(|(_, v)| *v).collect()
     }
@@ -309,6 +351,8 @@ impl Indexes {
             valid_to: i64::MIN,
             source_entity: EntityId::default(),
             tx_count: 0,
+            tx_id: 0,
+            asserted: false,
         };
         let end = VaetKey {
             ref_target: target,
@@ -318,6 +362,8 @@ impl Indexes {
             valid_to: i64::MAX,
             source_entity: max_uuid,
             tx_count: u64::MAX,
+            tx_id: u64::MAX,
+            asserted: true,
         };
         self.vaet.range(start..=end).map(|(_, v)| *v).collect()
     }
@@ -382,6 +428,9 @@ mod tests {
             valid_from: 0,
             valid_to: i64::MAX,
             tx_count: 1,
+            value_bytes: encode_value(&Value::Integer(10)),
+            tx_id: 100,
+            asserted: true,
         };
         let k2 = EavtKey {
             entity: e2,
@@ -389,6 +438,9 @@ mod tests {
             valid_from: 0,
             valid_to: i64::MAX,
             tx_count: 1,
+            value_bytes: encode_value(&Value::Integer(10)),
+            tx_id: 100,
+            asserted: true,
         };
         assert!(k1 < k2);
     }
@@ -403,6 +455,8 @@ mod tests {
             valid_to: i64::MAX,
             entity: e,
             tx_count: 1,
+            tx_id: 100,
+            asserted: true,
         };
         let k2 = AvetKey {
             attribute: ":score".to_string(),
@@ -411,6 +465,8 @@ mod tests {
             valid_to: i64::MAX,
             entity: e,
             tx_count: 2,
+            tx_id: 200,
+            asserted: true,
         };
         assert!(k1 < k2);
     }
@@ -488,6 +544,68 @@ mod tests {
         assert_eq!(indexes.aevt.len(), 1);
         assert_eq!(indexes.avet.len(), 1);
         assert_eq!(indexes.vaet.len(), 1);
+    }
+
+    #[test]
+    fn test_indexes_preserve_same_ref_assert_and_retract_identity() {
+        let entity = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let asserted = Fact::with_valid_time(
+            entity,
+            ":edge/to".to_string(),
+            Value::Ref(target),
+            100,
+            7,
+            0,
+            VALID_TIME_FOREVER,
+        );
+        let mut retracted = Fact::with_valid_time(
+            entity,
+            ":edge/to".to_string(),
+            Value::Ref(target),
+            100,
+            7,
+            0,
+            VALID_TIME_FOREVER,
+        );
+        retracted.asserted = false;
+
+        let mut indexes = Indexes::new();
+        indexes.insert(
+            &asserted,
+            FactRef {
+                page_id: 1,
+                slot_index: 0,
+            },
+        );
+        indexes.insert(
+            &retracted,
+            FactRef {
+                page_id: 1,
+                slot_index: 1,
+            },
+        );
+
+        assert_eq!(
+            indexes.eavt.len(),
+            2,
+            "EAVT must keep asserted and retracted facts"
+        );
+        assert_eq!(
+            indexes.aevt.len(),
+            2,
+            "AEVT must keep asserted and retracted facts"
+        );
+        assert_eq!(
+            indexes.avet.len(),
+            2,
+            "AVET must keep asserted and retracted facts"
+        );
+        assert_eq!(
+            indexes.vaet.len(),
+            2,
+            "VAET must keep asserted and retracted ref facts"
+        );
     }
 
     #[test]
