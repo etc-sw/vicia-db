@@ -148,6 +148,107 @@ pub(crate) fn inject_magic_guard(rule: &Rule, predicate: &str, adornment: &[char
     Rule { head: rule.head.clone(), body: new_body }
 }
 
+/// Build magic propagation rules for adorned recursive calls within a rule body.
+///
+/// For each `RuleInvocation` in the body that calls an adorned predicate,
+/// emits a rule: (magic-p-ad ?bound_arg) :- (magic-p-ad ?head_bound_var) <preceding non-invocation clauses>
+///
+/// Returns Vec<(predicate_name, Rule)> to be registered with `register_rule_unchecked`.
+#[allow(dead_code)]
+pub(crate) fn build_propagation_rules(
+    rule: &Rule,
+    predicate: &str,
+    adorned: &HashMap<String, Vec<char>>,
+) -> Vec<(String, Rule)> {
+    if rule
+        .body
+        .iter()
+        .any(|c| matches!(c, WhereClause::Not(_) | WhereClause::NotJoin { .. }))
+    {
+        return vec![];
+    }
+
+    let Some(adornment) = adorned.get(predicate) else {
+        return vec![];
+    };
+    let magic_name = magic_pred_name(predicate, adornment);
+
+    // Bound-position variables from the rule head (same logic as inject_magic_guard).
+    debug_assert_eq!(
+        adornment.len(),
+        rule.head.len().saturating_sub(1),
+        "adornment length must equal rule arity"
+    );
+    let bound_head_vars: Vec<EdnValue> = adornment
+        .iter()
+        .enumerate()
+        .filter(|&(_, &ch)| ch == 'b')
+        // rule.head[0] is the predicate name; args start at index 1
+        .filter_map(|(i, _)| rule.head.get(i + 1).cloned())
+        .collect();
+
+    // Guard clause reused in every propagation rule body.
+    let guard = WhereClause::RuleInvocation {
+        predicate: magic_name,
+        args: bound_head_vars,
+    };
+
+    let mut result = Vec::new();
+
+    for (i, clause) in rule.body.iter().enumerate() {
+        let WhereClause::RuleInvocation {
+            predicate: called_pred,
+            args: called_args,
+        } = clause
+        else {
+            continue;
+        };
+
+        // Only emit propagation for calls to an adorned predicate.
+        let Some(called_adornment) = adorned.get(called_pred.as_str()) else {
+            continue;
+        };
+        let called_magic_name = magic_pred_name(called_pred, called_adornment);
+
+        // New magic head args = bound-position args of the recursive call.
+        debug_assert_eq!(
+            called_adornment.len(),
+            called_args.len(),
+            "called adornment length must equal called args length"
+        );
+        let new_magic_args: Vec<EdnValue> = called_adornment
+            .iter()
+            .enumerate()
+            .filter(|&(_, &ch)| ch == 'b')
+            .filter_map(|(i, _)| called_args.get(i).cloned())
+            .collect();
+
+        // Propagation body = guard + all non-RuleInvocation clauses before this call.
+        let mut prop_body = vec![guard.clone()];
+        for preceding in &rule.body[..i] {
+            if !matches!(preceding, WhereClause::RuleInvocation { .. }) {
+                prop_body.push(preceding.clone());
+            }
+        }
+
+        result.push((
+            called_magic_name.clone(),
+            Rule {
+                head: vec![
+                    EdnValue::Symbol(called_magic_name),
+                    new_magic_args
+                        .into_iter()
+                        .next()
+                        .unwrap_or(EdnValue::Symbol("?_".to_string())),
+                ],
+                body: prop_body,
+            },
+        ));
+    }
+
+    result
+}
+
 #[allow(dead_code)]
 pub(crate) fn rewrite(
     _query: &DatalogQuery,
@@ -335,5 +436,45 @@ mod tests {
             matches!(rewritten.body.first().unwrap(), WhereClause::Pattern(_)),
             "mixed rule must not have guard injected"
         );
+    }
+
+    #[test]
+    fn test_propagation_rule_emitted_for_recursive_call() {
+        // (ancestor ?a ?c) :- [?a :parent ?b] (ancestor ?b ?c)
+        // bf → (__magic_ancestor_bf ?b) :- (__magic_ancestor_bf ?a) [?a :parent ?b]
+        let rule = make_rule(
+            "ancestor",
+            &["?a", "?c"],
+            vec![pat("?a", ":parent", "?b"), rule_inv("ancestor", &["?b", "?c"])],
+        );
+        let adorned: HashMap<String, Vec<char>> =
+            [("ancestor".to_string(), vec!['b', 'f'])].into_iter().collect();
+        let prop_rules = build_propagation_rules(&rule, "ancestor", &adorned);
+        assert_eq!(prop_rules.len(), 1);
+
+        let (pred, prop) = &prop_rules[0];
+        assert_eq!(pred.as_str(), magic_pred_name("ancestor", &['b', 'f']).as_str());
+        // Head: [Symbol("__magic_ancestor_bf"), Symbol("?b")]
+        assert_eq!(prop.head.len(), 2);
+        assert_eq!(prop.head[1], EdnValue::Symbol("?b".to_string()));
+        // Body: [magic_guard(?a), [?a :parent ?b]]
+        assert_eq!(prop.body.len(), 2);
+        match &prop.body[0] {
+            WhereClause::RuleInvocation { predicate, args } => {
+                assert_eq!(predicate, &magic_pred_name("ancestor", &['b', 'f']));
+                assert_eq!(args[0], EdnValue::Symbol("?a".to_string()));
+            }
+            _ => panic!("expected magic guard in propagation body"),
+        }
+    }
+
+    #[test]
+    fn test_no_propagation_for_non_recursive_rule() {
+        // (ancestor ?a ?b) :- [?a :parent ?b]  — no recursive call
+        let rule = make_rule("ancestor", &["?a", "?b"], vec![pat("?a", ":parent", "?b")]);
+        let adorned: HashMap<String, Vec<char>> =
+            [("ancestor".to_string(), vec!['b', 'f'])].into_iter().collect();
+        let prop_rules = build_propagation_rules(&rule, "ancestor", &adorned);
+        assert!(prop_rules.is_empty());
     }
 }
