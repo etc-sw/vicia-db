@@ -126,6 +126,78 @@ fn export_fact_log_distinguishes_scoped_retract_window_for_ref_edge() -> Result<
     Ok(())
 }
 
+#[test]
+fn export_fact_log_preserves_same_ref_eav_retract_and_assert_in_one_write_tx() -> Result<()> {
+    let db = Minigraf::in_memory()?;
+    let target = target_uuid()?;
+
+    db.execute(r#"(transact [[:alice :edge/to #uuid "550e8400-e29b-41d4-a716-446655440000"]])"#)?;
+
+    let mut tx = db.begin_write()?;
+    tx.execute(r#"(retract [[:alice :edge/to #uuid "550e8400-e29b-41d4-a716-446655440000"]])"#)?;
+    tx.execute(r#"(transact [[:alice :edge/to #uuid "550e8400-e29b-41d4-a716-446655440000"]])"#)?;
+    tx.commit()?;
+
+    let records = db.export_fact_log()?;
+    assert_eq!(
+        records.len(),
+        3,
+        "expected initial assertion plus same-write retract and assert"
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| record.attribute == ":edge/to" && record.value == Value::Ref(target)),
+        "all exported records should preserve the same Ref EAV identity"
+    );
+
+    let initial_assertion = records
+        .iter()
+        .find(|record| record.tx_count == 1 && record.asserted)
+        .ok_or_else(|| anyhow::anyhow!("expected initial assertion record"))?;
+    assert_eq!(
+        initial_assertion.value,
+        Value::Ref(target),
+        "initial assertion should preserve Ref value"
+    );
+
+    let same_write_records: Vec<&FactRecord> = records
+        .iter()
+        .filter(|record| record.tx_count == 2)
+        .collect();
+    assert_eq!(
+        same_write_records.len(),
+        2,
+        "write transaction should export both same-tx records"
+    );
+
+    let same_write_tx_id = same_write_records
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("expected same write records"))?
+        .tx_id;
+    assert!(
+        same_write_records
+            .iter()
+            .all(|record| record.tx_id == same_write_tx_id),
+        "same write transaction records should share tx_id"
+    );
+    assert!(
+        same_write_records.iter().any(|record| !record.asserted),
+        "same write transaction should include the retraction"
+    );
+    assert!(
+        same_write_records.iter().any(|record| record.asserted),
+        "same write transaction should include the reassertion"
+    );
+    assert!(
+        same_write_records
+            .iter()
+            .all(|record| record.value == Value::Ref(target)),
+        "same write transaction should preserve Ref value identity"
+    );
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn export_fact_log_preserves_ref_values_after_checkpoint_reopen() -> Result<()> {

@@ -2,7 +2,6 @@ use super::optimizer::IndexHint;
 use super::types::{AttributeSpec, EdnValue, Pattern, PseudoAttr};
 use crate::graph::FactStorage;
 use crate::graph::types::{EntityId, Fact, Value};
-use crate::storage::index::Indexes;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,18 +21,13 @@ pub struct PatternMatcher {
     storage: MatcherStorage,
     /// The `:db/valid-at` value for this query context (Value::Null when not set).
     pub(crate) valid_at_value: Value,
-    #[allow(dead_code)]
-    /// Indexes for index-guided lookups (Phase 6.2)
-    indexes: Arc<Indexes>,
 }
 
 impl PatternMatcher {
     pub fn new(storage: FactStorage) -> Self {
-        let indexes = storage.pending_indexes_snapshot();
         PatternMatcher {
             storage: MatcherStorage::Owned(storage),
             valid_at_value: Value::Null,
-            indexes: Arc::new(indexes),
         }
     }
 
@@ -45,7 +39,6 @@ impl PatternMatcher {
         PatternMatcher {
             storage: MatcherStorage::Slice(facts),
             valid_at_value: Value::Null,
-            indexes: Arc::new(Indexes::new()),
         }
     }
 
@@ -55,7 +48,6 @@ impl PatternMatcher {
         PatternMatcher {
             storage: MatcherStorage::Slice(facts),
             valid_at_value: valid_at,
-            indexes: Arc::new(Indexes::new()),
         }
     }
 
@@ -260,7 +252,12 @@ impl PatternMatcher {
         results
     }
 
-    /// Match multiple patterns with index hints for optimized lookups.
+    /// Match multiple patterns with planner hints.
+    ///
+    /// The matcher works over an already chosen fact snapshot. Storage-level
+    /// index narrowing happens before slice-backed matching in the executor's
+    /// selective fetch path, so hints are advisory here and must preserve scan
+    /// semantics.
     #[allow(dead_code)]
     pub fn match_patterns_with_hints(&self, patterns: &[(Pattern, IndexHint)]) -> Vec<Bindings> {
         if patterns.is_empty() {
@@ -281,11 +278,10 @@ impl PatternMatcher {
         results
     }
 
-    /// Match a single pattern against existing bindings, using an index hint when the
-    /// bindings are the unit seed (one empty map — i.e., this is the first pattern in
-    /// an incremental plan loop).
+    /// Match a single pattern against existing bindings.
     ///
-    /// - Unit seed (`[{}]`): delegates to `match_pattern_with_hint` for an indexed lookup.
+    /// - Unit seed (`[{}]`): delegates to the advisory hint path, which scans the
+    ///   current matcher snapshot.
     /// - Any other non-empty seed: delegates to `join_with_pattern` (hash-join path).
     /// - Empty seed (`[]`): returns empty immediately.
     ///
@@ -300,7 +296,9 @@ impl PatternMatcher {
             return vec![];
         }
         if seed.len() == 1 && seed.first().map(|s| s.is_empty()).unwrap_or(false) {
-            // First pattern in the plan — use the index hint for a targeted lookup.
+            // First pattern in the plan. The executor may already have narrowed
+            // the snapshot through selective_fact_fetch; the matcher itself does
+            // not resolve FactRef index hits back into this slice.
             self.match_pattern_with_hint(pattern, hint)
         } else {
             // Subsequent pattern — join_with_pattern uses hash-join when possible.
@@ -308,91 +306,15 @@ impl PatternMatcher {
         }
     }
 
-    /// Match a single pattern with an index hint for optimized lookup.
-    fn match_pattern_with_hint(&self, pattern: &Pattern, hint: &IndexHint) -> Vec<Bindings> {
-        // Get matching fact references from index
-        let fact_refs = self.lookup_with_hint(pattern, hint);
-
-        // If no index lookup possible, fall back to full scan
-        if fact_refs.is_empty() {
-            return self.match_pattern(pattern);
-        }
-
-        // Get all facts and filter by the fact refs from index lookup
-        let facts = self.get_facts();
-
-        let mut results = Vec::new();
-        for fact in &*facts {
-            if let Some(bindings) = self.match_fact_against_pattern(fact, pattern) {
-                results.push(bindings);
-            }
-        }
-
-        results
-    }
-
-    /// Look up fact references using the index based on pattern and hint.
-    fn lookup_with_hint(
-        &self,
-        pattern: &Pattern,
-        hint: &IndexHint,
-    ) -> Vec<crate::storage::index::FactRef> {
-        let indexes = &self.indexes;
-
-        match hint {
-            IndexHint::Eavt => {
-                // If entity is bound, use EAVT entity lookup
-                if let EdnValue::Uuid(entity) = &pattern.entity {
-                    return indexes.lookup_eavt_entity(*entity);
-                }
-                // Fall back to full scan
-                vec![]
-            }
-            IndexHint::Aevt => {
-                // If attribute is bound, use AEVT attribute lookup
-                if let AttributeSpec::Real(EdnValue::Keyword(attr)) = &pattern.attribute {
-                    return indexes.lookup_aevt_attr(attr);
-                }
-                // Fall back to full scan
-                vec![]
-            }
-            IndexHint::Avet => {
-                // If attribute and value are bound, use AVET
-                let attr_bound = match &pattern.attribute {
-                    AttributeSpec::Real(edn) => {
-                        if let EdnValue::Keyword(attr) = edn {
-                            Some(attr.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                let value_bound = match &pattern.value {
-                    EdnValue::Keyword(k) => Some(Value::Keyword(k.clone())),
-                    EdnValue::String(s) => Some(Value::String(s.clone())),
-                    EdnValue::Integer(i) => Some(Value::Integer(*i)),
-                    EdnValue::Float(f) => Some(Value::Float(*f)),
-                    EdnValue::Boolean(b) => Some(Value::Boolean(*b)),
-                    EdnValue::Uuid(u) => Some(Value::Ref(*u)),
-                    _ => None,
-                };
-
-                if let (Some(attr), Some(value)) = (attr_bound, value_bound) {
-                    return indexes.lookup_avet_attr_value(&attr, &value);
-                }
-                // Fall back to full scan
-                vec![]
-            }
-            IndexHint::Vaet => {
-                // If value is a Ref, use VAET reverse lookup
-                if let EdnValue::Uuid(target) = &pattern.value {
-                    return indexes.lookup_vaet_ref(*target);
-                }
-                // Fall back to full scan
-                vec![]
-            }
-        }
+    /// Match a single pattern through an advisory planner hint.
+    ///
+    /// This deliberately scans the matcher's current snapshot. The old
+    /// implementation could obtain `FactRef`s from pending indexes, but it had
+    /// no resolver from those references back into an already-filtered slice and
+    /// therefore scanned all facts anyway. Keeping this path explicit prevents
+    /// future changes from mistaking matcher hints for a second index layer.
+    fn match_pattern_with_hint(&self, pattern: &Pattern, _hint: &IndexHint) -> Vec<Bindings> {
+        self.match_pattern(pattern)
     }
 
     /// Match multiple patterns starting from existing seed bindings.
@@ -1355,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_match_with_hint_seeded_unit_seed_delegates_to_hint_path() {
+    fn test_match_with_hint_seeded_unit_seed_uses_advisory_hint_scan_path() {
         use crate::query::datalog::optimizer::IndexHint;
         use std::sync::Arc;
         let storage = FactStorage::new();
@@ -1378,6 +1300,42 @@ mod tests {
             "unit seed must produce one result per matching fact"
         );
         assert!(results[0].contains_key("?v"), "binding must contain ?v");
+    }
+
+    #[test]
+    fn test_match_with_hint_seeded_ref_value_matches_unhinted_scan() {
+        use crate::query::datalog::optimizer::IndexHint;
+        use std::sync::Arc;
+        let storage = FactStorage::new();
+        let source = uuid::Uuid::new_v4();
+        let target = uuid::Uuid::new_v4();
+        storage
+            .transact(
+                vec![(source, ":edge/to".to_string(), Value::Ref(target))],
+                None,
+            )
+            .unwrap();
+        let facts: Arc<[Fact]> = Arc::from(storage.get_asserted_facts().unwrap());
+        let matcher = PatternMatcher::from_slice(facts);
+        let p = Pattern::new(
+            EdnValue::Symbol("?from".to_string()),
+            EdnValue::Keyword(":edge/to".to_string()),
+            EdnValue::Uuid(target),
+        );
+
+        let hinted = matcher.match_with_hint_seeded(vec![HashMap::new()], &p, &IndexHint::Vaet);
+        let unhinted = matcher.match_pattern(&p);
+
+        assert_eq!(hinted.len(), 1, "hinted scan should find the ref edge");
+        assert_eq!(unhinted.len(), 1, "unhinted scan should find the ref edge");
+        assert!(
+            hinted[0].get("?from") == Some(&Value::Ref(source)),
+            "hinted scan should bind the source entity"
+        );
+        assert!(
+            unhinted[0].get("?from") == Some(&Value::Ref(source)),
+            "unhinted scan should bind the source entity"
+        );
     }
 
     #[test]

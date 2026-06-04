@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 /// Generate the maximum UUID value (all bits set to 1).
 /// Used as an upper bound for range queries on UUID fields.
+#[allow(dead_code)]
 fn max_uuid() -> Uuid {
     // This is safe because MAX_UUID is a valid hardcoded UUID string literal.
     // It will never fail at runtime.
@@ -237,6 +238,7 @@ impl Indexes {
     }
 
     /// Query EAVT index for a specific entity (returns all facts for that entity).
+    #[allow(dead_code)]
     pub fn lookup_eavt_entity(&self, entity: EntityId) -> Vec<FactRef> {
         let start = EavtKey {
             entity,
@@ -289,6 +291,7 @@ impl Indexes {
     }
 
     /// Query AEVT index for a specific attribute (returns all facts with that attribute).
+    #[allow(dead_code)]
     pub fn lookup_aevt_attr(&self, attribute: &str) -> Vec<FactRef> {
         let max_uuid = max_uuid();
         let start = AevtKey {
@@ -315,6 +318,7 @@ impl Indexes {
     }
 
     /// Query AVET index for attribute + value.
+    #[allow(dead_code)]
     pub fn lookup_avet_attr_value(&self, attribute: &str, value: &Value) -> Vec<FactRef> {
         let max_uuid = max_uuid();
         let value_bytes = encode_value(value);
@@ -342,6 +346,7 @@ impl Indexes {
     }
 
     /// Query VAET index for ref target (reverse references).
+    #[allow(dead_code)]
     pub fn lookup_vaet_ref(&self, target: EntityId) -> Vec<FactRef> {
         let max_uuid = max_uuid();
         let start = VaetKey {
@@ -605,6 +610,67 @@ mod tests {
             indexes.vaet.len(),
             2,
             "VAET must keep asserted and retracted ref facts"
+        );
+    }
+
+    #[test]
+    fn test_indexes_preserve_same_ref_eav_different_tx_id_identity() {
+        let entity = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let first = Fact::with_valid_time(
+            entity,
+            ":edge/to".to_string(),
+            Value::Ref(target),
+            100,
+            7,
+            0,
+            VALID_TIME_FOREVER,
+        );
+        let second = Fact::with_valid_time(
+            entity,
+            ":edge/to".to_string(),
+            Value::Ref(target),
+            101,
+            7,
+            0,
+            VALID_TIME_FOREVER,
+        );
+
+        let mut indexes = Indexes::new();
+        indexes.insert(
+            &first,
+            FactRef {
+                page_id: 1,
+                slot_index: 0,
+            },
+        );
+        indexes.insert(
+            &second,
+            FactRef {
+                page_id: 1,
+                slot_index: 1,
+            },
+        );
+
+        assert_eq!(
+            indexes.eavt.len(),
+            2,
+            "EAVT must keep same Ref EAV rows with different tx_id"
+        );
+        assert_eq!(
+            indexes.aevt.len(),
+            2,
+            "AEVT must keep same Ref EAV rows with different tx_id"
+        );
+        assert_eq!(
+            indexes.avet.len(),
+            2,
+            "AVET must keep same Ref EAV rows with different tx_id"
+        );
+        assert_eq!(
+            indexes.vaet.len(),
+            2,
+            "VAET must keep same Ref EAV rows with different tx_id"
         );
     }
 
