@@ -1,0 +1,361 @@
+# Minigraf Refactoring and Algorithm Improvement Plan
+
+Branch: `vetch/minigraf-refactor-plan`
+
+Worktree: `.worktrees/vetch-minigraf-refactor-plan`
+
+Status: planning artifact only. No code changes are included in this branch yet.
+
+## Philosophy Fit
+
+This plan fits Minigraf's "SQLite for bi-temporal graph databases" philosophy when it stays inside these constraints:
+
+- Keep the database embedded, zero-configuration, and dependency-light.
+- Prefer reliability and clarity over clever indexing changes.
+- Preserve the single-file storage model unless evidence proves a file-format change is necessary and worth a migration plan.
+- Treat bi-temporal ledger identity as first-class, including Vetch's need to reason about ref-like graph edges and exact write history.
+- Benchmark before replacing simple rebuild logic with more complex incremental algorithms.
+
+The plan intentionally avoids new dependencies, client/server architecture, distributed storage, alternate query languages, or broad API churn.
+
+## Goals
+
+- Reduce misleading or dead optimization surfaces in the Datalog execution path.
+- Identify performance work that is supported by benchmarks rather than intuition.
+- Make Vetch-relevant ledger/history behavior harder to regress.
+- Improve maintainability in the largest query/storage files without changing public behavior.
+- Separate low-risk cleanup from higher-risk algorithm changes.
+
+## Non-goals
+
+- No public API redesign.
+- No new query language.
+- No storage format change in the first implementation pass.
+- No new dependencies unless a later benchmark-backed proposal is explicitly approved.
+- No broad module split just because large files exist.
+- No change that weakens full-history fact identity or export semantics.
+
+## Current Hotspots
+
+| Area | Evidence | Risk |
+| --- | --- | --- |
+| Checkpoint/index rebuild cost | `src/storage/persistent_facts.rs:820-840`, `875-909`, `917-920` stream committed entries, merge pending facts, rebuild all four B+trees, then CRC data pages | Small write checkpoints can cost O(total indexed facts/pages) |
+| Matcher index hints | `src/query/datalog/executor.rs:512-516`, `545-555`; `src/query/datalog/matcher.rs:44-59`, `312-329` | Hints look useful but often fall back to scanning all facts |
+| Selective fetch fallback | `src/query/datalog/executor.rs:37-58`, `412-428` | Nested unbound `not`/`not-join`/`or` patterns can force full scans |
+| Exclusion key allocation | `src/query/datalog/executor.rs:651-689`, `763-778`, `827-850` | Repeated `String`/`Vec` allocation in negative-clause evaluation |
+| Expression evaluation duplication | `src/query/datalog/evaluator.rs:532-536`; `src/query/datalog/executor.rs:2163`, `2298`, `2340` | Semantics can drift between executor and recursive evaluator |
+| All-target lint debt | `cargo clippy --lib -- -D warnings` passes; all-target clippy fails mostly in tests/examples/benches plus a few lib-test lints | Cleanup noise can obscure algorithm regressions |
+| Large files | `executor.rs` ~5792 lines, `parser.rs` ~3484, `persistent_facts.rs` ~2189, `graph/storage.rs` ~2053 | Refactor temptation is high; behavior locks must come first |
+
+## Recommended Order
+
+1. R0: Baseline evidence and regression guardrails.
+2. R1: Make matcher hint semantics honest.
+3. R2: Benchmark checkpoint/index rebuild cost.
+4. R5: Share expression evaluation.
+5. R4: Refactor `not`/`not-join` exclusion keys.
+6. R3: Split positive candidate fetch from nested negative/or clauses.
+7. R6: Clean all-target clippy debt in a separate lane.
+
+R1 and R5 are the safest maintainability wins. R2 should run before any storage algorithm change. R3 is potentially valuable but should wait until R1/R4 reduce query-path noise.
+
+## R0: Baseline Evidence and Guardrails
+
+### Problem
+
+Several improvement candidates are plausible, but Minigraf should not trade simple, reliable behavior for unmeasured complexity.
+
+### Proposed Work
+
+- Add focused tests that preserve Vetch-relevant fact identity:
+  - same entity/attribute with different values in the same transaction
+  - same entity/attribute/value with assert and retract in one write transaction
+  - `Value::Ref` values in identity-sensitive index/export paths
+  - `asserted` and `tx_id` included where "full fact identity" is required
+- Add or update benchmark cases before algorithmic edits:
+  - checkpoint after small pending writes on a large committed graph
+  - positive-only selective fetch
+  - query with nested `not`, `not-join`, `or`, and unbound subpatterns
+  - negative-clause exclusion over many bindings
+
+### Tests and Benchmarks
+
+- `cargo test --test multivalue_index_test`
+- `cargo test --test retract_valid_time_test`
+- `cargo test --test fact_log_export_test`
+- New benchmark or test fixture for checkpoint append cost.
+- New benchmark or test fixture for negative-clause exclusion cost.
+
+### Done Criteria
+
+- Vetch ledger identity regressions fail tests before implementation changes land.
+- Benchmark baselines are recorded in the relevant docs or benchmark output notes.
+- No algorithmic rewrite starts without a failing test, a benchmark delta target, or a clear simplification target.
+
+## R1: Make Matcher Hint Semantics Honest
+
+### Problem
+
+`PatternMatcher` can be built from a filtered fact slice with empty `Indexes`, but execution still passes planner hints into `match_with_hint_seeded`. In `matcher.rs`, `match_pattern_with_hint` can discover `FactRef`s but then ignore them and scan all facts anyway. That makes the hint layer easy to overestimate during future performance work.
+
+### Proposed Work
+
+Choose one of these paths after a small test/benchmark spike:
+
+- Preferred first pass: de-emphasize or remove the no-op hint path for slice-backed matchers, and make `selective_fact_fetch` the explicit index optimization boundary.
+- Alternative: implement real slice-local lookup or `FactRef` resolution for hint-backed matching.
+
+The first pass should favor deletion and clarity. Real slice-local indexing is only justified if a benchmark shows it improves common workloads without complicating correctness.
+
+### Tests and Benchmarks
+
+- Unit test that confirms hinted and non-hinted matching return identical bindings.
+- Regression test for seeded matching with entity, attribute, value, and ref values.
+- Benchmark query patterns with and without bound entity/attribute/value.
+
+### Risks
+
+- Removing the hint path may look like a performance regression even if it was not effective.
+- Implementing real hint resolution may duplicate storage index responsibilities.
+
+### Done Criteria
+
+- Matcher code no longer presents a misleading optimization surface.
+- Query behavior is unchanged.
+- Benchmark evidence documents whether the change is performance-neutral or beneficial.
+
+## R2: Benchmark Checkpoint and Index Rebuild Cost
+
+### Problem
+
+Checkpoint/save currently rebuilds all four on-disk B+tree indexes from committed plus pending facts. This is simple and reliable, but it may be too expensive for Vetch workloads that append small corrections to a large ledger.
+
+### Proposed Work
+
+- Add a checkpoint-cost benchmark that varies:
+  - committed fact count
+  - pending fact count
+  - value shape, including `Value::Ref`
+  - retraction/assertion mix
+- Measure:
+  - checkpoint wall time
+  - index page count
+  - fact page count
+  - WAL replay/checkpoint behavior if relevant
+- Keep the first implementation pass benchmark-only.
+
+If benchmarks show unacceptable cost, evaluate these options in order:
+
+1. Batched checkpoint policy or caller guidance.
+2. Append-friendly index delta pages with compaction.
+3. Incremental B+tree update path.
+
+### Rejected for First Pass
+
+- Immediate incremental B+tree mutation: higher correctness and file-format risk without current measurements.
+- Extra sidecar index files: conflicts with the single-file design direction unless there is overwhelming evidence.
+- New database dependency: violates self-contained and embedded-first goals.
+
+### Tests and Benchmarks
+
+- Existing storage migration and persistence tests.
+- New benchmark or ignored test for large committed graph plus small pending append.
+- Crash recovery test should remain green if checkpoint logic later changes.
+
+### Done Criteria
+
+- We can state the cost curve for current checkpoint behavior.
+- Any later storage algorithm proposal has numeric acceptance criteria.
+- No file format change is proposed without migration, crash-safety, and rollback analysis.
+
+## R3: Split Positive Candidate Fetch from Nested Clauses
+
+### Problem
+
+`collect_all_patterns` includes nested patterns from `not`, `not-join`, `or`, and `or-join`. If any collected pattern lacks a bound entity or attribute, `selective_fact_fetch` returns `None`, causing a full scan. A query with a selective positive clause can therefore lose its index advantage because of an unbound nested clause.
+
+### Proposed Work
+
+- Split candidate-source planning into two concepts:
+  - base positive patterns that can seed the initial fact candidate set
+  - nested clauses that are evaluated after candidate bindings are established
+- Keep negative/or semantics unchanged.
+- Add tests where:
+  - a selective positive clause exists
+  - a nested negative or or-clause is unbound
+  - results match current behavior while candidate fetch stays selective
+
+### Tests and Benchmarks
+
+- Query executor tests for `not`, `not-join`, `or`, and `or-join`.
+- New regression test proving nested unbound clauses do not force a full candidate scan when positive base clauses are selective.
+- Benchmark before and after on a graph with many irrelevant facts.
+
+### Risks
+
+- Clause ordering and binding visibility can be subtle.
+- Incorrectly treating nested patterns as base filters could change query semantics.
+
+### Done Criteria
+
+- Positive selective fetch is not disabled by unrelated nested clauses.
+- All negative/or correctness tests remain green.
+- Benchmark shows reduced scanned facts or lower wall time on the target case.
+
+## R4: Refactor `not` and `not-join` Exclusion Keys
+
+### Problem
+
+Negative-clause evaluation currently builds exclusion keys as `HashSet<Vec<(String, Value)>>` and reconstructs probe keys per binding. This is clear but allocation-heavy.
+
+### Proposed Work
+
+- Introduce an internal key specification, for example:
+
+```rust
+struct ExclusionKeySpec {
+    key_vars: Vec<String>,
+    has_expr: bool,
+}
+```
+
+- Normalize exclusion keys as ordered value tuples keyed by precomputed variable positions.
+- Avoid repeated construction of `(String, Value)` pairs for each binding where possible.
+- Keep expression-containing negative clauses on the conservative path until their semantics are fully covered.
+
+### Tests and Benchmarks
+
+- Existing `not` and `not-join` tests.
+- Tests for multi-variable keys, missing variables, and expression clauses.
+- Benchmark with many bindings and repeated negative probes.
+
+### Risks
+
+- Key-shape inference errors can create false exclusions or missed exclusions.
+- Expression clauses may not fit a simple tuple-key model.
+
+### Done Criteria
+
+- Query results are unchanged.
+- Allocation-heavy key construction is reduced in the hot path.
+- Code is easier to reason about than the current sample-row key probing.
+
+## R5: Share Expression Evaluation
+
+### Problem
+
+Expression evaluation logic is duplicated between executor and evaluator paths. The evaluator already notes that its code mirrors executor behavior and should be unified. Duplication increases the chance that recursive/rule evaluation drifts from direct query evaluation.
+
+### Proposed Work
+
+- Move shared expression helpers into a focused internal module, for example `src/query/datalog/expr.rs`.
+- Keep public query types unchanged.
+- Preserve existing behavior for:
+  - truthiness
+  - comparisons
+  - arithmetic or predicate calls currently supported
+  - UDF-related expression behavior
+  - window/predicate interactions where applicable
+- Make executor and evaluator call the shared helpers.
+
+### Tests and Benchmarks
+
+- Existing predicate, UDF, recursive rule, and complex query tests.
+- Add targeted tests where direct query and recursive/rule evaluation exercise the same expression shape.
+
+### Risks
+
+- Shared helpers can become too broad if they absorb unrelated executor responsibilities.
+- Minor behavior differences may surface once the duplicate implementations are unified.
+
+### Done Criteria
+
+- Duplicate expression logic is removed or materially reduced.
+- Executor and evaluator semantics are tested through the same expression cases.
+- No public API or parser syntax changes.
+
+## R6: All-target Clippy Cleanup Lane
+
+### Problem
+
+Library clippy passes, but all-target clippy reports warnings in tests, examples, benches, and a few lib-test paths. This is mostly cleanup debt, not a core algorithm problem.
+
+### Proposed Work
+
+- Keep this lane separate from algorithm changes.
+- Fix lib-test warnings first:
+  - unused fault-injection imports in `src/storage/backend/mod.rs`
+  - `sort_by_key` suggestion in `src/graph/storage.rs`
+  - unnecessary casts in `src/graph/storage.rs`
+  - approximate constant in `src/repl.rs`
+- Then decide whether test/example/bench unwrap and indexing warnings should be fixed or allowed.
+- Do not weaken the existing testing convention around debug-format logging of UUID-containing values.
+
+### Tests
+
+- `cargo clippy --lib -- -D warnings`
+- `cargo clippy --all-targets --message-format short -- -D warnings`
+- `cargo test`
+
+### Risks
+
+- Mechanical lint churn can obscure meaningful diffs.
+- Replacing clear test `unwrap`/indexing with verbose code can reduce readability.
+
+### Done Criteria
+
+- Either all-target clippy passes, or remaining warnings are intentionally documented.
+- Algorithmic changes are not mixed into lint cleanup commits.
+
+## Verification Matrix
+
+Use the smallest verification set that proves the current slice, then run the broader checks before merging.
+
+| Slice | Required verification |
+| --- | --- |
+| R0 | targeted ledger/index/export tests, new benchmark compiles, `cargo clippy --lib -- -D warnings` |
+| R1 | matcher/query tests, seeded match regression, `cargo test --test complex_queries_test`, `cargo clippy --lib -- -D warnings` |
+| R2 | checkpoint benchmark, persistence tests, crash/WAL recovery tests if code changes |
+| R3 | query executor tests for nested negative/or clauses, benchmark scanned-fact reduction |
+| R4 | `not`/`not-join` tests, allocation-sensitive benchmark if available |
+| R5 | predicate/UDF/recursive query tests, direct-vs-rule expression regression |
+| R6 | `cargo clippy --all-targets --message-format short -- -D warnings`, `cargo test` |
+
+Baseline commands:
+
+```bash
+cargo test
+cargo clippy --lib -- -D warnings
+cargo clippy --test multivalue_index_test --test retract_valid_time_test --test fact_log_export_test -- -D warnings
+git diff --check
+```
+
+## Merge Gates
+
+Before merging any implementation branch based on this plan:
+
+- Behavior-changing code has regression tests.
+- Performance-changing code has before/after evidence.
+- Vetch ledger identity still includes ref-like values where relevant.
+- Public full-history export remains a history surface, not a current-view shortcut.
+- Storage changes preserve single-file reliability and migration safety.
+- No new dependency is added without explicit approval.
+- `cargo test` and `cargo clippy --lib -- -D warnings` pass at minimum.
+
+## Open Questions
+
+- What committed graph size and checkpoint cadence should Vetch treat as realistic for first benchmarks?
+- Is full index rebuild acceptable if Vetch batches writes and checkpoints less often?
+- Should `PatternMatcher` remain a pure matcher over already-filtered facts, or should it own a real slice-local index?
+- Do Vetch receipt/export consumers require exact preservation of same E/A/V assert-plus-retract in the same write transaction, or only protection against different-value collapse?
+
+## Recommended Next Slice
+
+Start with R0 plus R1:
+
+1. Add or tighten ledger identity tests, including `Value::Ref`, `asserted`, and `tx_id`.
+2. Add a small matcher-hint regression test that demonstrates hinted and unhinted matching are equivalent.
+3. Remove or clarify the misleading hint path only if tests prove it is behavior-neutral.
+4. Run `cargo test` and `cargo clippy --lib -- -D warnings`.
+
+This gives Vetch a safer base before tackling checkpoint or selective-fetch algorithms.
