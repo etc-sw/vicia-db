@@ -122,11 +122,18 @@ pub(crate) fn inject_magic_guard(rule: &Rule, predicate: &str, adornment: &[char
         return rule.clone();
     }
 
+    debug_assert_eq!(
+        adornment.len(),
+        rule.head.len().saturating_sub(1),
+        "adornment length must equal rule arity"
+    );
+
     let magic_name = magic_pred_name(predicate, adornment);
     let bound_head_args: Vec<EdnValue> = adornment
         .iter()
         .enumerate()
         .filter(|&(_, &ch)| ch == 'b')
+        // rule.head[0] is the predicate name; args start at index 1
         .filter_map(|(i, _)| rule.head.get(i + 1).cloned())
         .collect();
     let guard = WhereClause::RuleInvocation {
@@ -285,7 +292,7 @@ mod tests {
                 assert_eq!(args.len(), 1);
                 assert_eq!(args[0], EdnValue::Symbol("?a".to_string()));
             }
-            other => panic!("expected RuleInvocation guard, got {:?}", other),
+            _ => panic!("expected RuleInvocation guard"),
         }
     }
 
