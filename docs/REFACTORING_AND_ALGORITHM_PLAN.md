@@ -72,6 +72,16 @@ Several improvement candidates are plausible, but Minigraf should not trade simp
   - same entity/attribute/value with assert and retract in one write transaction
   - `Value::Ref` values in identity-sensitive index/export paths
   - `asserted` and `tx_id` included where "full fact identity" is required
+- Make the identity contract explicit before changing indexes or exports:
+
+| Surface | Required identity fields | Notes |
+| --- | --- | --- |
+| Index keys used for point/range lookup | `entity`, `attribute`, encoded `value`; include `tx_id` and `asserted` only where the index represents ledger history rather than current facts | Current-view indexes may collapse by E/A/V intentionally; history indexes must not |
+| Query selectors over current facts | `entity`, `attribute`, encoded `value`, temporal visibility | Must keep Datalog semantics stable; should not expose retracted rows as current results |
+| Full-history export / fact log | `entity`, `attribute`, encoded `value`, `tx_id`, `tx_count`, `asserted`, `valid_from`, `valid_to` | This is the Vetch audit surface and must preserve assert-plus-retract rows |
+| Receipt or row identity for Vetch ledger use | `entity`, `attribute`, encoded `value`, `tx_id`, `asserted`; include `tx_count` when ordering must survive equal millisecond timestamps | Prevents different-value collapse and exact same E/A/V assert/retract collapse |
+| Value encoding tests | all `Value` variants, especially `Value::Ref` and `Value::Keyword` | Ref-like graph edges are not optional for Vetch |
+
 - Add or update benchmark cases before algorithmic edits:
   - checkpoint after small pending writes on a large committed graph
   - positive-only selective fetch
@@ -89,6 +99,7 @@ Several improvement candidates are plausible, but Minigraf should not trade simp
 ### Done Criteria
 
 - Vetch ledger identity regressions fail tests before implementation changes land.
+- Each modified index/export/receipt surface names whether it is current-view identity or full-history identity.
 - Benchmark baselines are recorded in the relevant docs or benchmark output notes.
 - No algorithmic rewrite starts without a failing test, a benchmark delta target, or a clear simplification target.
 
@@ -102,10 +113,10 @@ Several improvement candidates are plausible, but Minigraf should not trade simp
 
 Choose one of these paths after a small test/benchmark spike:
 
-- Preferred first pass: de-emphasize or remove the no-op hint path for slice-backed matchers, and make `selective_fact_fetch` the explicit index optimization boundary.
+- Preferred first pass: de-emphasize or remove the no-op hint path only for slice-backed matchers with empty `Indexes`, and make `selective_fact_fetch` the explicit index optimization boundary for that path.
 - Alternative: implement real slice-local lookup or `FactRef` resolution for hint-backed matching.
 
-The first pass should favor deletion and clarity. Real slice-local indexing is only justified if a benchmark shows it improves common workloads without complicating correctness.
+The first pass should favor deletion and clarity. It must not weaken any real storage-backed or index-backed lookup path. Real slice-local indexing is only justified if a benchmark shows it improves common workloads without complicating correctness.
 
 ### Tests and Benchmarks
 
@@ -121,6 +132,7 @@ The first pass should favor deletion and clarity. Real slice-local indexing is o
 ### Done Criteria
 
 - Matcher code no longer presents a misleading optimization surface.
+- Empty-index slice-backed matcher behavior is clarified without removing useful index-backed behavior.
 - Query behavior is unchanged.
 - Benchmark evidence documents whether the change is performance-neutral or beneficial.
 
@@ -133,8 +145,8 @@ Checkpoint/save currently rebuilds all four on-disk B+tree indexes from committe
 ### Proposed Work
 
 - Add a checkpoint-cost benchmark that varies:
-  - committed fact count
-  - pending fact count
+  - committed fact count: start with 10k, 100k, and 1M facts if local runtime is acceptable
+  - pending fact count: start with 1, 10, 100, and 1k facts
   - value shape, including `Value::Ref`
   - retraction/assertion mix
 - Measure:
@@ -143,6 +155,13 @@ Checkpoint/save currently rebuilds all four on-disk B+tree indexes from committe
   - fact page count
   - WAL replay/checkpoint behavior if relevant
 - Keep the first implementation pass benchmark-only.
+
+Initial decision thresholds:
+
+- If checkpoint time scales mostly with pending facts for Vetch-sized graphs, keep the current simple rebuild path.
+- If checkpoint time scales linearly with total committed facts and a 1-to-10 fact append on a 100k+ fact graph is materially slower than Vetch's expected save cadence, evaluate batching guidance before storage algorithm changes.
+- If batching cannot meet the target cadence, write a separate storage design note before implementing delta pages or incremental B+tree mutation.
+- Treat any file-format change as a separate phase with migration and crash-recovery proof.
 
 If benchmarks show unacceptable cost, evaluate these options in order:
 
@@ -165,6 +184,7 @@ If benchmarks show unacceptable cost, evaluate these options in order:
 ### Done Criteria
 
 - We can state the cost curve for current checkpoint behavior.
+- The benchmark report names the graph size and checkpoint cadence that triggered, or failed to trigger, more complex storage work.
 - Any later storage algorithm proposal has numeric acceptance criteria.
 - No file format change is proposed without migration, crash-safety, and rollback analysis.
 
@@ -179,11 +199,17 @@ If benchmarks show unacceptable cost, evaluate these options in order:
 - Split candidate-source planning into two concepts:
   - base positive patterns that can seed the initial fact candidate set
   - nested clauses that are evaluated after candidate bindings are established
+- Candidate fetch must be a superset of possible results, never a premature filter:
+  - use a selective anchor only when it is present in every branch that can produce a result
+  - for `or`/`or-join`, compute branch-local anchors or fall back to full scan when no common safe anchor exists
+  - for `not`/`not-join`, never use a negative-only pattern to seed positive candidates
+  - if binding visibility is ambiguous, prefer the current full-scan fallback
 - Keep negative/or semantics unchanged.
 - Add tests where:
   - a selective positive clause exists
   - a nested negative or or-clause is unbound
   - results match current behavior while candidate fetch stays selective
+  - an `or` branch lacks the selective anchor and therefore must not be pruned away
 
 ### Tests and Benchmarks
 
@@ -199,6 +225,8 @@ If benchmarks show unacceptable cost, evaluate these options in order:
 ### Done Criteria
 
 - Positive selective fetch is not disabled by unrelated nested clauses.
+- Candidate fetch is proven to be a superset of final results for `not`, `not-join`, `or`, and `or-join` cases.
+- Branches without a common safe anchor fall back to the current conservative scan behavior.
 - All negative/or correctness tests remain green.
 - Benchmark shows reduced scanned facts or lower wall time on the target case.
 
@@ -324,6 +352,7 @@ Use the smallest verification set that proves the current slice, then run the br
 Baseline commands:
 
 ```bash
+cargo fmt --check
 cargo test
 cargo clippy --lib -- -D warnings
 cargo clippy --test multivalue_index_test --test retract_valid_time_test --test fact_log_export_test -- -D warnings
@@ -340,7 +369,7 @@ Before merging any implementation branch based on this plan:
 - Public full-history export remains a history surface, not a current-view shortcut.
 - Storage changes preserve single-file reliability and migration safety.
 - No new dependency is added without explicit approval.
-- `cargo test` and `cargo clippy --lib -- -D warnings` pass at minimum.
+- `cargo fmt --check`, `cargo test`, and `cargo clippy --lib -- -D warnings` pass at minimum.
 
 ## Open Questions
 
