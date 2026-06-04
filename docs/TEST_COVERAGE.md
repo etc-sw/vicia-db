@@ -36,9 +36,9 @@
 - ✅ 10 XTDB compat tests (integration, Wave 3 #221 — Apache 2.0 semantic ports of XTDB concepts)
 - ✅ 9 Datomic compat tests (integration, Wave 3 #221 — independently written semantic ports of Datomic concepts)
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
-- ✅ 15 doc tests (9 passing, 6 ignored: or+neg-cycle stratification bug confirmed)
+- ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 966 tests passing** (8 ignored: 6 or+neg-cycle stratification doc tests, 1 nightly concurrency stress, 1 nightly smoke)
+**Status**: ✅ **All 966 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
