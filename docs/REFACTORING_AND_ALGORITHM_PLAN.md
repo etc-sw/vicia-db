@@ -136,6 +136,35 @@ The first pass should favor deletion and clarity. It must not weaken any real st
 - Query behavior is unchanged.
 - Benchmark evidence documents whether the change is performance-neutral or beneficial.
 
+## Gate 1 Closeout: Identity and Selector Invariants
+
+Status: closed after R0/R1 implementation in commit `7dd3df5`.
+
+Gate 1 confirmed one important implementation fact: `PatternMatcher` is not an
+index identity surface. It receives planner hints, but it matches against an
+already selected fact snapshot. Storage-level narrowing belongs before matching,
+currently at the executor's `selective_fact_fetch` boundary. Until a real
+`FactRef`-to-snapshot resolver exists, matcher hints are advisory and must
+preserve scan semantics.
+
+Identity invariants for the next slices:
+
+| Surface | Invariant |
+| --- | --- |
+| Current-view query selectors | Current queries operate on a net projection: tx-time/as-of filter, then `net_asserted_facts`, then valid-time filter, then matcher scan. They should not expose retracted rows as current results. |
+| Selective fetch deduplication | Candidate fetch must deduplicate by full fact identity: `entity`, `attribute`, encoded `value`, `valid_from`, `valid_to`, `tx_count`, `tx_id`, `asserted`. This keeps candidate sets from collapsing ledger rows before net/current projection. |
+| Full-history export / fact log | Exported records must preserve `entity`, `attribute`, `value`, `tx_id`, `tx_count`, valid-time scope, and `asserted`. It is an audit surface, not a current-view selector. |
+| History index keys | EAVT/AEVT/AVET/VAET history keys include `tx_id` and `asserted`; VAET must preserve `Value::Ref` edges. Same Ref E/A/V rows with different `tx_id` must not collapse. |
+| Same write transaction edge case | A write transaction stamps all pending facts with one final `tx_id` and one final `tx_count` at commit. Therefore exact same E/A/V retract-plus-assert rows in one write transaction require `asserted` in the identity key. |
+| Vetch receipt/audit row identity | Minimum row identity is E/A/V plus `tx_id` plus `asserted`; include `tx_count` when ordering must survive equal millisecond timestamps or when replay order must be explicit. |
+
+Gate 1 follow-up rules:
+
+- R2 checkpoint benchmarks may proceed using these identity rules as fixed constraints.
+- Storage optimizations must not move a full-history surface onto current-view identity.
+- Query optimizations must prove their candidate set is a superset before applying net/current projection.
+- Any future reintroduction of matcher-level index lookup must include a real resolver from `FactRef` to the current matcher snapshot and tests covering `Value::Ref`, `tx_id`, and `asserted`.
+
 ## R2: Benchmark Checkpoint and Index Rebuild Cost
 
 ### Problem
