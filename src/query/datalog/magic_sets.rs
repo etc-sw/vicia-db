@@ -123,14 +123,15 @@ pub(crate) fn inject_magic_guard(rule: &Rule, predicate: &str, adornment: &[char
     }
 
     let magic_name = magic_pred_name(predicate, adornment);
-    let bound_head_arg = rule
-        .head
-        .get(1)
-        .cloned()
-        .unwrap_or(EdnValue::Symbol("?_".to_string()));
+    let bound_head_args: Vec<EdnValue> = adornment
+        .iter()
+        .enumerate()
+        .filter(|&(_, &ch)| ch == 'b')
+        .filter_map(|(i, _)| rule.head.get(i + 1).cloned())
+        .collect();
     let guard = WhereClause::RuleInvocation {
         predicate: magic_name,
-        args: vec![bound_head_arg],
+        args: bound_head_args,
     };
 
     let mut new_body = Vec::with_capacity(rule.body.len() + 1);
@@ -285,6 +286,29 @@ mod tests {
                 assert_eq!(args[0], EdnValue::Symbol("?a".to_string()));
             }
             other => panic!("expected RuleInvocation guard, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_magic_guard_bb_adornment() {
+        // Rule: (reachable ?a ?b) :- [?a :edge/to ?b]
+        // adornment bb — both args bound → guard gets both args
+        let rule = make_rule(
+            "reachable",
+            &["?a", "?b"],
+            vec![pat("?a", ":edge/to", "?b")],
+        );
+        let ad = vec!['b', 'b'];
+        let result = inject_magic_guard(&rule, "reachable", &ad);
+        let guard = result.body.first().expect("guard should be first body clause");
+        match guard {
+            WhereClause::RuleInvocation { predicate, args } => {
+                assert_eq!(predicate, "__magic_reachable_bb");
+                assert_eq!(args.len(), 2, "bb adornment should produce 2 guard args");
+                assert_eq!(args[0], EdnValue::Symbol("?a".to_string()));
+                assert_eq!(args[1], EdnValue::Symbol("?b".to_string()));
+            }
+            _ => panic!("expected RuleInvocation guard"),
         }
     }
 
