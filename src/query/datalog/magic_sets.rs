@@ -5,6 +5,9 @@ use crate::query::datalog::types::{DatalogQuery, EdnValue, Rule, WhereClause};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+/// Return type for `rewrite()`: rewritten rule registry + seed facts to preload.
+type RewriteResult = (RuleRegistry, Vec<(EntityId, String, Value)>);
+
 /// Classify each arg in rule invocations as bound ('b') or free ('f').
 /// Single left-to-right pass; all variables in Pattern entity/value positions are
 /// considered grounded after the pattern (Datalog: pattern binds all its variables).
@@ -376,10 +379,7 @@ fn build_rewritten_registry(
     new_reg
 }
 
-pub(crate) fn rewrite(
-    query: &DatalogQuery,
-    registry: &RuleRegistry,
-) -> Option<(RuleRegistry, Vec<(EntityId, String, Value)>)> {
+pub(crate) fn rewrite(query: &DatalogQuery, registry: &RuleRegistry) -> Option<RewriteResult> {
     let initial = compute_query_adornments(&query.where_clauses);
     let initial_bound: HashMap<String, Vec<char>> = initial
         .into_iter()
@@ -395,9 +395,7 @@ pub(crate) fn rewrite(
     // and the current seed encoding only supports arg0-bound or arg1-only-bound cases.
     // NOTE: this guard is redundant with the downstream `seeds.is_empty()` check, but
     // is retained as an early exit that avoids the `propagate_adornments` traversal.
-    let any_free = initial_bound
-        .values()
-        .any(|ad| ad.iter().any(|&ch| ch == 'f'));
+    let any_free = initial_bound.values().any(|ad| ad.contains(&'f'));
     if !any_free {
         return None;
     }
