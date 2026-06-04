@@ -84,8 +84,8 @@ For each recursive `RuleInvocation` in the rule body calling `p` (or an SCC peer
 
 For each top-level rule invocation in the query with at least one bound arg, emit one seed fact. Encoding depends on which arg is bound:
 
-- **arg0 bound (`bf` or `bb`):** entity = the bound UUID literal; attribute = `format!(":__magic_{}_{}", predname, adornment)`; value = `Value::Boolean(true)` sentinel. The 1-arg magic guard pattern `[?a :__magic_p_ad _]` then binds `?a` to the correct entity. This is the dominant use case (point queries by start node). Arg0 is always a `Uuid` in Minigraf's EAV model.
-- **arg1 bound only (`fb`):** entity = `Uuid::new_v4()` (carrier, never persisted); attribute = same format; value = the bound value. The magic guard becomes a 2-arg match `[?_ :__magic_p_fb ?b]`. Less common; implementer may treat `fb` as unadorned (all-free fallback) in the first iteration if the encoding complexity is not worth it.
+- **arg0 bound (`bf` or `bb`):** entity = `edn_to_entity_id(bound_arg)` (handles both UUID literals and keyword aliases like `:alice` via `Uuid::new_v5`); attribute = `format!(":__magic_{}_{}", predname, adornment)`; value = `Value::Boolean(true)` sentinel. The 1-arg magic guard pattern `[?a :__magic_p_ad _]` then binds `?a` to the correct entity. This is the dominant use case (point queries by start node).
+- **arg1 bound only (`fb`):** entity = `Uuid::new_v4()` (ephemeral carrier, never persisted); attribute = same format; value = `edn_to_value(bound_arg)`. The magic guard becomes a 2-arg match `[?_ :__magic_p_fb ?b]`. Less common; implementer may treat `fb` as unadorned (all-free fallback) in the first iteration if the encoding complexity is not worth it.
 
 Seed facts are loaded into `filtered_storage` before `StratifiedEvaluator` runs, making the demand signal available on iteration 1.
 
