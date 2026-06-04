@@ -216,11 +216,18 @@ pub(crate) fn build_propagation_rules(
             called_args.len(),
             "called adornment length must equal called args length"
         );
+
+        // Fix 2: Skip all-free adorned predicates — no bound args means no magic head.
+        if !has_bound_arg(called_adornment) {
+            continue;
+        }
+
         let new_magic_args: Vec<EdnValue> = called_adornment
             .iter()
             .enumerate()
             .filter(|&(_, &ch)| ch == 'b')
-            .filter_map(|(i, _)| called_args.get(i).cloned())
+            // Fix 3: Rename inner `i` to `pos` to avoid shadowing the outer loop variable.
+            .filter_map(|(pos, _)| called_args.get(pos).cloned())
             .collect();
 
         // Propagation body = guard + all non-RuleInvocation clauses before this call.
@@ -231,19 +238,11 @@ pub(crate) fn build_propagation_rules(
             }
         }
 
-        result.push((
-            called_magic_name.clone(),
-            Rule {
-                head: vec![
-                    EdnValue::Symbol(called_magic_name),
-                    new_magic_args
-                        .into_iter()
-                        .next()
-                        .unwrap_or(EdnValue::Symbol("?_".to_string())),
-                ],
-                body: prop_body,
-            },
-        ));
+        // Fix 1: Head must include ALL bound args, not just the first.
+        let mut head = Vec::with_capacity(1 + new_magic_args.len());
+        head.push(EdnValue::Symbol(called_magic_name.clone()));
+        head.extend(new_magic_args);
+        result.push((called_magic_name, Rule { head, body: prop_body }));
     }
 
     result
@@ -466,6 +465,29 @@ mod tests {
             }
             _ => panic!("expected magic guard in propagation body"),
         }
+    }
+
+    #[test]
+    fn test_propagation_rule_bb_adornment() {
+        // (reachable ?a ?b) :- (reachable ?a ?c) [?c :edge/to ?b]
+        // bb → propagation rule head must have BOTH bound args
+        let rule = make_rule(
+            "reachable",
+            &["?a", "?b"],
+            vec![
+                rule_inv("reachable", &["?a", "?c"]),
+                pat("?c", ":edge/to", "?b"),
+            ],
+        );
+        let adorned: HashMap<String, Vec<char>> =
+            [("reachable".to_string(), vec!['b', 'b'])].into_iter().collect();
+        let prop_rules = build_propagation_rules(&rule, "reachable", &adorned);
+        assert_eq!(prop_rules.len(), 1);
+        let (_, prop) = &prop_rules[0];
+        // Head must have predicate name + 2 args for bb
+        assert_eq!(prop.head.len(), 3, "bb propagation rule head must have 3 elements (name + 2 args)");
+        assert_eq!(prop.head[1], EdnValue::Symbol("?a".to_string()));
+        assert_eq!(prop.head[2], EdnValue::Symbol("?c".to_string()));
     }
 
     #[test]
