@@ -145,7 +145,10 @@ pub(crate) fn inject_magic_guard(rule: &Rule, predicate: &str, adornment: &[char
     new_body.push(guard);
     new_body.extend(rule.body.iter().cloned());
 
-    Rule { head: rule.head.clone(), body: new_body }
+    Rule {
+        head: rule.head.clone(),
+        body: new_body,
+    }
 }
 
 /// Build magic propagation rules for adorned recursive calls within a rule body.
@@ -242,7 +245,13 @@ pub(crate) fn build_propagation_rules(
         let mut head = Vec::with_capacity(1 + new_magic_args.len());
         head.push(EdnValue::Symbol(called_magic_name.clone()));
         head.extend(new_magic_args);
-        result.push((called_magic_name, Rule { head, body: prop_body }));
+        result.push((
+            called_magic_name,
+            Rule {
+                head,
+                body: prop_body,
+            },
+        ));
     }
 
     result
@@ -293,7 +302,10 @@ pub(crate) fn propagate_adornments(
                                 grounded.insert(v.to_string());
                             }
                         }
-                        WhereClause::RuleInvocation { predicate: called, args } => {
+                        WhereClause::RuleInvocation {
+                            predicate: called,
+                            args,
+                        } => {
                             let call_adornment: Vec<char> = args
                                 .iter()
                                 .map(|a| match a.as_variable() {
@@ -407,10 +419,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_empty_query_returns_none() {
-        let query = DatalogQuery::new(
-            vec![FindSpec::Variable("?x".to_string())],
-            vec![],
-        );
+        let query = DatalogQuery::new(vec![FindSpec::Variable("?x".to_string())], vec![]);
         let registry = RuleRegistry::new();
         assert!(rewrite(&query, &registry).is_none());
     }
@@ -473,7 +482,10 @@ mod tests {
     #[test]
     fn test_var_grounded_by_preceding_pattern() {
         // [?x :name "Alice"] (ancestor ?x ?y) → ?x grounded → bf
-        let clauses = vec![pat("?x", ":name", "Alice"), rule_inv("ancestor", &["?x", "?y"])];
+        let clauses = vec![
+            pat("?x", ":name", "Alice"),
+            rule_inv("ancestor", &["?x", "?y"]),
+        ];
         let adornments = compute_query_adornments(&clauses);
         assert_eq!(adornments.get("ancestor"), Some(&vec!['b', 'f']));
     }
@@ -503,9 +515,9 @@ mod tests {
         let (entity, attr, value) = &seeds[0];
         assert_eq!(attr, ":__magic_ancestor_bf");
         assert_eq!(value, &Value::Boolean(true));
-        let expected = crate::query::datalog::matcher::edn_to_entity_id(
-            &EdnValue::Keyword(":alice".to_string()),
-        )
+        let expected = crate::query::datalog::matcher::edn_to_entity_id(&EdnValue::Keyword(
+            ":alice".to_string(),
+        ))
         .unwrap();
         assert_eq!(*entity, expected);
     }
@@ -525,7 +537,10 @@ mod tests {
         let rule = make_rule(
             "ancestor",
             &["?a", "?c"],
-            vec![pat("?a", ":parent", "?b"), rule_inv("ancestor", &["?b", "?c"])],
+            vec![
+                pat("?a", ":parent", "?b"),
+                rule_inv("ancestor", &["?b", "?c"]),
+            ],
         );
         let adornment = vec!['b', 'f'];
         let rewritten = inject_magic_guard(&rule, "ancestor", &adornment);
@@ -550,7 +565,10 @@ mod tests {
         );
         let ad = vec!['b', 'b'];
         let result = inject_magic_guard(&rule, "reachable", &ad);
-        let guard = result.body.first().expect("guard should be first body clause");
+        let guard = result
+            .body
+            .first()
+            .expect("guard should be first body clause");
         match guard {
             WhereClause::RuleInvocation { predicate, args } => {
                 assert_eq!(predicate, "__magic_reachable_bb");
@@ -587,15 +605,22 @@ mod tests {
         let rule = make_rule(
             "ancestor",
             &["?a", "?c"],
-            vec![pat("?a", ":parent", "?b"), rule_inv("ancestor", &["?b", "?c"])],
+            vec![
+                pat("?a", ":parent", "?b"),
+                rule_inv("ancestor", &["?b", "?c"]),
+            ],
         );
-        let adorned: HashMap<String, Vec<char>> =
-            [("ancestor".to_string(), vec!['b', 'f'])].into_iter().collect();
+        let adorned: HashMap<String, Vec<char>> = [("ancestor".to_string(), vec!['b', 'f'])]
+            .into_iter()
+            .collect();
         let prop_rules = build_propagation_rules(&rule, "ancestor", &adorned);
         assert_eq!(prop_rules.len(), 1);
 
         let (pred, prop) = &prop_rules[0];
-        assert_eq!(pred.as_str(), magic_pred_name("ancestor", &['b', 'f']).as_str());
+        assert_eq!(
+            pred.as_str(),
+            magic_pred_name("ancestor", &['b', 'f']).as_str()
+        );
         // Head: [Symbol("__magic_ancestor_bf"), Symbol("?b")]
         assert_eq!(prop.head.len(), 2);
         assert_eq!(prop.head[1], EdnValue::Symbol("?b".to_string()));
@@ -622,13 +647,18 @@ mod tests {
                 pat("?c", ":edge/to", "?b"),
             ],
         );
-        let adorned: HashMap<String, Vec<char>> =
-            [("reachable".to_string(), vec!['b', 'b'])].into_iter().collect();
+        let adorned: HashMap<String, Vec<char>> = [("reachable".to_string(), vec!['b', 'b'])]
+            .into_iter()
+            .collect();
         let prop_rules = build_propagation_rules(&rule, "reachable", &adorned);
         assert_eq!(prop_rules.len(), 1);
         let (_, prop) = &prop_rules[0];
         // Head must have predicate name + 2 args for bb
-        assert_eq!(prop.head.len(), 3, "bb propagation rule head must have 3 elements (name + 2 args)");
+        assert_eq!(
+            prop.head.len(),
+            3,
+            "bb propagation rule head must have 3 elements (name + 2 args)"
+        );
         assert_eq!(prop.head[1], EdnValue::Symbol("?a".to_string()));
         assert_eq!(prop.head[2], EdnValue::Symbol("?c".to_string()));
     }
@@ -637,8 +667,9 @@ mod tests {
     fn test_no_propagation_for_non_recursive_rule() {
         // (ancestor ?a ?b) :- [?a :parent ?b]  — no recursive call
         let rule = make_rule("ancestor", &["?a", "?b"], vec![pat("?a", ":parent", "?b")]);
-        let adorned: HashMap<String, Vec<char>> =
-            [("ancestor".to_string(), vec!['b', 'f'])].into_iter().collect();
+        let adorned: HashMap<String, Vec<char>> = [("ancestor".to_string(), vec!['b', 'f'])]
+            .into_iter()
+            .collect();
         let prop_rules = build_propagation_rules(&rule, "ancestor", &adorned);
         assert!(prop_rules.is_empty());
     }
@@ -660,7 +691,10 @@ mod tests {
         let initial: HashMap<String, Vec<char>> =
             [("even".to_string(), vec!['b'])].into_iter().collect();
         let propagated = propagate_adornments(&initial, &registry);
-        assert!(propagated.contains_key("odd"), "odd should be adorned via SCC");
+        assert!(
+            propagated.contains_key("odd"),
+            "odd should be adorned via SCC"
+        );
     }
 
     #[test]
@@ -720,11 +754,15 @@ mod tests {
             "reach".to_string(),
             make_rule("reach", &["?a", "?b"], vec![pat("?a", ":edge", "?b")]),
         );
-        let adorned: HashMap<String, Vec<char>> =
-            [("reach".to_string(), vec!['b', 'f'])].into_iter().collect();
+        let adorned: HashMap<String, Vec<char>> = [("reach".to_string(), vec!['b', 'f'])]
+            .into_iter()
+            .collect();
         let new_reg = build_rewritten_registry(&registry, &adorned);
         let rules = new_reg.get_rules("reach");
-        assert!(!rules.is_empty(), "rewritten registry should contain reach rules");
+        assert!(
+            !rules.is_empty(),
+            "rewritten registry should contain reach rules"
+        );
         let first_body = rules[0].body.first().expect("rule should have body");
         assert!(
             matches!(first_body, WhereClause::RuleInvocation { .. }),

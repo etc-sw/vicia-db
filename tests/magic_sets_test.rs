@@ -10,7 +10,8 @@ fn open_db() -> Minigraf {
 }
 
 fn exec(db: &Minigraf, cmd: &str) -> QueryResult {
-    db.execute(cmd).unwrap_or_else(|e| panic!("execution error: {}", e))
+    db.execute(cmd)
+        .unwrap_or_else(|e| panic!("execution error: {}", e))
 }
 
 fn extract_refs(result: QueryResult) -> Vec<Uuid> {
@@ -152,7 +153,10 @@ fn test_bound_result_subset_of_all_free() {
                     _ => panic!("Expected Ref"),
                 })
                 .collect();
-            assert!(all_targets.contains(&q), "q is reachable from p in full closure");
+            assert!(
+                all_targets.contains(&q),
+                "q is reachable from p in full closure"
+            );
         }
         _ => panic!("Expected QueryResults"),
     }
@@ -181,7 +185,10 @@ fn test_multi_hop_recursion_with_bound_start() {
 
     let result = exec(
         &db,
-        &format!(r#"(query [:find ?y :where (path #uuid "{}" ?y)])"#, nodes[0]),
+        &format!(
+            r#"(query [:find ?y :where (path #uuid "{}" ?y)])"#,
+            nodes[0]
+        ),
     );
     let targets = extract_refs(result);
 
@@ -189,7 +196,10 @@ fn test_multi_hop_recursion_with_bound_start() {
     assert!(targets.contains(&nodes[2]), "should reach node 2");
     assert!(targets.contains(&nodes[3]), "should reach node 3");
     assert!(targets.contains(&nodes[4]), "should reach node 4");
-    assert!(!targets.contains(&nodes[0]), "should not reach node 0 (no self-loop)");
+    assert!(
+        !targets.contains(&nodes[0]),
+        "should not reach node 0 (no self-loop)"
+    );
 }
 
 /// Mutual recursion: even/odd distance from a seeded node.
@@ -200,10 +210,7 @@ fn test_mutual_recursion_even_odd_distance() {
     // Chain: n0 → n1 → n2 → n3 → n4; mark n0 as the even-distance seed
     let nodes: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
 
-    let mut transact = format!(
-        r#"(transact [[#uuid "{}" :is-start true]"#,
-        nodes[0]
-    );
+    let mut transact = format!(r#"(transact [[#uuid "{}" :is-start true]"#, nodes[0]);
     for i in 0..4 {
         transact.push_str(&format!(
             r#" [#uuid "{}" :next #uuid "{}"]"#,
@@ -219,7 +226,7 @@ fn test_mutual_recursion_even_odd_distance() {
     exec(&db, r#"(rule [(odd-d ?y) (even-d ?x) [?x :next ?y]])"#);
 
     let evens = extract_refs(exec(&db, r#"(query [:find ?x :where (even-d ?x)])"#));
-    let odds  = extract_refs(exec(&db, r#"(query [:find ?x :where (odd-d ?x)])"#));
+    let odds = extract_refs(exec(&db, r#"(query [:find ?x :where (odd-d ?x)])"#));
 
     assert!(evens.contains(&nodes[0]), "n0 should be even-distance");
     assert!(evens.contains(&nodes[2]), "n2 should be even-distance");
