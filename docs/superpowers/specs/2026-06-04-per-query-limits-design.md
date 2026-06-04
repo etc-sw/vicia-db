@@ -116,6 +116,9 @@ Update the doc comment on `OpenOptions::max_derived_facts` to reflect the new de
 | `src/query/datalog/executor.rs` | Compute effective limits and pass to evaluator |
 | `src/query/datalog/evaluator.rs` | Raise `DEFAULT_MAX_DERIVED_FACTS` to `1_000_000` |
 | `src/db.rs` | Update `OpenOptions` doc comment for new default |
+| `tests/grammar/grammar.pest` | Add `max_derived_facts_section` / `max_results_section` to `query_section` |
+| `.wiki/Datalog-Reference.md` | Update EBNF `query-section` rule; add narrative for new keywords |
+| `.wiki/Performance-Tuning.md` | Update default from 100,000 → 1,000,000; add per-query override note |
 
 ---
 
