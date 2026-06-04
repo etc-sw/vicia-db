@@ -93,7 +93,7 @@ pub use db::{Minigraf, OpenOptions, WriteTransaction};
 pub use repl::Repl;
 
 // EAV value types — users construct and match on these
-pub use graph::types::{EntityId, Value};
+pub use graph::types::{EntityId, FactRecord, FactValidTime, Value};
 
 // Query result type
 pub use query::datalog::executor::QueryResult;

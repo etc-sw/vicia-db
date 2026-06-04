@@ -129,7 +129,7 @@ cargo run < demos/demo_negation.txt
 
 5. **`src/repl.rs`** — Interactive REPL; TTY-aware (suppresses prompts/banner for piped input)
 
-6. **`src/db.rs`** — Public API: `Minigraf::open/execute/prepare/begin_write/checkpoint/save`, `WriteTransaction`, `OpenOptions::page_cache_size`
+6. **`src/db.rs`** — Public API: `Minigraf::open/execute/prepare/begin_write/checkpoint/save/export_fact_log`, `WriteTransaction`, `OpenOptions::page_cache_size`
 
 7. **`src/wal.rs`** — Fact-level sidecar WAL, CRC32-protected entries, crash recovery
 
@@ -152,6 +152,7 @@ enum Value { String(String), Integer(i64), Float(f64), Boolean(bool),
 ```
 
 **Important**: `tx_count` (sequential 1, 2, 3…) is what `:as-of N` compares against. The REPL displays `tx_id` (Unix ms). A single `(transact [...])` command increments `tx_count` once regardless of how many facts it contains (`transact_batch`).
+`Value::Ref` in value position requires a `#uuid "..."` Datalog literal; keyword values such as `:status/active` remain `Value::Keyword`. Use `Minigraf::export_fact_log()` for deterministic append-only audit records containing `tx_id`, `tx_count`, valid-time scope, and `asserted`.
 
 ### File Format (v9)
 
@@ -167,7 +168,7 @@ Auto-migrates v1/v2/v3/v4/v5/v6/v7/v8 → v9 on open/checkpoint.
 
 ## Test Coverage
 
-**992 tests total** (984 passing, 8 ignored).
+**995 tests total** (987 passing, 8 ignored).
 See `docs/TEST_COVERAGE.md` for the full per-file breakdown.
 
 **Testing conventions** — see the Testing Conventions section below before writing any tests.

@@ -58,9 +58,14 @@ pub(crate) type Attribute = String;
 /// | `Integer` | bare integer | `42`, `-7` |
 /// | `Float` | decimal | `3.14`, `-0.5` |
 /// | `Boolean` | `true` / `false` | `true` |
-/// | `Ref` | keyword entity or UUID | `:alice`, `#uuid "550e8400-..."` |
-/// | `Keyword` | colon-prefixed | `:status/active`, `:red` |
+/// | `Ref` | UUID literal in value position | `#uuid "550e8400-..."` |
+/// | `Keyword` | colon-prefixed keyword in value position | `:status/active`, `:red` |
 /// | `Null` | `nil` | `nil` |
+///
+/// Entity positions accept keyword shorthand such as `:alice`, but a keyword in
+/// value position is stored as [`Value::Keyword`]. Use a `#uuid "..."` literal
+/// or construct [`Value::Ref`] from Rust when the stored value itself must be a
+/// reference edge.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Value {
     /// A UTF-8 string. Datalog literal: `"hello"`.
@@ -72,7 +77,7 @@ pub enum Value {
     /// A boolean. Datalog literal: `true` or `false`.
     Boolean(bool),
     /// A reference to another entity by its [`EntityId`] (UUID).
-    /// Datalog literal: `:alice` (keyword short-form) or `#uuid "..."`.
+    /// Datalog value literal: `#uuid "..."`.
     Ref(EntityId),
     /// A namespaced keyword used for enumerated values and tags.
     /// Datalog literal: `:status/active`, `:red`.
@@ -234,6 +239,42 @@ pub(crate) const VALID_TIME_FOREVER: i64 = i64::MAX;
 /// so unscoped retractions use the next impossible Unix-millis value.
 pub(crate) const RETRACT_ALL_VALID_FROM: i64 = i64::MIN + 1;
 
+/// Public valid-time scope for an exported fact-log record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FactValidTime {
+    /// A normal valid-time interval. `valid_to` is exclusive; `i64::MAX` means open-ended.
+    Window {
+        /// Inclusive valid-time start in Unix milliseconds.
+        valid_from: i64,
+        /// Exclusive valid-time end in Unix milliseconds.
+        valid_to: i64,
+    },
+    /// A legacy retraction that applies to every valid-time window of the same EAV triple.
+    AllValidTime,
+}
+
+/// A stable, read-only public projection of one append-only fact-log entry.
+///
+/// This deliberately does not expose Minigraf's internal `Fact` type. It is
+/// intended for deterministic fixtures, audit receipts, and replay assertions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactRecord {
+    /// Entity this fact is about.
+    pub entity: EntityId,
+    /// Namespace-qualified attribute, for example `":person/name"`.
+    pub attribute: String,
+    /// Stored value for this EAV fact.
+    pub value: Value,
+    /// Unix-millisecond transaction timestamp.
+    pub tx_id: u64,
+    /// Monotonic transaction counter used by `:as-of N`.
+    pub tx_count: u64,
+    /// Valid-time scope for this record.
+    pub valid_time: FactValidTime,
+    /// `true` for assertions, `false` for retractions.
+    pub asserted: bool,
+}
+
 /// A Datalog fact: (Entity, Attribute, Value) triple with transaction metadata
 ///
 /// This is the core data structure for Phase 3+. Facts are immutable and versioned
@@ -288,6 +329,32 @@ pub(crate) struct Fact {
     /// True if this fact is asserted, false if retracted.
     /// Retractions are used instead of deletions to maintain history.
     pub(crate) asserted: bool,
+}
+
+impl FactRecord {
+    pub(crate) fn from_fact(fact: Fact) -> Self {
+        let valid_time = if !fact.asserted
+            && fact.valid_from == RETRACT_ALL_VALID_FROM
+            && fact.valid_to == VALID_TIME_FOREVER
+        {
+            FactValidTime::AllValidTime
+        } else {
+            FactValidTime::Window {
+                valid_from: fact.valid_from,
+                valid_to: fact.valid_to,
+            }
+        };
+
+        FactRecord {
+            entity: fact.entity,
+            attribute: fact.attribute,
+            value: fact.value,
+            tx_id: fact.tx_id,
+            tx_count: fact.tx_count,
+            valid_time,
+            asserted: fact.asserted,
+        }
+    }
 }
 
 impl Fact {

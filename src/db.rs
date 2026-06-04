@@ -5,8 +5,9 @@
 //! - `Minigraf::execute()` for implicit (self-contained) transactions
 //! - `Minigraf::begin_write()` / `WriteTransaction` for explicit transactions
 //! - `Minigraf::checkpoint()` for manual WAL compaction
+//! - `Minigraf::export_fact_log()` for deterministic append-only audit export
 
-use crate::graph::types::{Fact, TxId, VALID_TIME_FOREVER};
+use crate::graph::types::{Fact, FactRecord, TxId, VALID_TIME_FOREVER};
 
 /// Sentinel value used in `materialize_transaction` to signal "no explicit `valid_from`
 /// was provided; use the transaction timestamp at commit time."
@@ -586,6 +587,29 @@ impl Minigraf {
     /// regardless of how many facts the batch contains.
     pub fn current_tx_count(&self) -> u64 {
         self.inner.fact_storage.current_tx_count()
+    }
+
+    /// Export the complete append-only fact log in deterministic storage order.
+    ///
+    /// The returned records include assertions and retractions, including
+    /// `tx_id`, `tx_count`, valid-time scope, and the `asserted` bit. Committed
+    /// records are returned first, followed by pending in-memory records in the
+    /// same order Minigraf would replay them.
+    ///
+    /// This is an audit/export surface, not a current-state projection. Use
+    /// Datalog queries for net current views.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying fact reader fails.
+    pub fn export_fact_log(&self) -> Result<Vec<FactRecord>> {
+        Ok(self
+            .inner
+            .fact_storage
+            .get_all_facts()?
+            .into_iter()
+            .map(FactRecord::from_fact)
+            .collect())
     }
 
     /// Internal checkpoint logic (operates on an already-held write-lock guard).

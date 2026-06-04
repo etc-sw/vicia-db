@@ -1,10 +1,10 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Vetch ledger identity + scoped retract valid-time parity (June 2026), 992 tests ✅
+**Last Updated**: Vetch ledger identity + scoped retract valid-time parity + fact-log export (June 2026), 995 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 992 ✅ (984 passing, 8 ignored)
+**Total Tests**: 995 ✅ (987 passing, 8 ignored)
 - ✅ 658 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
@@ -32,6 +32,7 @@
 - ✅ 6 migration matrix tests (integration, Wave 3 #215 + v7/v8→v9 format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
 - ✅ 7 multi-value index tests (integration, #287 — same entity+attribute batch values survive indexed public query paths, ref edges, `:as-of`, `:valid-at`, retraction, checkpoint/reopen)
 - ✅ 5 retract valid-time tests (integration, Vetch ledger parity — scoped retract removes only the matching valid-time window, legacy retract still wipes all windows, Ref edge value, WriteTransaction parity, checkpoint/reopen)
+- ✅ 3 fact-log export tests (integration, Vetch ledger receipts — public append-only export includes `asserted`, `tx_id`, `tx_count`, valid-time scope, legacy retractions, scoped Ref-edge retractions, checkpoint/reopen)
 - ✅ 5 index corruption tests (integration, Wave 3 #216 — checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)
@@ -40,7 +41,7 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 984 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
+**Status**: ✅ **All 987 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -712,6 +713,12 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ explicit `WriteTransaction` scoped retract matches implicit `Minigraf::execute`
 - ✅ checkpoint/reopen preserves scoped retraction semantics
 
+### Fact-Log Export (`tests/fact_log_export_test.rs`) - ✅ 3 tests
+
+- ✅ append-only export includes assertion and legacy retraction records with `tx_id`, `tx_count`, valid-time scope, and `asserted`
+- ✅ scoped Ref-edge retractions export as exact valid-time windows, not all-valid-time legacy wipes
+- ✅ checkpoint/reopen preserves Ref values and per-window fact-log records
+
 ### Index Corruption (`tests/index_corruption_test.rs`) - ✅ 5 tests (Wave 3 #216)
 
 - ✅ checksum corruption — database with corrupted index checksum rebuilds index and serves correct query
@@ -909,6 +916,8 @@ cargo test --test udf_test             # user-defined functions (9)
 cargo test --test prepared_statements_test # prepared statements (17)
 cargo test --test migration_matrix_test    # migration matrix (6)
 cargo test --test multivalue_index_test    # same entity+attribute multi-value regression (7)
+cargo test --test retract_valid_time_test  # scoped retract valid-time parity (5)
+cargo test --test fact_log_export_test     # append-only fact-log export (3)
 cargo test --test index_corruption_test    # index corruption (5)
 cargo test --test property_test            # property-based (3)
 cargo test --test xtdb_compat_test         # XTDB compat (10)
@@ -946,7 +955,7 @@ cargo test -- --nocapture
 - Window functions verified: cumulative aggregates, rank/row-number, partition-by, desc ordering, mixed aggregate+window (Phase 7.7a)
 - User-defined functions verified: custom aggregates, custom predicates, UDF as window function, name collision guards, runtime error handling, thread safety (Phase 7.7b)
 - Prepared statements verified: entity/value/as-of/valid-at slot positions, AnyValidTime, combined temporal+entity (agentic loop pattern), plan reuse, all error paths (Phase 7.8)
-- Public API surface verified via rustdoc doctests: `Minigraf::open`, `execute`, `prepare`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9)
+- Public API surface verified via rustdoc doctests and integration tests: `Minigraf::open`, `execute`, `prepare`, `export_fact_log`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9 + Vetch ledger export)
 - WAL fault injection verified: write-fail, flush-fail, read-fault, CRC corruption, checkpoint atomicity, concurrent write+checkpoint (Wave 3)
 - Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v9 migration)
 - Multi-value index regression verified: same entity+attribute batch values survive indexed public query paths, ref edge lookups, temporal replay, retraction, and checkpoint/reopen (#287)
@@ -956,7 +965,7 @@ cargo test -- --nocapture
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 935 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat (including browser WASM + WASI + cross-platform compat + fuzzing CI)
+- 995 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions (including browser WASM + WASI + cross-platform compat + fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug fixes
 
+- Add deterministic append-only fact-log export for Vetch ledger receipts
+  - `Minigraf::export_fact_log()` returns public `FactRecord` values with entity, attribute, value, `tx_id`, `tx_count`, valid-time scope, and `asserted`
+  - `FactValidTime::AllValidTime` distinguishes legacy unscoped retractions from exact scoped valid-time windows
+  - Public docs clarify that Datalog `Value::Ref` values require `#uuid "..."`; keyword value literals remain `Value::Keyword`
+  - Added `tests/fact_log_export_test.rs` coverage for legacy retractions, scoped Ref-edge retractions, and checkpoint/reopen Ref preservation
 - Fix indexed public Datalog queries silently collapsing same entity+attribute multi-value facts inserted in one transaction (#287)
   - `EAVT`, `AEVT`, `AVET`, and `VAET` index keys now include canonical value bytes plus `tx_id`/`asserted` identity so BTree-backed lookups preserve ledger-distinct facts sharing one `tx_count`
   - `selective_fact_fetch` deduplicates by full fact identity, including value bytes, valid-time window, `tx_id`, and `asserted`
