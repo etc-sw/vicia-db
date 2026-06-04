@@ -248,17 +248,145 @@ pub(crate) fn build_propagation_rules(
     result
 }
 
-#[allow(dead_code)]
+/// Propagate adornments transitively through rule bodies (handles mutual recursion).
+/// Starting from `initial`, expands until fixed point.
+pub(crate) fn propagate_adornments(
+    initial: &HashMap<String, Vec<char>>,
+    registry: &RuleRegistry,
+) -> HashMap<String, Vec<char>> {
+    let mut adorned = initial.clone();
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+        // Collect to avoid borrowing issues in the loop
+        let preds_with_adornments: Vec<(String, Vec<char>)> = adorned
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (pred, adornment) in &preds_with_adornments {
+            for rule in registry.get_rules(pred) {
+                if rule
+                    .body
+                    .iter()
+                    .any(|c| matches!(c, WhereClause::Not(_) | WhereClause::NotJoin { .. }))
+                {
+                    continue;
+                }
+                // Seed grounded vars with bound-position vars from the rule head
+                let mut grounded: HashSet<String> = HashSet::new();
+                for (i, &ch) in adornment.iter().enumerate() {
+                    if ch == 'b' {
+                        if let Some(v) = rule.head.get(i + 1).and_then(|e| e.as_variable()) {
+                            grounded.insert(v.to_string());
+                        }
+                    }
+                }
+                for clause in &rule.body {
+                    match clause {
+                        WhereClause::Pattern(p) => {
+                            if let Some(v) = p.entity.as_variable() {
+                                grounded.insert(v.to_string());
+                            }
+                            if let Some(v) = p.value.as_variable() {
+                                grounded.insert(v.to_string());
+                            }
+                        }
+                        WhereClause::RuleInvocation { predicate: called, args } => {
+                            let call_adornment: Vec<char> = args
+                                .iter()
+                                .map(|a| match a.as_variable() {
+                                    Some(v) if grounded.contains(v) => 'b',
+                                    Some(_) => 'f',
+                                    None => 'b', // literals are always bound
+                                })
+                                .collect();
+                            if has_bound_arg(&call_adornment)
+                                && !adorned.contains_key(called.as_str())
+                            {
+                                adorned.insert(called.clone(), call_adornment);
+                                changed = true;
+                            }
+                            // After a RuleInvocation, the output vars become grounded
+                            for a in args {
+                                if let Some(v) = a.as_variable() {
+                                    grounded.insert(v.to_string());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    adorned
+}
+
+/// Build rewritten registry: copy all rules with magic guards injected for adorned
+/// predicates, then register magic propagation rules for all adorned predicates.
+/// Uses `register_rule_unchecked` because magic rules are self-recursive (positive cycle).
+fn build_rewritten_registry(
+    registry: &RuleRegistry,
+    adorned: &HashMap<String, Vec<char>>,
+) -> RuleRegistry {
+    let mut new_reg = RuleRegistry::new();
+
+    // Copy existing rules, injecting magic guards where adorned.
+    for (pred, rules) in registry.all_rules() {
+        for rule in rules {
+            let rewritten = if let Some(adornment) = adorned.get(pred) {
+                inject_magic_guard(rule, pred, adornment)
+            } else {
+                rule.clone()
+            };
+            new_reg.register_rule_unchecked(pred.to_string(), rewritten);
+        }
+    }
+
+    // Emit magic propagation rules for adorned predicates.
+    for (pred, rules) in registry.all_rules() {
+        if adorned.contains_key(pred) {
+            for rule in rules {
+                for (magic_pred, prop_rule) in build_propagation_rules(rule, pred, adorned) {
+                    new_reg.register_rule_unchecked(magic_pred, prop_rule);
+                }
+            }
+        }
+    }
+
+    new_reg
+}
+
 pub(crate) fn rewrite(
-    _query: &DatalogQuery,
-    _registry: &RuleRegistry,
+    query: &DatalogQuery,
+    registry: &RuleRegistry,
 ) -> Option<(RuleRegistry, Vec<(EntityId, String, Value)>)> {
-    None
+    let initial = compute_query_adornments(&query.where_clauses);
+    let initial_bound: HashMap<String, Vec<char>> = initial
+        .into_iter()
+        .filter(|(_, ad)| has_bound_arg(ad))
+        .collect();
+
+    if initial_bound.is_empty() {
+        return None;
+    }
+
+    let adorned = propagate_adornments(&initial_bound, registry);
+    let seeds = build_seed_facts(&query.where_clauses, &adorned);
+    if seeds.is_empty() {
+        return None;
+    }
+
+    Some((build_rewritten_registry(registry, &adorned), seeds))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::datalog::rules::RuleRegistry;
     use crate::query::datalog::types::{FindSpec, Pattern, Rule, WhereClause};
 
     #[test]
@@ -498,5 +626,75 @@ mod tests {
             [("ancestor".to_string(), vec!['b', 'f'])].into_iter().collect();
         let prop_rules = build_propagation_rules(&rule, "ancestor", &adorned);
         assert!(prop_rules.is_empty());
+    }
+
+    #[test]
+    fn test_scc_peer_adornment_propagates() {
+        // even ?n :- (odd ?n)
+        // odd  ?n :- (even ?n)
+        // Initial: even adorned 'b' → odd should also be adorned via propagation
+        let mut registry = RuleRegistry::new();
+        registry.register_rule_unchecked(
+            "even".to_string(),
+            make_rule("even", &["?n"], vec![rule_inv("odd", &["?n"])]),
+        );
+        registry.register_rule_unchecked(
+            "odd".to_string(),
+            make_rule("odd", &["?n"], vec![rule_inv("even", &["?n"])]),
+        );
+        let initial: HashMap<String, Vec<char>> =
+            [("even".to_string(), vec!['b'])].into_iter().collect();
+        let propagated = propagate_adornments(&initial, &registry);
+        assert!(propagated.contains_key("odd"), "odd should be adorned via SCC");
+    }
+
+    #[test]
+    fn test_rewrite_none_when_all_free() {
+        let mut registry = RuleRegistry::new();
+        registry.register_rule_unchecked(
+            "reach".to_string(),
+            make_rule("reach", &["?a", "?b"], vec![pat("?a", ":edge", "?b")]),
+        );
+        let query = DatalogQuery::new(
+            vec![FindSpec::Variable("?x".to_string())],
+            vec![rule_inv("reach", &["?a", "?b"])],
+        );
+        assert!(rewrite(&query, &registry).is_none());
+    }
+
+    #[test]
+    fn test_rewrite_some_when_bound_arg() {
+        let mut registry = RuleRegistry::new();
+        registry.register_rule_unchecked(
+            "reach".to_string(),
+            make_rule("reach", &["?a", "?b"], vec![pat("?a", ":edge", "?b")]),
+        );
+        registry.register_rule_unchecked(
+            "reach".to_string(),
+            make_rule(
+                "reach",
+                &["?a", "?c"],
+                vec![rule_inv("reach", &["?a", "?b"]), pat("?b", ":edge", "?c")],
+            ),
+        );
+        let query = DatalogQuery::new(
+            vec![FindSpec::Variable("?x".to_string())],
+            vec![WhereClause::RuleInvocation {
+                predicate: "reach".to_string(),
+                args: vec![
+                    EdnValue::Keyword(":start".to_string()),
+                    EdnValue::Symbol("?x".to_string()),
+                ],
+            }],
+        );
+        let result = rewrite(&query, &registry);
+        assert!(result.is_some(), "should rewrite when arg0 is literal");
+        let (rewritten_reg, seeds) = result.unwrap();
+        assert!(!seeds.is_empty(), "should produce seed facts");
+        let magic_name = magic_pred_name("reach", &['b', 'f']);
+        assert!(
+            !rewritten_reg.get_rules(&magic_name).is_empty(),
+            "magic propagation rules should be registered"
+        );
     }
 }
