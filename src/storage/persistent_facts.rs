@@ -10,9 +10,12 @@ use crate::storage::btree_v6::{
     stream_all_entries,
 };
 use crate::storage::cache::PageCache;
+use crate::storage::header_extension::{
+    HeaderManifestSlotSelection, build_header_page, select_header_manifest_slot_from_page0,
+};
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey, encode_value};
 use crate::storage::packed_pages::pack_facts;
-use crate::storage::{FileHeader, PAGE_SIZE, StorageBackend};
+use crate::storage::{FileHeader, StorageBackend};
 use anyhow::Result;
 use crc32fast::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -155,6 +158,7 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     storage: FactStorage,
     dirty: bool,
     last_checkpointed_tx_count: u64,
+    header_manifest_selection: HeaderManifestSlotSelection,
     committed_fact_pages: Arc<AtomicU64>,
 }
 
@@ -176,6 +180,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             storage: FactStorage::new(),
             dirty: false,
             last_checkpointed_tx_count: 0,
+            header_manifest_selection: HeaderManifestSlotSelection::NoDeltaManifest,
             committed_fact_pages,
         };
 
@@ -237,6 +242,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 );
             }
         }
+
+        self.header_manifest_selection =
+            select_header_manifest_slot_from_page0(header.version, &raw_header_bytes)?;
 
         // Store last_checkpointed_tx_count from header (0 for v2 files)
         self.last_checkpointed_tx_count = header.last_checkpointed_tx_count;
@@ -412,12 +420,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             let write_checksum = compute_header_checksum(&new_header);
             new_header.header_checksum = write_checksum;
 
-            let mut header_page = new_header.to_bytes();
-            header_page.resize(PAGE_SIZE, 0);
+            let header_page = build_header_page(new_header)?;
+            let manifest_selection =
+                select_header_manifest_slot_from_page0(new_header.version, &header_page)?;
             backend.write_page(0, &header_page)?;
             backend.sync()?;
             drop(backend);
 
+            self.header_manifest_selection = manifest_selection;
             self.last_checkpointed_tx_count = max_tx;
             self.committed_fact_pages
                 .store(num_fact_pages, Ordering::SeqCst);
@@ -733,12 +743,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         new_header.fact_page_count = new_fact_page_count;
         new_header.header_checksum = compute_header_checksum(&new_header);
 
-        let mut header_page = new_header.to_bytes();
-        header_page.resize(PAGE_SIZE, 0);
+        let header_page = build_header_page(new_header)?;
+        let manifest_selection =
+            select_header_manifest_slot_from_page0(new_header.version, &header_page)?;
         backend.write_page(0, &header_page)?;
         backend.sync()?;
         drop(backend);
 
+        self.header_manifest_selection = manifest_selection;
         self.last_checkpointed_tx_count = max_tx;
 
         let loader: Arc<dyn crate::storage::CommittedFactReader> =
@@ -938,12 +950,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         header.fact_page_count = new_total_fact_pages;
         header.header_checksum = compute_header_checksum(&header);
 
-        let mut header_page = header.to_bytes();
-        header_page.resize(PAGE_SIZE, 0);
+        let header_page = build_header_page(header)?;
+        let manifest_selection =
+            select_header_manifest_slot_from_page0(header.version, &header_page)?;
         backend.write_page(0, &header_page)?;
         backend.sync()?;
         drop(backend);
 
+        self.header_manifest_selection = manifest_selection;
         self.committed_fact_pages
             .store(new_total_fact_pages, Ordering::SeqCst);
         self.last_checkpointed_tx_count = self.storage.current_tx_count();
@@ -987,6 +1001,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     /// Used by WAL replay to skip entries already present in the main file.
     pub fn last_checkpointed_tx_count(&self) -> u64 {
         self.last_checkpointed_tx_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn header_manifest_selection(&self) -> HeaderManifestSlotSelection {
+        self.header_manifest_selection
     }
 
     /// Mark storage as dirty (needs saving)
@@ -1218,6 +1237,7 @@ fn build_sorted_index_entries(
 mod tests {
     use super::*;
     use crate::graph::types::Value;
+    use crate::storage::PAGE_SIZE;
     use crate::storage::backend::MemoryBackend;
     use std::io::Write;
     use uuid::Uuid;
@@ -1834,6 +1854,96 @@ mod tests {
             header.eavt_root_page > 0,
             "eavt_root must be set after save"
         );
+    }
+
+    #[test]
+    fn test_save_writes_v10_empty_header_extension() {
+        use crate::storage::header_extension::{
+            HeaderManifestSlotSelection, select_header_manifest_slot_from_page0,
+        };
+
+        let backend = MemoryBackend::new();
+        let mut storage = PersistentFactStorage::new(backend, 256).unwrap();
+        storage
+            .storage()
+            .transact(
+                vec![(
+                    Uuid::new_v4(),
+                    ":name".to_string(),
+                    Value::String("x".to_string()),
+                )],
+                None,
+            )
+            .unwrap();
+        storage.mark_dirty();
+        storage.save().unwrap();
+
+        let backend = storage.into_backend().unwrap();
+        let header_page = backend.read_page(0).unwrap();
+        let header = crate::storage::FileHeader::from_bytes(&header_page).unwrap();
+        let selection = select_header_manifest_slot_from_page0(header.version, &header_page)
+            .expect("v10 empty extension should decode");
+
+        assert_eq!(header.version, crate::storage::FORMAT_VERSION);
+        assert!(matches!(
+            selection,
+            HeaderManifestSlotSelection::NoDeltaManifest
+        ));
+    }
+
+    #[test]
+    fn test_reopen_reads_v10_empty_extension_as_no_delta_manifest() {
+        use crate::storage::backend::FileBackend;
+        use crate::storage::header_extension::HeaderManifestSlotSelection;
+        use tempfile::NamedTempFile;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        {
+            let mut storage =
+                PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
+            storage
+                .storage()
+                .transact(
+                    vec![(
+                        Uuid::new_v4(),
+                        ":name".to_string(),
+                        Value::String("x".to_string()),
+                    )],
+                    None,
+                )
+                .unwrap();
+            storage.mark_dirty();
+            storage.save().unwrap();
+        }
+
+        let reopened = PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
+        assert!(matches!(
+            reopened.header_manifest_selection(),
+            HeaderManifestSlotSelection::NoDeltaManifest
+        ));
+    }
+
+    #[test]
+    fn test_v10_header_without_extension_rejected_on_load() {
+        let mut backend = MemoryBackend::new();
+        let mut header = FileHeader::new();
+        header.page_count = 2;
+        header.header_checksum = compute_header_checksum(&header);
+
+        let mut header_page = header.to_bytes();
+        header_page.resize(PAGE_SIZE, 0);
+        backend.write_page(0, &header_page).unwrap();
+        backend.write_page(1, &vec![0u8; PAGE_SIZE]).unwrap();
+
+        let result = PersistentFactStorage::new(backend, 256);
+
+        let message = match result {
+            Ok(_) => panic!("v10 file without page-0 extension must be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(message.contains("Header extension is missing"));
     }
 
     #[test]

@@ -63,10 +63,10 @@ pub const MAGIC_NUMBER: [u8; 4] = *b"MGRF";
 
 /// Current file format version.
 ///
-/// v9 keeps the v7 header layout but stores legacy/unscoped retractions with an
-/// explicit sentinel valid-time window, so scoped valid-time retractions can be
-/// distinguished from "cancel all windows" retractions.
-pub const FORMAT_VERSION: u32 = 9;
+/// v10 keeps the 84-byte legacy header layout and reserves the rest of page 0
+/// for double-buffered delta manifest descriptors. v9 and older files still
+/// load through the migration path.
+pub const FORMAT_VERSION: u32 = 10;
 
 /// fact_page_format: legacy one-per-page (v4 and earlier, or unset byte = 0x00).
 pub const FACT_PAGE_FORMAT_ONE_PER_PAGE: u8 = 0x01;
@@ -116,7 +116,9 @@ pub trait StorageBackend: Send + Sync {
     fn is_new(&self) -> bool;
 }
 
-/// File header for .graph files — 84 bytes in v9.
+/// Legacy file header for .graph files — 84 bytes.
+///
+/// v10 stores header extensions after these 84 bytes in the rest of page 0.
 ///
 /// Layout (all fields little-endian):
 ///   0..4    magic ("MGRF")
@@ -434,14 +436,21 @@ mod tests {
     }
 
     #[test]
-    fn test_format_version_is_9() {
-        assert_eq!(FORMAT_VERSION, 9);
+    fn test_format_version_is_10() {
+        assert_eq!(FORMAT_VERSION, 10);
     }
 
     #[test]
     fn test_validate_accepts_version_9() {
         let mut h = FileHeader::new();
         h.version = 9;
+        assert!(h.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_version_10() {
+        let mut h = FileHeader::new();
+        h.version = 10;
         assert!(h.validate().is_ok());
     }
 
@@ -487,21 +496,21 @@ mod tests {
     }
 
     #[test]
-    fn test_new_header_has_version_9() {
+    fn test_new_header_has_current_version() {
         let header = FileHeader::new();
         assert_eq!(header.version, FORMAT_VERSION);
-        assert_eq!(header.version, 9);
+        assert_eq!(header.version, 10);
     }
 
     #[test]
-    fn test_file_header_serialization_v9() {
+    fn test_file_header_serialization_current_legacy_header() {
         let header = FileHeader::new();
         let bytes = header.to_bytes();
         assert_eq!(bytes.len(), 84);
     }
 
     #[test]
-    fn test_file_header_roundtrip_v9() {
+    fn test_file_header_roundtrip_current_legacy_header() {
         let mut header = FileHeader::new();
         header.header_checksum = 0xDEAD_BEEF;
         let bytes = header.to_bytes();
@@ -510,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn test_file_header_v9_byte_layout_all_fields() {
+    fn test_file_header_current_byte_layout_all_fields() {
         let mut h = FileHeader::new();
         h.page_count = 0x0102_0304_0506_0708_u64;
         h.node_count = 0x1112_1314_1516_1718_u64;
@@ -526,10 +535,10 @@ mod tests {
         h.header_checksum = 0xC1C2_C3C4_u32;
 
         let b = h.to_bytes();
-        assert_eq!(b.len(), 84, "v9 header must be exactly 84 bytes");
+        assert_eq!(b.len(), 84, "legacy header must be exactly 84 bytes");
 
         assert_eq!(&b[0..4], b"MGRF");
-        assert_eq!(&b[4..8], &9u32.to_le_bytes());
+        assert_eq!(&b[4..8], &10u32.to_le_bytes());
         assert_eq!(&b[8..16], &0x0102_0304_0506_0708_u64.to_le_bytes());
         assert_eq!(&b[16..24], &0x1112_1314_1516_1718_u64.to_le_bytes());
         assert_eq!(&b[24..32], &0x2122_2324_2526_2728_u64.to_le_bytes());
@@ -564,16 +573,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_accepts_versions_1_to_9() {
+    fn test_validate_accepts_versions_1_to_current() {
         let mut h = FileHeader::new();
-        for v in 1u32..=9 {
+        for v in 1u32..=FORMAT_VERSION {
             h.version = v;
             assert!(h.validate().is_ok(), "version {} should be accepted", v);
         }
     }
 
     #[test]
-    fn test_file_header_v9_header_checksum_roundtrip() {
+    fn test_file_header_current_header_checksum_roundtrip() {
         let mut h = FileHeader::new();
         h.header_checksum = 42;
         let bytes = h.to_bytes();

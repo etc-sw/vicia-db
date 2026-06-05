@@ -1,4 +1,5 @@
 /// File-based storage backend for native platforms.
+use crate::storage::header_extension::build_header_page;
 use crate::storage::{FileHeader, PAGE_SIZE, StorageBackend};
 use anyhow::Result;
 use std::fs::{File, OpenOptions};
@@ -180,13 +181,7 @@ impl FileBackend {
     fn write_header(file: &mut File, header: &FileHeader) -> Result<()> {
         file.seek(SeekFrom::Start(0))?;
 
-        let header_bytes = header.to_bytes();
-        let mut page = vec![0u8; PAGE_SIZE];
-        let hlen = header_bytes.len();
-        page.get_mut(..hlen)
-            .ok_or_else(|| anyhow::anyhow!("header bytes exceed page size"))?
-            .copy_from_slice(&header_bytes);
-
+        let page = build_header_page(*header)?;
         file.write_all(&page)?;
         file.sync_all()?;
 

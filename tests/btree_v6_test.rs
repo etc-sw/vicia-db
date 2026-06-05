@@ -134,7 +134,7 @@ fn test_v6_migration_from_v5_eager() {
         f.write_all(&page).unwrap();
     }
 
-    // Open with v6 code — migration must run
+    // Open with current code — migration must run
     let db = OpenOptions::new().path(&path).open().unwrap();
 
     // Query on empty DB must return empty result (not an error)
@@ -143,13 +143,13 @@ fn test_v6_migration_from_v5_eager() {
         .unwrap();
     drop(db);
 
-    // Re-open and verify header was upgraded to v6
+    // Re-open and verify header was upgraded to the current format
     let mut f = std::fs::File::open(&path).unwrap();
     let mut header_bytes = vec![0u8; 4096];
     use std::io::Read;
     f.read_exact(&mut header_bytes).unwrap();
     let version = u32::from_le_bytes(header_bytes[4..8].try_into().unwrap());
-    assert_eq!(version, 9, "header must be upgraded from v5 to v9");
+    assert_eq!(version, 10, "header must be upgraded from v5 to v10");
 }
 
 #[test]

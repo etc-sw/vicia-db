@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::storage::PAGE_SIZE;
+use crate::storage::{FileHeader, PAGE_SIZE};
 use anyhow::{Result, bail};
 
 pub(crate) const HEADER_EXTENSION_OFFSET: usize = 84;
@@ -178,6 +178,10 @@ impl HeaderExtension {
         Self { primary, secondary }
     }
 
+    pub(crate) fn empty() -> Self {
+        Self::new(HeaderManifestSlot::empty(), HeaderManifestSlot::empty())
+    }
+
     pub(crate) fn primary(&self) -> HeaderManifestSlot {
         self.primary
     }
@@ -336,6 +340,32 @@ pub(crate) fn select_header_manifest_slot(
     }
 }
 
+pub(crate) fn select_header_manifest_slot_from_page0(
+    file_format_version: u32,
+    page: &[u8],
+) -> Result<HeaderManifestSlotSelection> {
+    let Some(extension) = HeaderExtension::read_from_page0(file_format_version, page)? else {
+        return Ok(HeaderManifestSlotSelection::NoDeltaManifest);
+    };
+    Ok(select_header_manifest_slot(&extension))
+}
+
+pub(crate) fn build_header_page(header: FileHeader) -> Result<Vec<u8>> {
+    let mut page = header.to_bytes();
+    if page.len() > PAGE_SIZE {
+        bail!("Header bytes exceed page size");
+    }
+    page.resize(PAGE_SIZE, 0);
+
+    if header.version == HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        HeaderExtension::empty().write_to_page0(&mut page)?;
+    } else if header.version > HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        bail!("Unsupported header extension file format version");
+    }
+
+    Ok(page)
+}
+
 fn read_u32_le(bytes: &[u8], offset: usize, label: &str) -> Result<u32> {
     let end = offset
         .checked_add(4)
@@ -365,7 +395,8 @@ mod tests {
     use super::{
         HEADER_EXTENSION_FILE_FORMAT_VERSION, HEADER_EXTENSION_LEN, HEADER_EXTENSION_OFFSET,
         HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
-        HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection, select_header_manifest_slot,
+        HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection, build_header_page,
+        select_header_manifest_slot, select_header_manifest_slot_from_page0,
     };
     use crate::storage::{FORMAT_VERSION, FileHeader, PAGE_SIZE};
 
@@ -393,15 +424,17 @@ mod tests {
     }
 
     #[test]
-    fn file_format_version_stays_9_until_checkpoint_wiring() {
-        assert_eq!(FORMAT_VERSION, 9);
-        assert_eq!(FileHeader::new().version, 9);
+    fn current_format_publishes_v10_header_extension_gate() {
+        assert_eq!(FORMAT_VERSION, 10);
+        assert_eq!(FileHeader::new().version, 10);
         assert_eq!(HEADER_EXTENSION_FILE_FORMAT_VERSION, 10);
     }
 
     #[test]
     fn v9_header_still_reads_without_extension() {
-        let mut page = FileHeader::new().to_bytes();
+        let mut header = FileHeader::new();
+        header.version = 9;
+        let mut page = header.to_bytes();
         page.resize(PAGE_SIZE, 0);
 
         let header = FileHeader::from_bytes(&page).expect("legacy header should parse");
@@ -413,6 +446,51 @@ mod tests {
         assert!(
             extension.is_none(),
             "v9 page must not imply a manifest extension"
+        );
+    }
+
+    #[test]
+    fn current_header_page_builder_writes_empty_extension() {
+        let header = FileHeader::new();
+        let page = build_header_page(header).expect("current header page should build");
+        let parsed = FileHeader::from_bytes(&page).expect("current header should parse");
+        let selection = select_header_manifest_slot_from_page0(parsed.version, &page)
+            .expect("current header extension should decode");
+
+        assert_eq!(page.len(), PAGE_SIZE);
+        assert_eq!(parsed.version, FORMAT_VERSION);
+        assert!(matches!(
+            selection,
+            HeaderManifestSlotSelection::NoDeltaManifest
+        ));
+    }
+
+    #[test]
+    fn v9_header_page_builder_leaves_extension_inactive() {
+        let mut header = FileHeader::new();
+        header.version = 9;
+        let page = build_header_page(header).expect("legacy header page should build");
+        let parsed = FileHeader::from_bytes(&page).expect("legacy header should parse");
+        let selection = select_header_manifest_slot_from_page0(parsed.version, &page)
+            .expect("legacy header extension read should work");
+
+        assert_eq!(parsed.version, 9);
+        assert!(matches!(
+            selection,
+            HeaderManifestSlotSelection::NoDeltaManifest
+        ));
+    }
+
+    #[test]
+    fn v10_header_without_extension_is_rejected() {
+        let header = FileHeader::new();
+        let mut page = header.to_bytes();
+        page.resize(PAGE_SIZE, 0);
+        let result = select_header_manifest_slot_from_page0(header.version, &page);
+
+        assert!(
+            result.is_err(),
+            "v10 page must include a non-empty header extension"
         );
     }
 

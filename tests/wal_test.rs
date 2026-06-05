@@ -9,7 +9,7 @@
 //! - Auto-checkpoint threshold
 //! - Explicit transaction commit and rollback
 //! - Concurrent reads while writer holds the write lock
-//! - V2 → V3 file format upgrade on first checkpoint
+//! - Legacy file format upgrade on first checkpoint
 #![cfg(not(target_arch = "wasm32"))]
 
 use minigraf::QueryResult;
@@ -744,9 +744,9 @@ fn write_state_clean_after_drop() {
 
 /// Create a v2-format `.graph` file manually (version field = 2, no
 /// `last_checkpointed_tx_count`), open it with `Minigraf`, write a fact,
-/// checkpoint, then read the raw header and verify it is now v3.
+/// checkpoint, then read the raw header and verify it is current.
 #[test]
-fn test_v2_file_opens_and_upgrades_to_v3_on_checkpoint() {
+fn test_legacy_file_opens_and_upgrades_to_current_on_checkpoint() {
     use std::io::Write;
 
     let dir = tempfile::tempdir().unwrap();
@@ -800,10 +800,10 @@ fn test_v2_file_opens_and_upgrades_to_v3_on_checkpoint() {
     let magic = &raw[0..4];
     let version = u32::from_le_bytes(raw[4..8].try_into().unwrap());
     let last_checkpointed_tx_count = u64::from_le_bytes(raw[24..32].try_into().unwrap());
-    assert_eq!(version, 9, "file must be upgraded on checkpoint");
+    assert_eq!(version, 10, "file must be upgraded on checkpoint");
     assert_eq!(magic, b"MGRF", "magic number must be preserved");
     assert!(
         last_checkpointed_tx_count > 0,
-        "last_checkpointed_tx_count must be set after checkpoint on v2→v6 upgrade"
+        "last_checkpointed_tx_count must be set after checkpoint on legacy upgrade"
     );
 }
