@@ -11,6 +11,10 @@ const PENDING_FACT_COUNTS: &[usize] = &[1, 10, 100, 1_000];
 const BATCH_SIZE: usize = 1_000;
 const PAGE_SIZE_BYTES: u64 = 4096;
 
+fn db_error(error: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("{}", error)
+}
+
 #[derive(Debug)]
 struct CheckpointMeasurement {
     committed_facts: usize,
@@ -49,7 +53,7 @@ fn delta_checkpoint_cost_after_small_pending_writes() -> Result<()> {
             let run_path = root
                 .path()
                 .join(format!("run-{committed_facts}-{pending_facts}.graph"));
-            std::fs::copy(&base_path, &run_path)?;
+            copy_checkpointed_base(&base_path, &run_path)?;
 
             let db = open_no_auto_checkpoint(&run_path)?;
             let (pending_assertions, pending_retractions) =
@@ -57,7 +61,7 @@ fn delta_checkpoint_cost_after_small_pending_writes() -> Result<()> {
             let wal_bytes_before_delta_flush = file_len_optional(&wal_path_for(&run_path))?;
 
             let started = Instant::now();
-            db.checkpoint()?;
+            db.checkpoint().map_err(db_error)?;
             let delta_flush = started.elapsed();
             let delta_file_bytes = file_len(&run_path)?;
             let delta_pages = file_page_count(&run_path)?;
@@ -70,7 +74,7 @@ fn delta_checkpoint_cost_after_small_pending_writes() -> Result<()> {
             add_recompact_proxy_fact(&db, committed_facts, pending_facts)?;
             let wal_bytes_before_recompact_proxy = file_len_optional(&wal_path_for(&run_path))?;
             let started = Instant::now();
-            db.checkpoint()?;
+            db.checkpoint().map_err(db_error)?;
             let recompact_proxy = started.elapsed();
             let recompact_file_bytes = file_len(&run_path)?;
             let recompact_pages = file_page_count(&run_path)?;
@@ -120,8 +124,18 @@ fn delta_checkpoint_cost_after_small_pending_writes() -> Result<()> {
 fn build_checkpointed_base(path: &Path, fact_count: usize) -> Result<()> {
     let db = open_no_auto_checkpoint(path)?;
     insert_committed_mix(&db, fact_count)?;
-    db.checkpoint()?;
+    db.checkpoint().map_err(db_error)?;
     drop(db);
+    Ok(())
+}
+
+fn copy_checkpointed_base(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::copy(src, dst)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dst)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -132,6 +146,7 @@ fn open_no_auto_checkpoint(path: &Path) -> Result<Minigraf> {
     }
     .path(path)
     .open()
+    .map_err(db_error)
 }
 
 fn insert_committed_mix(db: &Minigraf, fact_count: usize) -> Result<()> {
@@ -142,7 +157,7 @@ fn insert_committed_mix(db: &Minigraf, fact_count: usize) -> Result<()> {
             push_fact(&mut command, i, "bench/e", false);
         }
         command.push_str("])");
-        db.execute(&command)?;
+        db.execute(&command).map_err(db_error)?;
     }
     Ok(())
 }
@@ -155,7 +170,7 @@ fn add_pending_fact_mix(
     let pending_retractions = pending_facts.saturating_div(4).min(committed_facts);
     let pending_assertions = pending_facts.saturating_sub(pending_retractions);
 
-    let mut tx = db.begin_write()?;
+    let mut tx = db.begin_write().map_err(db_error)?;
 
     if pending_retractions > 0 {
         let mut command = String::from("(retract [");
@@ -163,7 +178,7 @@ fn add_pending_fact_mix(
             push_fact(&mut command, i, "bench/e", false);
         }
         command.push_str("])");
-        tx.execute(&command)?;
+        tx.execute(&command).map_err(db_error)?;
     }
 
     if pending_assertions > 0 {
@@ -173,10 +188,10 @@ fn add_pending_fact_mix(
             push_fact(&mut command, i, "bench/pending", true);
         }
         command.push_str("])");
-        tx.execute(&command)?;
+        tx.execute(&command).map_err(db_error)?;
     }
 
-    tx.commit()?;
+    tx.commit().map_err(db_error)?;
     Ok((pending_assertions, pending_retractions))
 }
 
@@ -192,7 +207,7 @@ fn add_recompact_proxy_fact(
     let mut command = String::from("(transact [");
     push_fact(&mut command, index, "bench/recompact", true);
     command.push_str("])");
-    db.execute(&command)?;
+    db.execute(&command).map_err(db_error)?;
     Ok(())
 }
 

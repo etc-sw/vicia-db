@@ -12,7 +12,7 @@ use crate::storage::btree_v6::{
 use crate::storage::cache::PageCache;
 use crate::storage::delta_index::{DeltaIndexEntries, KeyedIndexReader, LayeredIndexReader};
 use crate::storage::delta_manifest::{
-    DeltaManifest, DeltaManifestSegment, PersistedManifestRecoveryReason,
+    DeltaBaseIdentity, DeltaManifest, DeltaManifestSegment, PersistedManifestRecoveryReason,
     PersistedManifestSelection, load_persisted_manifest_selection, write_manifest_pages,
 };
 use crate::storage::delta_segment::{DeltaSegment, write_segment_pages};
@@ -583,18 +583,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             if header.eavt_root_page == 0 {
                 anyhow::bail!("Delta manifest requires base index roots");
             }
-            let backend = self
-                .backend
-                .lock()
-                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-            let stored = header.index_checksum;
-            let total_data_pages = header.page_count.saturating_sub(1);
-            let full_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
-            if full_checksum != stored {
-                anyhow::bail!(
-                    "Delta checkpoint checksum mismatch: possible file corruption. Database may be damaged."
-                );
-            }
+            let Some(manifest) = selected_delta_manifest.as_ref() else {
+                anyhow::bail!("Delta manifest selection is missing selected manifest");
+            };
+            manifest.base_identity().validate_against_header(&header)?;
             false
         } else if needs_format_upgrade && num_fact_pages > 0 {
             true
@@ -1152,7 +1144,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .last_checkpointed_tx_count
             .saturating_add(1)
             .max(1);
-        let manifest = DeltaManifest::new(generation, vec![manifest_segment])?;
+        let manifest = DeltaManifest::new(
+            generation,
+            DeltaBaseIdentity::from_header(&curr_header),
+            vec![manifest_segment],
+        )?;
         let manifest_page_start = segment_page_start
             .checked_add(segment_page_count)
             .ok_or_else(|| anyhow::anyhow!("Delta manifest page start overflow"))?;
@@ -1174,8 +1170,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .checked_add(pending_len)
             .ok_or_else(|| anyhow::anyhow!("node_count overflow"))?;
         header.last_checkpointed_tx_count = self.storage.current_tx_count();
-        let total_data_pages = next_page_count.saturating_sub(1);
-        header.index_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+        header.index_checksum = curr_header.index_checksum;
         header.header_checksum = compute_header_checksum(&header);
 
         let header_page = build_header_page_with_extension(
@@ -2354,11 +2349,17 @@ mod tests {
 
         {
             let mut backend = FileBackend::open(&path).unwrap();
-            let manifest =
-                DeltaManifest::from_parts(11, 0, 0, Vec::new()).expect("manifest should build");
+            let mut header = FileHeader::new();
+            let manifest = DeltaManifest::from_parts(
+                11,
+                DeltaBaseIdentity::from_header(&header),
+                0,
+                0,
+                Vec::new(),
+            )
+            .expect("manifest should build");
             let descriptor = write_manifest_pages(&mut backend, 1, &manifest)
                 .expect("manifest pages should write");
-            let mut header = FileHeader::new();
             header.page_count = 1 + descriptor.manifest_page_count();
             header.header_checksum = compute_header_checksum(&header);
             let page0 = build_header_page_with_extension(
@@ -2408,13 +2409,20 @@ mod tests {
             HeaderExtension, HeaderManifestSlot, build_header_page_with_extension,
         };
 
-        let manifest =
-            DeltaManifest::from_parts(12, 0, 0, Vec::new()).expect("manifest should build");
+        let header = FileHeader::new();
+        let manifest = DeltaManifest::from_parts(
+            12,
+            DeltaBaseIdentity::from_header(&header),
+            0,
+            0,
+            Vec::new(),
+        )
+        .expect("manifest should build");
         let encoded = manifest.encode().expect("manifest should encode");
         let descriptor =
             HeaderManifestSlot::new(12, 99, 1, encoded.len() as u64, crc32fast::hash(&encoded))
                 .expect("descriptor should build");
-        let mut header = FileHeader::new();
+        let mut header = header;
         header.page_count = 2;
         header.header_checksum = compute_header_checksum(&header);
         let page0 = build_header_page_with_extension(
@@ -2443,8 +2451,15 @@ mod tests {
             build_header_page_with_extension,
         };
 
-        let manifest =
-            DeltaManifest::from_parts(13, 0, 0, Vec::new()).expect("manifest should build");
+        let header = FileHeader::new();
+        let manifest = DeltaManifest::from_parts(
+            13,
+            DeltaBaseIdentity::from_header(&header),
+            0,
+            0,
+            Vec::new(),
+        )
+        .expect("manifest should build");
         let encoded = manifest.encode().expect("manifest should encode");
         let primary =
             HeaderManifestSlot::new(13, 1, 1, encoded.len() as u64, crc32fast::hash(&encoded))
@@ -2452,7 +2467,7 @@ mod tests {
         let secondary =
             HeaderManifestSlot::new(12, 2, 1, encoded.len() as u64, crc32fast::hash(&encoded))
                 .expect("secondary descriptor should build");
-        let mut header = FileHeader::new();
+        let mut header = header;
         header.page_count = 3;
         header.header_checksum = compute_header_checksum(&header);
         let mut page0 =

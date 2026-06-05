@@ -238,6 +238,31 @@ T6 does not fully satisfy the stricter Vetch target yet. Delta flush and delta r
 
 Next gate: make delta publish and delta reopen validate only the newly appended delta segment/manifest plus stable base metadata, while preserving full-file checksum validation for full rebuild, repair, and explicit recompact.
 
+### T7A: Delta Checksum Scope
+
+Run: 2026-06-05, `cargo test --release --test checkpoint_rebuild_benchmark -- --ignored --nocapture`.
+
+Fixture update: the copied base file is now `sync_all()`ed before the timed delta checkpoint. This keeps setup I/O out of `delta_flush_ms`; otherwise the checkpoint's `sync()` can flush dirty pages from the benchmark's just-copied 407 MB base file.
+
+Code change: v10 delta manifests now carry base identity (base page count, fact page count, base checkpoint tx_count, base roots, and base checksum). Delta publish keeps the base checksum in page 0 and validates only the new delta segment, manifest payload, and header slot. Reopen validates manifest/base identity and selected delta bytes instead of recomputing a checksum over all data pages. Full rebuild and recompact proxy still compute full-file checksums.
+
+| Committed facts | Pending facts | Assertions/retractions | Delta flush | Reopen delta | Recompact proxy | Base pages | Delta pages | Recompact pages | Delta WAL bytes | Recompact WAL bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10K | 1 | 1/0 | 3.283 ms | 0.081 ms | 40.681 ms | 970 | 972 | 972 | 126 | 126 |
+| 10K | 10 | 8/2 | 5.212 ms | 0.136 ms | 42.266 ms | 970 | 973 | 973 | 786 | 126 |
+| 10K | 100 | 75/25 | 12.054 ms | 0.296 ms | 52.829 ms | 970 | 980 | 984 | 7,382 | 126 |
+| 10K | 1K | 750/250 | 105.020 ms | 2.536 ms | 84.589 ms | 970 | 1,057 | 1,089 | 73,384 | 126 |
+| 100K | 1 | 1/0 | 4.162 ms | 0.098 ms | 524.669 ms | 9,778 | 9,780 | 9,780 | 126 | 126 |
+| 100K | 10 | 8/2 | 6.999 ms | 0.150 ms | 528.993 ms | 9,778 | 9,781 | 9,781 | 786 | 126 |
+| 100K | 100 | 75/25 | 15.525 ms | 0.329 ms | 506.770 ms | 9,778 | 9,788 | 9,790 | 7,382 | 126 |
+| 100K | 1K | 750/250 | 116.350 ms | 4.368 ms | 491.319 ms | 9,778 | 9,865 | 9,896 | 73,384 | 126 |
+| 1M | 1 | 1/0 | 5.266 ms | 0.114 ms | 6,922.956 ms | 99,412 | 99,414 | 99,414 | 127 | 127 |
+| 1M | 10 | 8/2 | 4.637 ms | 0.112 ms | 6,105.198 ms | 99,412 | 99,415 | 99,416 | 796 | 127 |
+| 1M | 100 | 75/25 | 15.547 ms | 0.336 ms | 6,677.004 ms | 99,412 | 99,422 | 99,425 | 7,482 | 127 |
+| 1M | 1K | 750/250 | 302.879 ms | 4.272 ms | 9,588.647 ms | 99,412 | 99,501 | 99,528 | 74,384 | 127 |
+
+T7A observation: the strict Vetch small-write target is now met for the measured single-segment path. The critical 1M base plus one pending fact case improved from the R2 full-rebuild baseline of 4,829.691 ms and the T6 delta baseline of 512.109 ms to 5.266 ms. Reopen improved from 307.388 ms to 0.114 ms. Small delta publish and reopen are now tied to pending/delta size plus sync overhead, not committed graph size. Recompact proxy remains O(total facts), as intended for work scheduled outside the interactive agent rhythm.
+
 ---
 
 ## Concurrency (In-Memory)

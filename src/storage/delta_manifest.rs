@@ -67,23 +67,118 @@ impl DeltaManifestSegment {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct DeltaBaseIdentity {
+    page_count: u64,
+    fact_page_count: u64,
+    checkpoint_tx_count: u64,
+    index_checksum: u32,
+    eavt_root: u64,
+    aevt_root: u64,
+    avet_root: u64,
+    vaet_root: u64,
+}
+
+impl DeltaBaseIdentity {
+    pub(crate) fn from_header(header: &FileHeader) -> Self {
+        Self {
+            page_count: header.page_count,
+            fact_page_count: header.fact_page_count,
+            checkpoint_tx_count: header.last_checkpointed_tx_count,
+            index_checksum: header.index_checksum,
+            eavt_root: header.eavt_root_page,
+            aevt_root: header.aevt_root_page,
+            avet_root: header.avet_root_page,
+            vaet_root: header.vaet_root_page,
+        }
+    }
+
+    #[cfg(test)]
+    fn fixture(page_count: u64, checkpoint_tx_count: u64) -> Self {
+        Self {
+            page_count,
+            fact_page_count: page_count.saturating_sub(1),
+            checkpoint_tx_count,
+            index_checksum: 0xABCD_EF01,
+            eavt_root: 2,
+            aevt_root: 3,
+            avet_root: 4,
+            vaet_root: 5,
+        }
+    }
+
+    fn validate_for_segments(&self, segments: &[DeltaManifestSegment]) -> Result<()> {
+        if segments.is_empty() {
+            return Ok(());
+        }
+        if self.page_count == 0 {
+            bail!("Delta manifest base page_count must be non-zero");
+        }
+        if self.eavt_root == 0 || self.aevt_root == 0 || self.avet_root == 0 || self.vaet_root == 0
+        {
+            bail!("Delta manifest base identity requires all base index roots");
+        }
+        for segment in segments {
+            if segment.segment_page_start < self.page_count {
+                bail!("Delta manifest segment starts before base page_count");
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_against_header(&self, header: &FileHeader) -> Result<()> {
+        if self.page_count > header.page_count {
+            bail!("Delta manifest base page_count exceeds file page_count");
+        }
+        if self.fact_page_count != header.fact_page_count {
+            bail!("Delta manifest base fact_page_count does not match header");
+        }
+        if self.checkpoint_tx_count > header.last_checkpointed_tx_count {
+            bail!("Delta manifest base checkpoint tx_count exceeds header checkpoint tx_count");
+        }
+        if self.index_checksum != header.index_checksum {
+            bail!("Delta manifest base checksum does not match header");
+        }
+        if self.eavt_root != header.eavt_root_page
+            || self.aevt_root != header.aevt_root_page
+            || self.avet_root != header.avet_root_page
+            || self.vaet_root != header.vaet_root_page
+        {
+            bail!("Delta manifest base roots do not match header");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DeltaManifest {
     codec_version: u16,
     generation: u64,
+    base_identity: DeltaBaseIdentity,
     low_tx_count: u64,
     high_tx_count: u64,
     segments: Vec<DeltaManifestSegment>,
 }
 
 impl DeltaManifest {
-    pub(crate) fn new(generation: u64, segments: Vec<DeltaManifestSegment>) -> Result<Self> {
+    pub(crate) fn new(
+        generation: u64,
+        base_identity: DeltaBaseIdentity,
+        segments: Vec<DeltaManifestSegment>,
+    ) -> Result<Self> {
         let (low_tx_count, high_tx_count) = segment_tx_range(&segments);
-        Self::from_parts(generation, low_tx_count, high_tx_count, segments)
+        Self::from_parts(
+            generation,
+            base_identity,
+            low_tx_count,
+            high_tx_count,
+            segments,
+        )
     }
 
     pub(crate) fn from_parts(
         generation: u64,
+        base_identity: DeltaBaseIdentity,
         low_tx_count: u64,
         high_tx_count: u64,
         segments: Vec<DeltaManifestSegment>,
@@ -91,6 +186,7 @@ impl DeltaManifest {
         let manifest = Self {
             codec_version: DELTA_MANIFEST_CODEC_VERSION,
             generation,
+            base_identity,
             low_tx_count,
             high_tx_count,
             segments,
@@ -105,6 +201,10 @@ impl DeltaManifest {
 
     pub(crate) fn high_tx_count(&self) -> u64 {
         self.high_tx_count
+    }
+
+    pub(crate) fn base_identity(&self) -> DeltaBaseIdentity {
+        self.base_identity
     }
 
     pub(crate) fn segments(&self) -> &[DeltaManifestSegment] {
@@ -191,6 +291,11 @@ impl DeltaManifest {
         }
         if self.high_tx_count != expected_high {
             bail!("Delta manifest high tx_count does not match referenced segments");
+        }
+        self.base_identity.validate_for_segments(&self.segments)?;
+        if !self.segments.is_empty() && self.base_identity.checkpoint_tx_count >= self.low_tx_count
+        {
+            bail!("Delta manifest base checkpoint tx_count must precede segment tx range");
         }
 
         for segment in &self.segments {
@@ -537,10 +642,10 @@ fn read_u64_le(bytes: &[u8], offset: usize, label: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeltaManifest, DeltaManifestSegment, ManifestRecoveryReason, ManifestSelection,
-        ManifestSlot, PersistedManifestRecoveryReason, PersistedManifestSelection,
-        load_persisted_manifest_selection, read_manifest_from_descriptor,
-        select_manifest_candidate, write_manifest_pages,
+        DeltaBaseIdentity, DeltaManifest, DeltaManifestSegment, ManifestRecoveryReason,
+        ManifestSelection, ManifestSlot, PersistedManifestRecoveryReason,
+        PersistedManifestSelection, load_persisted_manifest_selection,
+        read_manifest_from_descriptor, select_manifest_candidate, write_manifest_pages,
     };
     use crate::graph::types::{Fact, VALID_TIME_FOREVER, Value};
     use crate::storage::backend::MemoryBackend;
@@ -581,6 +686,7 @@ mod tests {
     fn manifest_bytes(generation: u64, segment: &DeltaSegment) -> Vec<u8> {
         DeltaManifest::new(
             generation,
+            DeltaBaseIdentity::fixture(500, 0),
             vec![
                 DeltaManifestSegment::from_segment_header(500 + generation, 1, segment.header())
                     .expect("manifest segment should build"),
@@ -598,8 +704,14 @@ mod tests {
     }
 
     fn empty_manifest(generation: u64) -> DeltaManifest {
-        DeltaManifest::from_parts(generation, 0, 0, Vec::new())
-            .expect("empty manifest should be valid")
+        DeltaManifest::from_parts(
+            generation,
+            DeltaBaseIdentity::fixture(1, 0),
+            0,
+            0,
+            Vec::new(),
+        )
+        .expect("empty manifest should be valid")
     }
 
     fn header_with_extension(extension: HeaderExtension, page_count: u64) -> (FileHeader, Vec<u8>) {
@@ -616,6 +728,7 @@ mod tests {
         let segment = segment(3);
         let manifest = DeltaManifest::new(
             7,
+            DeltaBaseIdentity::fixture(900, 0),
             vec![
                 DeltaManifestSegment::from_segment_header(900, 1, segment.header())
                     .expect("manifest segment should build"),
@@ -856,6 +969,7 @@ mod tests {
         assert!(
             DeltaManifest::from_parts(
                 1,
+                DeltaBaseIdentity::fixture(950, 0),
                 segment.header().low_tx_count,
                 segment.header().high_tx_count - 1,
                 vec![manifest_segment],
