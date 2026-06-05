@@ -93,6 +93,16 @@ impl HeaderManifestSlot {
         self.is_empty() || self.slot_checksum == self.compute_checksum()
     }
 
+    fn state(self) -> HeaderManifestSlotState {
+        if self.is_empty() {
+            HeaderManifestSlotState::Empty
+        } else if self.is_selectable() {
+            HeaderManifestSlotState::Valid(self)
+        } else {
+            HeaderManifestSlotState::Invalid
+        }
+    }
+
     fn is_selectable(self) -> bool {
         !self.is_empty()
             && self.checksum_valid()
@@ -200,23 +210,24 @@ impl HeaderExtension {
         Ok(())
     }
 
-    pub(crate) fn read_from_page0(page: &[u8]) -> Result<Option<Self>> {
+    pub(crate) fn read_from_page0(file_format_version: u32, page: &[u8]) -> Result<Option<Self>> {
         if page.len() < HEADER_EXTENSION_OFFSET {
             bail!("Page 0 is too short for legacy header");
         }
+        if file_format_version < HEADER_EXTENSION_FILE_FORMAT_VERSION {
+            return Ok(None);
+        }
+        if file_format_version != HEADER_EXTENSION_FILE_FORMAT_VERSION {
+            bail!("Unsupported header extension file format version");
+        }
+
         let Some(extension_bytes) =
             page.get(HEADER_EXTENSION_OFFSET..HEADER_EXTENSION_OFFSET + HEADER_EXTENSION_LEN)
         else {
-            let tail = page
-                .get(HEADER_EXTENSION_OFFSET..)
-                .ok_or_else(|| anyhow::anyhow!("Page 0 tail out of bounds"))?;
-            if tail.iter().all(|byte| *byte == 0) {
-                return Ok(None);
-            }
             bail!("Header extension is truncated");
         };
         if extension_bytes.iter().all(|byte| *byte == 0) {
-            return Ok(None);
+            bail!("Header extension is missing for v10 header");
         }
 
         let magic = extension_bytes
@@ -259,6 +270,13 @@ impl HeaderExtension {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderManifestSlotState {
+    Empty,
+    Valid(HeaderManifestSlot),
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeaderManifestSlotName {
     Primary,
     Secondary,
@@ -266,11 +284,12 @@ pub(crate) enum HeaderManifestSlotName {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeaderManifestSlotRecoveryReason {
-    NoValidManifestSlot,
+    CorruptManifestSlot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeaderManifestSlotSelection {
+    NoDeltaManifest,
     Use {
         slot: HeaderManifestSlotName,
         descriptor: HeaderManifestSlot,
@@ -283,33 +302,36 @@ pub(crate) enum HeaderManifestSlotSelection {
 pub(crate) fn select_header_manifest_slot(
     extension: &HeaderExtension,
 ) -> HeaderManifestSlotSelection {
-    let primary = extension.primary.is_selectable();
-    let secondary = extension.secondary.is_selectable();
+    let primary = extension.primary.state();
+    let secondary = extension.secondary.state();
 
     match (primary, secondary) {
-        (true, true) => {
-            if extension.primary.generation() >= extension.secondary.generation() {
+        (HeaderManifestSlotState::Valid(primary), HeaderManifestSlotState::Valid(secondary)) => {
+            if primary.generation() >= secondary.generation() {
                 HeaderManifestSlotSelection::Use {
                     slot: HeaderManifestSlotName::Primary,
-                    descriptor: extension.primary,
+                    descriptor: primary,
                 }
             } else {
                 HeaderManifestSlotSelection::Use {
                     slot: HeaderManifestSlotName::Secondary,
-                    descriptor: extension.secondary,
+                    descriptor: secondary,
                 }
             }
         }
-        (true, false) => HeaderManifestSlotSelection::Use {
+        (HeaderManifestSlotState::Valid(primary), _) => HeaderManifestSlotSelection::Use {
             slot: HeaderManifestSlotName::Primary,
-            descriptor: extension.primary,
+            descriptor: primary,
         },
-        (false, true) => HeaderManifestSlotSelection::Use {
+        (_, HeaderManifestSlotState::Valid(secondary)) => HeaderManifestSlotSelection::Use {
             slot: HeaderManifestSlotName::Secondary,
-            descriptor: extension.secondary,
+            descriptor: secondary,
         },
-        (false, false) => HeaderManifestSlotSelection::RecoveryRequired {
-            reason: HeaderManifestSlotRecoveryReason::NoValidManifestSlot,
+        (HeaderManifestSlotState::Empty, HeaderManifestSlotState::Empty) => {
+            HeaderManifestSlotSelection::NoDeltaManifest
+        }
+        _ => HeaderManifestSlotSelection::RecoveryRequired {
+            reason: HeaderManifestSlotRecoveryReason::CorruptManifestSlot,
         },
     }
 }
@@ -353,7 +375,16 @@ mod tests {
     }
 
     fn page_with_extension(extension: &HeaderExtension) -> Vec<u8> {
-        let mut page = FileHeader::new().to_bytes();
+        page_with_header_version_and_extension(HEADER_EXTENSION_FILE_FORMAT_VERSION, extension)
+    }
+
+    fn page_with_header_version_and_extension(
+        file_format_version: u32,
+        extension: &HeaderExtension,
+    ) -> Vec<u8> {
+        let mut header = FileHeader::new();
+        header.version = file_format_version;
+        let mut page = header.to_bytes();
         page.resize(PAGE_SIZE, 0);
         extension
             .write_to_page0(&mut page)
@@ -375,8 +406,8 @@ mod tests {
 
         let header = FileHeader::from_bytes(&page).expect("legacy header should parse");
         header.validate().expect("legacy header should validate");
-        let extension =
-            HeaderExtension::read_from_page0(&page).expect("extension read should work");
+        let extension = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("extension read should work");
 
         assert_eq!(header.version, 9);
         assert!(
@@ -386,10 +417,23 @@ mod tests {
     }
 
     #[test]
+    fn v9_header_with_extension_like_tail_is_not_selected() {
+        let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
+        let page = page_with_header_version_and_extension(9, &extension);
+        let header = FileHeader::from_bytes(&page).expect("legacy header should parse");
+        let extension = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("extension read should work");
+
+        assert_eq!(header.version, 9);
+        assert!(extension.is_none(), "v9 tail bytes must be inactive");
+    }
+
+    #[test]
     fn v10_header_extension_round_trips_after_legacy_header() {
         let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
         let page = page_with_extension(&extension);
-        let decoded = HeaderExtension::read_from_page0(&page)
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension should decode")
             .expect("extension should be present");
 
@@ -399,12 +443,75 @@ mod tests {
     }
 
     #[test]
+    fn v10_header_with_empty_slots_is_no_delta_manifest() {
+        let extension =
+            HeaderExtension::new(HeaderManifestSlot::empty(), HeaderManifestSlot::empty());
+        let page = page_with_extension(&extension);
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("empty extension should decode")
+            .expect("extension should be present");
+        let selection = select_header_manifest_slot(&decoded);
+
+        assert!(matches!(
+            selection,
+            HeaderManifestSlotSelection::NoDeltaManifest
+        ));
+    }
+
+    #[test]
+    fn v10_header_selects_newest_valid_slot() {
+        let extension = HeaderExtension::new(slot(7, 100), slot(8, 200));
+        let page = page_with_extension(&extension);
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("extension should decode")
+            .expect("extension should be present");
+        let selection = select_header_manifest_slot(&decoded);
+
+        assert!(matches!(
+            selection,
+            HeaderManifestSlotSelection::Use {
+                slot: HeaderManifestSlotName::Secondary,
+                descriptor
+            } if descriptor.generation() == 8
+        ));
+    }
+
+    #[test]
+    fn v10_header_rejects_wrong_extension_version() {
+        let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
+        let mut page = page_with_extension(&extension);
+        let wrong_version_offset = HEADER_EXTENSION_OFFSET + 8;
+        page[wrong_version_offset..wrong_version_offset + 4].copy_from_slice(&9u32.to_le_bytes());
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let result = HeaderExtension::read_from_page0(header.version, &page);
+
+        assert!(
+            result.is_err(),
+            "v10 extension version mismatch must reject"
+        );
+    }
+
+    #[test]
+    fn v10_header_rejects_wrong_extension_magic() {
+        let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
+        let mut page = page_with_extension(&extension);
+        page[HEADER_EXTENSION_OFFSET..HEADER_EXTENSION_OFFSET + 8].copy_from_slice(b"BADMAGIC");
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let result = HeaderExtension::read_from_page0(header.version, &page);
+
+        assert!(result.is_err(), "v10 extension magic mismatch must reject");
+    }
+
+    #[test]
     fn primary_slot_checksum_mismatch_rejects_only_primary() {
         let extension = HeaderExtension::new(slot(2, 100), slot(1, 200));
         let mut page = page_with_extension(&extension);
         page[HEADER_EXTENSION_OFFSET + 24] ^= 0x55;
 
-        let decoded = HeaderExtension::read_from_page0(&page)
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension should decode with one corrupt slot")
             .expect("extension should be present");
         let selection = select_header_manifest_slot(&decoded);
@@ -429,7 +536,8 @@ mod tests {
             + HeaderManifestSlot::LEN
             + 8] ^= 0x55;
 
-        let decoded = HeaderExtension::read_from_page0(&page)
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension should decode with one corrupt slot")
             .expect("extension should be present");
         let selection = select_header_manifest_slot(&decoded);
@@ -451,7 +559,8 @@ mod tests {
         let mut page = page_with_extension(&extension);
         page[HEADER_EXTENSION_OFFSET + 16] ^= 0xAA;
 
-        let decoded = HeaderExtension::read_from_page0(&page)
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension should decode with newer slot corrupt")
             .expect("extension should be present");
         let selection = select_header_manifest_slot(&decoded);
@@ -475,7 +584,8 @@ mod tests {
             + HeaderManifestSlot::LEN
             + 16] ^= 0xAA;
 
-        let decoded = HeaderExtension::read_from_page0(&page)
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension should decode with corrupt slots")
             .expect("extension should be present");
         let selection = select_header_manifest_slot(&decoded);
@@ -483,7 +593,7 @@ mod tests {
         assert!(matches!(
             selection,
             HeaderManifestSlotSelection::RecoveryRequired {
-                reason: HeaderManifestSlotRecoveryReason::NoValidManifestSlot
+                reason: HeaderManifestSlotRecoveryReason::CorruptManifestSlot
             }
         ));
     }
