@@ -256,6 +256,8 @@ Current roadmap scope for this worktree:
   - Sanakirja/Persy: versioned roots, copy-on-write page discipline, and single-file transaction constraints.
 - Preserve full-history identity across base and delta: `entity`, `attribute`, encoded `value`, `valid_from`, `valid_to`, `tx_count`, `tx_id`, and `asserted`.
 
+Reference survey for the delta/index design note: `docs/DELTA_INDEX_REFERENCE_SURVEY.md`.
+
 Future roadmap parking lot outside this worktree's implementation scope:
 
 - Vector-first storage in Minigraf core, including `Value::Vector`, HNSW, SIMD distance functions, and vector quantization.
