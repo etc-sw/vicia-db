@@ -5,8 +5,9 @@ Branch: `vetch/minigraf-refactor-plan`
 Status: overall execution plan as of 2026-06-06. T7C is measured, T8A
 multi-segment manifest publish is implemented on this branch, T8B mini benchmark
 has passed, T8C full matrix is measured, T9A threshold policy is documented,
-and T9B private threshold metrics are the next storage gate. This document is
-the single high-level plan for the Vetch-driven
+T9B private threshold metrics pass, and T9C-A adds a private explicit recompact
+primitive. T9C-B is still needed for crash-safe automatic/background
+scheduling. This document is the single high-level plan for the Vetch-driven
 Minigraf delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
 `docs/BENCHMARKS.md`.
@@ -174,8 +175,9 @@ Vetch should use Minigraf with this cadence:
 | T8B | Done | Mini benchmark gate after T8A. | Flush/reopen/file growth meet near-term Vetch targets. |
 | T8C | Done | Full accumulated benchmark matrix. | Multi-segment is the default path; tiny-segment accumulation needs thresholds. |
 | T9A | Done | Segment/file-growth threshold policy. | Long-term segment/file growth is bounded outside hot path. |
-| T9B | Planned next | Private threshold metrics and decision tests. | The storage layer can tell Vetch when background maintenance is needed without doing foreground full rebuild. |
-| T9C | Planned | Recompact implementation and maintenance path. | Threshold-triggered maintenance preserves visible semantics and crash guarantees. |
+| T9B | Done | Private threshold metrics and decision tests. | The storage layer can classify visible delta growth without doing foreground full rebuild. |
+| T9C-A | Done | Private explicit recompact primitive. | Manual/internal recompact preserves visible semantics when it completes successfully and is guarded against pending writes. |
+| T9C-B | Planned | Crash-safe recompact publish and scheduling gate. | Threshold-triggered maintenance preserves pre-header crash guarantees before any background caller uses it. |
 | Q1 | Planned separate lane | Agent-brief receipt/as-of read-path improvement. | Just-written receipt can be read cheaply on a 1M base. |
 | Q2 | Planned cleanup lane | Streaming/allocation cleanup after correctness shape stabilizes. | Export/checkpoint/recompact memory improves without semantic drift. |
 
@@ -402,10 +404,46 @@ Implementation shape:
 - Record the decision only where existing internal code can observe it safely,
   or keep the first implementation as a pure function with unit tests.
 
-### Phase T9C: Recompact Maintenance Path
+### Phase T9C-A: Private Recompact Primitive
 
-Goal: implement internal/background recompact once T9B can identify when it is
-needed.
+Goal: provide a private maintenance primitive that can fold the selected visible
+delta into a fresh base without adding a public API or running from foreground
+`checkpoint()`.
+
+Result:
+
+- `PersistentFactStorage::recompact_visible_delta()` is private/internal and is
+  not called by `checkpoint()`.
+- The primitive rejects uncheckpointed pending facts; Vetch receipt cadence must
+  checkpoint writes before maintenance.
+- Successful recompact preserves full-history rows, scoped retractions, and
+  `Value::Ref` edges.
+- Successful recompact removes the selected visible delta manifest, so reopened
+  readers use the rebuilt base.
+- `delta_maintenance_decision()` exposes the selected-manifest threshold
+  decision internally without executing maintenance.
+
+New fact found during T9C-A:
+
+- The current full-rebuild writer rewrites fact/index pages in place starting at
+  page 1. That is fine for explicit success-path maintenance, but it cannot yet
+  prove the T9C crash invariant "crash before recompact header publish preserves
+  previous base + manifest." A crash-safe background recompact needs a separate
+  publish design before threshold-triggered scheduling is allowed.
+
+### Phase T9C-B: Crash-Safe Recompact Publish
+
+Goal: make internal/background recompact safe to schedule automatically once
+T9B can identify when it is needed.
+
+Design requirement:
+
+- Do not overwrite pages reachable from the currently published header before a
+  durable publish marker can recover or ignore the in-progress recompact.
+- Keep the single-file invariant. If scratch/journal pages are needed, they must
+  live inside the `.graph` file and have clear recovery semantics.
+- Do not call recompact from `checkpoint()` until pre-header and post-header
+  crash tests pass.
 
 Acceptance:
 
@@ -534,7 +572,9 @@ Run benchmark gates only when the relevant slice is ready:
 - T8B mini benchmark is complete.
 - T8C full `cargo bench --bench delta_accumulation_benchmark` is complete.
 - T9A threshold policy is complete.
-- T9B private threshold metrics and decision tests are the next storage gate.
+- T9B private threshold metrics and decision tests are complete.
+- T9C-A private explicit recompact primitive is complete.
+- T9C-B crash-safe recompact publish is the next storage gate.
 
 Known verification caveat:
 
@@ -545,36 +585,31 @@ Known verification caveat:
 
 ## Next Slice Goal Spec
 
-Name: T9B private threshold metrics and decision tests.
+Name: T9C-B crash-safe recompact publish gate.
 
 Objective:
 
-- Implement the private metric and decision surface that tells Minigraf internals
-  when delta growth needs background maintenance, without triggering recompact
-  inside foreground `checkpoint()`.
+- Design and implement a crash-safe recompact publish path so internal/background
+  maintenance can be scheduled without risking the currently published base plus
+  visible delta manifest.
 
 Scope:
 
-- Tests first, then private storage-module code.
-- No broad storage algorithm change.
+- Tests first, especially pre-header and post-header recompact crash cases.
+- No broad storage engine dependency.
 - No new dependency.
 - No public recompact API unless a Vetch scheduling contract is explicit.
-- No as-of query optimization in T9B; keep that in Q1.
-- No threshold-triggered recompact execution in T9B.
+- No as-of query optimization in T9C-B; keep that in Q1.
+- No threshold-triggered recompact execution until crash tests pass.
 
 Done:
 
-- Unit tests cover no-manifest, healthy, soft-threshold, and hard-threshold
-  decisions.
-- Unit tests cover ratio floors and the optional nature of exact fact-count
-  metrics.
-- `DeltaGrowthMetrics` is derived from the selected visible manifest and base
-  identity, not from unpublished trailing bytes.
-- `DeltaMaintenanceDecision` returns `ContinueDeltaAppend`,
-  `ScheduleBackgroundRecompact`, or `MaintenanceBackpressure`.
+- Recompact pre-header crash preserves previous base + manifest.
+- Recompact post-header crash leaves the new base visible.
+- Old delta pages may remain as garbage but are ignored by selected manifest.
+- Threshold-triggered internal scheduling is still private and never runs from
+  foreground `checkpoint()`.
 - Existing checkpoint/reopen/crash tests stay green.
-- Roadmap records whether T9C should implement internal recompact next or
-  whether a Vetch scheduling contract is required first.
 
 Stop conditions:
 
@@ -582,5 +617,5 @@ Stop conditions:
   reject it.
 - If the policy cannot be expressed without a public API, write the Vetch
   scheduling contract first.
-- If the private metrics cannot be computed from the current manifest/base
-  state, add a narrow internal metadata test before touching checkpoint policy.
+- If crash-safe recompact requires changing where base fact pages start, add a
+  file-format design note and migration test before implementation.

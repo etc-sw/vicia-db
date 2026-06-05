@@ -10,6 +10,7 @@ use crate::storage::btree_v6::{
     stream_all_entries,
 };
 use crate::storage::cache::PageCache;
+use crate::storage::delta_growth::{DeltaGrowthMetrics, DeltaMaintenanceDecision};
 use crate::storage::delta_index::{DeltaIndexEntries, KeyedIndexReader, LayeredIndexReader};
 use crate::storage::delta_manifest::{
     DeltaBaseIdentity, DeltaManifest, DeltaManifestSegment, PersistedManifestRecoveryReason,
@@ -1532,6 +1533,40 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         &self.delta_manifest_selection
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn delta_maintenance_decision(&self) -> DeltaMaintenanceDecision {
+        match &self.delta_manifest_selection {
+            PersistedManifestSelection::Use { manifest, .. } => {
+                DeltaGrowthMetrics::from_manifest(manifest).decide()
+            }
+            PersistedManifestSelection::NoDeltaManifest
+            | PersistedManifestSelection::RecoveryRequired { .. } => {
+                DeltaMaintenanceDecision::ContinueDeltaAppend
+            }
+        }
+    }
+
+    /// Fold the selected visible delta into a fresh base through the existing
+    /// full-rebuild path.
+    ///
+    /// This is intentionally private and not called from `checkpoint()`.
+    /// Background scheduling still needs a crash-safe publish gate before this
+    /// can be used automatically.
+    #[allow(dead_code)]
+    pub(crate) fn recompact_visible_delta(&mut self) -> Result<CheckpointOutcome> {
+        if !self.storage.get_pending_facts().is_empty() {
+            anyhow::bail!("Cannot recompact visible delta while pending facts are uncheckpointed");
+        }
+
+        match &self.delta_manifest_selection {
+            PersistedManifestSelection::NoDeltaManifest => Ok(CheckpointOutcome::Noop),
+            PersistedManifestSelection::RecoveryRequired { reason } => {
+                anyhow::bail!("Cannot recompact delta manifest requiring recovery: {reason:?}");
+            }
+            PersistedManifestSelection::Use { .. } => self.save_full_rebuild_from_visible_facts(),
+        }
+    }
+
     /// Mark storage as dirty (needs saving)
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
@@ -2610,26 +2645,6 @@ mod tests {
 
     #[test]
     fn test_delta_checkpoint_fact_log_matches_visible_full_rebuild() {
-        fn fact_projection(storage: &FactStorage) -> Vec<(Uuid, String, Vec<u8>, u64, u64, bool)> {
-            let mut facts: Vec<_> = storage
-                .get_all_facts()
-                .expect("facts should load")
-                .into_iter()
-                .map(|fact| {
-                    (
-                        fact.entity,
-                        fact.attribute,
-                        encode_value(&fact.value),
-                        fact.tx_count,
-                        fact.tx_id,
-                        fact.asserted,
-                    )
-                })
-                .collect();
-            facts.sort();
-            facts
-        }
-
         let base = Uuid::from_u128(0xabc);
         let target = Uuid::from_u128(0xdef);
         let base_fact = Fact::with_valid_time(
@@ -2709,10 +2724,216 @@ mod tests {
             .expect("full rebuild should save");
 
         assert_eq!(
-            fact_projection(delta_storage.storage()),
-            fact_projection(rebuild_storage.storage()),
+            fact_projection(delta_storage.storage()).expect("delta facts should load"),
+            fact_projection(rebuild_storage.storage()).expect("rebuild facts should load"),
             "delta checkpoint and full rebuild must expose the same fact identities"
         );
+    }
+
+    fn fact_projection(
+        storage: &FactStorage,
+    ) -> Result<Vec<(Uuid, String, Vec<u8>, u64, u64, bool)>> {
+        let mut facts: Vec<_> = storage
+            .get_all_facts()?
+            .into_iter()
+            .map(|fact| {
+                (
+                    fact.entity,
+                    fact.attribute,
+                    encode_value(&fact.value),
+                    fact.tx_count,
+                    fact.tx_id,
+                    fact.asserted,
+                )
+            })
+            .collect();
+        facts.sort();
+        Ok(facts)
+    }
+
+    fn test_ref_edge_facts(source: Uuid, target: Uuid) -> (Fact, Fact, Fact, Fact) {
+        let base_fact = Fact::with_valid_time(
+            source,
+            ":name".to_string(),
+            Value::String("source".to_string()),
+            100,
+            1,
+            100,
+            VALID_TIME_FOREVER,
+        );
+        let edge_value = Value::Ref(target);
+        let edge_assert = Fact::with_valid_time(
+            source,
+            ":edge/to".to_string(),
+            edge_value.clone(),
+            200,
+            2,
+            200,
+            VALID_TIME_FOREVER,
+        );
+        let target_fact = Fact::with_valid_time(
+            target,
+            ":name".to_string(),
+            Value::String("target".to_string()),
+            200,
+            2,
+            200,
+            VALID_TIME_FOREVER,
+        );
+        let edge_retract = Fact::retract_with_valid_time(
+            source,
+            ":edge/to".to_string(),
+            edge_value,
+            300,
+            3,
+            200,
+            VALID_TIME_FOREVER,
+        );
+        (base_fact, edge_assert, target_fact, edge_retract)
+    }
+
+    fn storage_with_visible_ref_delta() -> Result<PersistentFactStorage<MemoryBackend>> {
+        let source = Uuid::from_u128(0xabc);
+        let target = Uuid::from_u128(0xdef);
+        let (base_fact, edge_assert, target_fact, edge_retract) =
+            test_ref_edge_facts(source, target);
+
+        let mut storage = PersistentFactStorage::new(MemoryBackend::new(), 256)?;
+        storage.storage().load_fact(base_fact)?;
+        storage.storage().restore_tx_counter_from(1);
+        storage.mark_dirty();
+        assert_eq!(storage.save()?, CheckpointOutcome::FullRebuild);
+
+        storage.storage().load_fact(edge_assert)?;
+        storage.storage().load_fact(target_fact)?;
+        storage.storage().load_fact(edge_retract)?;
+        storage.storage().restore_tx_counter_from(3);
+        storage.mark_dirty();
+        assert_eq!(storage.save()?, CheckpointOutcome::DeltaSegment);
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+        Ok(storage)
+    }
+
+    #[test]
+    fn test_recompact_visible_delta_preserves_history_and_removes_manifest() -> Result<()> {
+        let mut storage = storage_with_visible_ref_delta()?;
+        let before = fact_projection(storage.storage())?;
+        assert_eq!(before.len(), 4, "full-history rows must include retraction");
+        assert!(
+            storage.storage().get_all_facts()?.iter().any(|fact| {
+                fact.attribute == ":edge/to" && matches!(fact.value, Value::Ref(_)) && fact.asserted
+            }),
+            "Ref edge assertion must be present before recompact"
+        );
+        assert!(
+            storage.storage().get_all_facts()?.iter().any(|fact| {
+                fact.attribute == ":edge/to"
+                    && matches!(fact.value, Value::Ref(_))
+                    && !fact.asserted
+            }),
+            "Ref edge retraction must be present before recompact"
+        );
+
+        let outcome = storage.recompact_visible_delta()?;
+        assert_eq!(outcome, CheckpointOutcome::FullRebuildFromVisibleDelta);
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::NoDeltaManifest
+        ));
+        assert_eq!(
+            before,
+            fact_projection(storage.storage())?,
+            "recompact must preserve full-history identity"
+        );
+
+        let backend = storage.into_backend()?;
+        let reopened = PersistentFactStorage::new(backend, 256)?;
+        assert!(matches!(
+            reopened.delta_manifest_selection(),
+            PersistedManifestSelection::NoDeltaManifest
+        ));
+        assert_eq!(
+            before,
+            fact_projection(reopened.storage())?,
+            "reopened recompact base must preserve full-history identity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_recompact_visible_delta_rejects_uncheckpointed_pending_facts() -> Result<()> {
+        let mut storage = storage_with_visible_ref_delta()?;
+        let pending = Fact::with_valid_time(
+            Uuid::from_u128(0x1234),
+            ":pending/name".to_string(),
+            Value::String("pending".to_string()),
+            400,
+            4,
+            400,
+            VALID_TIME_FOREVER,
+        );
+        storage.storage().load_fact(pending)?;
+
+        let result = storage.recompact_visible_delta();
+        assert!(result.is_err(), "pending facts must block recompact");
+        let message = match result {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("pending facts"),
+            "error should name the pending-facts guard"
+        );
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_maintenance_decision_skips_healthy_delta() -> Result<()> {
+        let storage = storage_with_visible_ref_delta()?;
+
+        assert_eq!(
+            storage.delta_maintenance_decision(),
+            DeltaMaintenanceDecision::ContinueDeltaAppend
+        );
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_maintenance_decision_uses_selected_manifest_growth() -> Result<()> {
+        let mut storage = PersistentFactStorage::new(MemoryBackend::new(), 256)?;
+        let base_page_count = 1_000_000;
+        let mut segments = Vec::new();
+        let mut page_start = base_page_count;
+        for index in 0..1_024u64 {
+            let tx_count = index.saturating_add(1);
+            segments.push(DeltaManifestSegment::fixture(
+                page_start, 1, tx_count, 1, tx_count, tx_count,
+            ));
+            page_start = page_start.saturating_add(1);
+        }
+        let manifest =
+            DeltaManifest::new(1, DeltaBaseIdentity::fixture(base_page_count, 0), segments)?;
+        storage.delta_manifest_selection = PersistedManifestSelection::Use {
+            slot: HeaderManifestSlotName::Primary,
+            manifest,
+        };
+
+        assert_eq!(
+            storage.delta_maintenance_decision(),
+            DeltaMaintenanceDecision::ScheduleBackgroundRecompact
+        );
+        Ok(())
     }
 
     #[test]

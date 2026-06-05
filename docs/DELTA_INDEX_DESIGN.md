@@ -2,7 +2,7 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: living design and test specification. T0-T9A guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, and T9A documents the threshold policy.
+Status: living design and test specification. T0-T9C-A guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, T9A documents the threshold policy, T9B implements private threshold decisions, and T9C-A adds a private explicit recompact primitive.
 
 Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution plan and gate sequence.
 
@@ -222,6 +222,11 @@ Rules:
 - Sync all new pages before publishing page 0.
 - Publish a new base header with no delta manifest, or with a fresh empty manifest.
 - Retire covered delta segments only after the new base header is durable.
+- T9C-A caveat: the existing full-rebuild writer rewrites fact/index pages in
+  place from page 1. It is suitable as an explicit success-path primitive, but
+  it must not be scheduled automatically until T9C-B adds a crash-safe publish
+  design that preserves pages reachable from the old header before the new
+  header is durable.
 
 This keeps the current full-rebuild implementation as the safety net.
 
@@ -368,7 +373,7 @@ Current T8B result, recorded in `docs/BENCHMARKS.md`: multi-segment append passe
 
 Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is the right default path but needs T9 thresholds for unbounded tiny-segment growth. The 1M base plus 1 fact x 10K case drops from T7C's 1,051.300 ms flush p95 and 18.9 GB file growth to 99.818 ms p95 and 662,257,664 B growth, but that is still above the hot flush target. The batching rows show the dominant pressure is segment count and manifest/file growth rather than delta fact count alone: 10K delta facts in 1K segments have flush p95 36.821 ms, and 10K facts in 100 segments have flush p95 38.347 ms. Current reads stay sub-millisecond, reopen stays below the 250-500 ms gate, corrupt-latest fallback remains true, and as-of/replay remains Q1 read-path work.
 
-Current T9A policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B should implement this as pure/private metrics and decision tests before any threshold-triggered recompact execution.
+Current T9A/T9B/T9C-A policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B implements the pure/private metrics and decision tests. T9C-A adds an explicit private recompact primitive that preserves visible semantics on successful completion, but threshold-triggered/background recompact remains blocked on T9C-B crash-safe publish.
 
 ## Implementation Order
 
@@ -387,14 +392,16 @@ Current T9A policy: keep multi-segment publish as the default delta checkpoint p
 13. Implement multi-segment manifest publish so small checkpoints append one new segment instead of rewriting all accumulated delta facts. Done in T8A.
 14. Run the T8B mini benchmark and T8C full accumulation matrix. Done; proceed to T9 thresholds.
 15. Document internal/background recompact thresholds for segment count, delta bytes, and long-term file growth. Done in T9A.
-16. Implement private threshold metrics and decision tests. Next T9B.
-17. Add threshold-triggered internal/background recompact only after T9B proves the decision surface.
-18. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
+16. Implement private threshold metrics and decision tests. Done in T9B.
+17. Add a private explicit recompact primitive. Done in T9C-A.
+18. Add crash-safe recompact publish before any threshold-triggered internal/background scheduling.
+19. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
 
 ## Open Questions
 
 - Should `CommittedIndexReader` grow a streaming range-scan trait before persistent delta lands, or should the first implementation keep `Vec<FactRef>` to reduce blast radius?
 - Should `export_fact_log()` read through the same base-plus-delta manifest, or should it keep a dedicated fact-log stream path?
 - Is a sync-data mode enough for delta segment publish on all supported platforms, or should v10 use full sync for the first release?
-- Should `recompact()` be public immediately, or stay internal until Vetch has a real scheduling caller?
+- What crash-safe publish shape should T9C-B use for recompact without breaking the single-file invariant: in-file journal pages, a base-start header extension, or another copy-on-write marker?
+- Should `recompact()` become public later, or stay internal until Vetch has a real scheduling caller?
 - Which query executor path should make as-of receipt reads cheap enough for Vetch agent briefs: tighter index pushdown, a fact-log replay reader, or a prepared current/as-of receipt API?
