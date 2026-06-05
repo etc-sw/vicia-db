@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn format_value_float() {
         use crate::graph::types::Value;
-        assert_eq!(Repl::format_value(&Value::Float(3.14)), "3.14");
+        assert_eq!(Repl::format_value(&Value::Float(2.5)), "2.5");
     }
 
     #[test]

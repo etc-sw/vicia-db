@@ -7,6 +7,7 @@ pub mod file;
 #[cfg(test)]
 pub mod fault_inject;
 #[cfg(test)]
+#[allow(unused_imports)]
 pub use fault_inject::{FaultConfig, FaultInjectingBackend};
 
 // Future: WASM backend

@@ -3,6 +3,7 @@
 use crate::graph::types::Fact;
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, Indexes, VaetKey};
 use crate::storage::packed_pages::pack_facts;
+use crate::storage::{PAGE_SIZE, StorageBackend};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -93,6 +94,12 @@ pub(crate) struct DeltaSegmentPayload {
     pub(crate) aevt: Vec<(AevtKey, FactRef)>,
     pub(crate) avet: Vec<(AvetKey, FactRef)>,
     pub(crate) vaet: Vec<(VaetKey, FactRef)>,
+}
+
+impl DeltaSegmentPayload {
+    pub(crate) fn facts(&self) -> &[(FactRef, Fact)] {
+        &self.facts
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +269,41 @@ impl DeltaSegment {
         Self::from_parts(header, payload)
     }
 
+    pub(crate) fn decode_from_page_bytes(bytes: &[u8]) -> Result<Self> {
+        let min_len = PREFIX_LEN
+            .checked_add(DeltaSegmentTrailer::LEN)
+            .ok_or_else(|| anyhow::anyhow!("Delta segment minimum length overflow"))?;
+        if bytes.len() < min_len {
+            bail!("Delta segment page bytes are too short");
+        }
+
+        let magic = bytes
+            .get(..DELTA_SEGMENT_MAGIC.len())
+            .ok_or_else(|| anyhow::anyhow!("Delta segment missing magic"))?;
+        if magic != DELTA_SEGMENT_MAGIC {
+            bail!("Delta segment magic mismatch");
+        }
+
+        let header_len = usize::try_from(read_u32_le(bytes, 8, "delta segment header length")?)
+            .map_err(|_| anyhow::anyhow!("Delta segment header length exceeds usize"))?;
+        let payload_len = usize::try_from(read_u64_le(bytes, 12, "delta segment payload length")?)
+            .map_err(|_| anyhow::anyhow!("Delta segment payload length exceeds usize"))?;
+        let exact_len = PREFIX_LEN
+            .checked_add(header_len)
+            .and_then(|len| len.checked_add(payload_len))
+            .and_then(|len| len.checked_add(DeltaSegmentTrailer::LEN))
+            .ok_or_else(|| anyhow::anyhow!("Delta segment encoded length overflow"))?;
+        if exact_len > bytes.len() {
+            bail!("Delta segment encoded length exceeds descriptor pages");
+        }
+
+        Self::decode(
+            bytes
+                .get(..exact_len)
+                .ok_or_else(|| anyhow::anyhow!("Delta segment exact bytes out of bounds"))?,
+        )
+    }
+
     fn validate(&self) -> Result<()> {
         if self.header.codec_version != DELTA_SEGMENT_CODEC_VERSION {
             bail!("Unsupported delta segment codec version");
@@ -334,14 +376,52 @@ impl DeltaSegment {
     }
 }
 
-fn build_index_entries(
-    facts: &[(FactRef, Fact)],
-) -> (
+pub(crate) fn write_segment_pages<B: StorageBackend>(
+    backend: &mut B,
+    page_start: u64,
+    segment: &DeltaSegment,
+) -> Result<u64> {
+    if page_start == 0 {
+        bail!("Delta segment must not start on page 0");
+    }
+
+    let bytes = segment.encode()?;
+    let page_count = bytes.len().div_ceil(PAGE_SIZE);
+    let page_count_u64 = u64::try_from(page_count)
+        .map_err(|_| anyhow::anyhow!("Delta segment page count exceeds u64"))?;
+
+    for page_index in 0..page_count {
+        let byte_start = page_index
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| anyhow::anyhow!("Delta segment byte offset overflow"))?;
+        let byte_end = byte_start.saturating_add(PAGE_SIZE).min(bytes.len());
+        let mut page = vec![0u8; PAGE_SIZE];
+        page.get_mut(..byte_end.saturating_sub(byte_start))
+            .ok_or_else(|| anyhow::anyhow!("Delta segment page slice out of bounds"))?
+            .copy_from_slice(
+                bytes
+                    .get(byte_start..byte_end)
+                    .ok_or_else(|| anyhow::anyhow!("Delta segment bytes out of bounds"))?,
+            );
+        let page_offset = u64::try_from(page_index)
+            .map_err(|_| anyhow::anyhow!("Delta segment page index exceeds u64"))?;
+        let page_id = page_start
+            .checked_add(page_offset)
+            .ok_or_else(|| anyhow::anyhow!("Delta segment page id overflow"))?;
+        backend.write_page(page_id, &page)?;
+    }
+
+    Ok(page_count_u64)
+}
+
+type DeltaIndexEntryVectors = (
     Vec<(EavtKey, FactRef)>,
     Vec<(AevtKey, FactRef)>,
     Vec<(AvetKey, FactRef)>,
     Vec<(VaetKey, FactRef)>,
-) {
+);
+
+fn build_index_entries(facts: &[(FactRef, Fact)]) -> DeltaIndexEntryVectors {
     let mut indexes = Indexes::new();
     for (fact_ref, fact) in facts {
         indexes.insert(fact, *fact_ref);

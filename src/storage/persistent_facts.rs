@@ -10,17 +10,24 @@ use crate::storage::btree_v6::{
     stream_all_entries,
 };
 use crate::storage::cache::PageCache;
+use crate::storage::delta_index::{DeltaIndexEntries, KeyedIndexReader, LayeredIndexReader};
 use crate::storage::delta_manifest::{
-    PersistedManifestRecoveryReason, PersistedManifestSelection, load_persisted_manifest_selection,
+    DeltaManifest, DeltaManifestSegment, PersistedManifestRecoveryReason,
+    PersistedManifestSelection, load_persisted_manifest_selection, write_manifest_pages,
 };
+use crate::storage::delta_segment::{DeltaSegment, write_segment_pages};
 use crate::storage::header_extension::{
-    HeaderManifestSlotSelection, build_header_page, select_header_manifest_slot_from_page0,
+    HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName, HeaderManifestSlotSelection,
+    build_header_page, build_header_page_with_extension, select_header_manifest_slot_from_page0,
 };
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey, encode_value};
 use crate::storage::packed_pages::pack_facts;
-use crate::storage::{FileHeader, StorageBackend};
+use crate::storage::{
+    CommittedFactReader, CommittedIndexReader, FileHeader, PAGE_SIZE, StorageBackend,
+};
 use anyhow::Result;
 use crc32fast::Hasher;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -104,6 +111,42 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
 
     fn committed_page_count(&self) -> u64 {
         self.committed_fact_pages.load(Ordering::SeqCst)
+    }
+}
+
+struct LayeredFactLoaderImpl {
+    base: Arc<dyn CommittedFactReader>,
+    delta_facts: BTreeMap<FactRef, Fact>,
+}
+
+impl LayeredFactLoaderImpl {
+    fn new(base: Arc<dyn CommittedFactReader>, segments: &[DeltaSegment]) -> Self {
+        let mut delta_facts = BTreeMap::new();
+        for segment in segments {
+            for (fact_ref, fact) in segment.payload().facts() {
+                delta_facts.insert(*fact_ref, fact.clone());
+            }
+        }
+        Self { base, delta_facts }
+    }
+}
+
+impl CommittedFactReader for LayeredFactLoaderImpl {
+    fn resolve(&self, fact_ref: FactRef) -> anyhow::Result<Fact> {
+        if let Some(fact) = self.delta_facts.get(&fact_ref) {
+            return Ok(fact.clone());
+        }
+        self.base.resolve(fact_ref)
+    }
+
+    fn stream_all(&self) -> anyhow::Result<Vec<Fact>> {
+        let mut facts = self.base.stream_all()?;
+        facts.extend(self.delta_facts.values().cloned());
+        Ok(facts)
+    }
+
+    fn committed_page_count(&self) -> u64 {
+        self.base.committed_page_count()
     }
 }
 
@@ -214,6 +257,210 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         Ok(persistent)
     }
 
+    fn base_fact_loader(&self) -> Arc<dyn CommittedFactReader> {
+        Arc::new(CommittedFactLoaderImpl {
+            backend: self.backend.clone(),
+            backend_adapter: MutexStorageBackend(self.backend.clone()),
+            page_cache: self.page_cache.clone(),
+            committed_fact_pages: self.committed_fact_pages.clone(),
+            first_fact_page: 1,
+        })
+    }
+
+    fn wire_committed_readers(
+        &mut self,
+        header: &FileHeader,
+        delta_segments: Vec<DeltaSegment>,
+    ) -> Result<()> {
+        let base_loader = self.base_fact_loader();
+        let fact_reader: Arc<dyn CommittedFactReader> = if delta_segments.is_empty() {
+            base_loader
+        } else {
+            Arc::new(LayeredFactLoaderImpl::new(
+                base_loader,
+                delta_segments.as_slice(),
+            ))
+        };
+        self.storage.set_committed_reader(fact_reader);
+
+        if header.eavt_root_page == 0 {
+            return Ok(());
+        }
+
+        let base_index_reader = Arc::new(OnDiskIndexReader::new(
+            self.backend.clone(),
+            self.page_cache.clone(),
+            header.eavt_root_page,
+            header.aevt_root_page,
+            header.avet_root_page,
+            header.vaet_root_page,
+        ));
+        let index_reader: Arc<dyn CommittedIndexReader> = if delta_segments.is_empty() {
+            base_index_reader
+        } else {
+            let mut eavt = Vec::new();
+            let mut aevt = Vec::new();
+            let mut avet = Vec::new();
+            let mut vaet = Vec::new();
+            for segment in &delta_segments {
+                let payload = segment.payload();
+                eavt.extend(payload.eavt.iter().cloned());
+                aevt.extend(payload.aevt.iter().cloned());
+                avet.extend(payload.avet.iter().cloned());
+                vaet.extend(payload.vaet.iter().cloned());
+            }
+            let base_keyed_reader: Arc<dyn KeyedIndexReader> = base_index_reader;
+            Arc::new(LayeredIndexReader::new(
+                base_keyed_reader,
+                DeltaIndexEntries::from_entries(eavt, aevt, avet, vaet),
+            ))
+        };
+        self.storage.set_committed_index_reader(index_reader);
+        Ok(())
+    }
+
+    fn load_delta_segments_from_manifest(
+        backend: &B,
+        header: &FileHeader,
+        manifest: &DeltaManifest,
+    ) -> Result<Vec<DeltaSegment>> {
+        manifest
+            .segments()
+            .iter()
+            .map(|descriptor| Self::read_delta_segment_from_descriptor(backend, header, descriptor))
+            .collect()
+    }
+
+    fn read_delta_segment_from_descriptor(
+        backend: &B,
+        header: &FileHeader,
+        descriptor: &DeltaManifestSegment,
+    ) -> Result<DeltaSegment> {
+        let segment_end = descriptor
+            .segment_page_start()
+            .checked_add(descriptor.segment_page_count())
+            .ok_or_else(|| anyhow::anyhow!("Delta segment page range overflow"))?;
+        if segment_end > header.page_count {
+            anyhow::bail!("Delta segment page range out of bounds");
+        }
+
+        let page_count = usize::try_from(descriptor.segment_page_count())
+            .map_err(|_| anyhow::anyhow!("Delta segment page count exceeds usize"))?;
+        let capacity = page_count
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| anyhow::anyhow!("Delta segment page capacity overflow"))?;
+        let mut bytes = Vec::with_capacity(capacity);
+        for offset in 0..descriptor.segment_page_count() {
+            let page_id = descriptor
+                .segment_page_start()
+                .checked_add(offset)
+                .ok_or_else(|| anyhow::anyhow!("Delta segment page id overflow"))?;
+            let page = backend.read_page(page_id)?;
+            if page.len() != PAGE_SIZE {
+                anyhow::bail!("Delta segment page has invalid size");
+            }
+            bytes.extend_from_slice(&page);
+        }
+
+        let segment = DeltaSegment::decode_from_page_bytes(&bytes)?;
+        let segment_header = segment.header();
+        if segment_header.fact_page_start != descriptor.fact_page_start()
+            || segment_header.fact_page_count != descriptor.fact_page_count()
+            || segment_header.low_tx_count != descriptor.low_tx_count()
+            || segment_header.high_tx_count != descriptor.high_tx_count()
+        {
+            anyhow::bail!("Delta segment header does not match manifest descriptor");
+        }
+        Ok(segment)
+    }
+
+    fn save_full_rebuild_from_visible_facts(&mut self) -> Result<()> {
+        let all_facts = self.storage.get_all_facts()?;
+        let (fact_pages, fact_refs) = pack_facts(&all_facts, 1)?;
+        let num_fact_pages = u64::try_from(fact_pages.len())
+            .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
+        let (eavt_entries, aevt_entries, avet_entries, vaet_entries) =
+            build_sorted_index_entries(&all_facts, &fact_refs);
+        let node_count = u64::try_from(all_facts.len())
+            .map_err(|_| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
+        let checkpoint_tx_count = self.storage.current_tx_count();
+
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        self.page_cache.invalidate_from(1);
+        for (i, page_data) in fact_pages.iter().enumerate() {
+            let page_offset =
+                u64::try_from(i).map_err(|_| anyhow::anyhow!("page index {i} exceeds u64::MAX"))?;
+            let page_id = 1u64
+                .checked_add(page_offset)
+                .ok_or_else(|| anyhow::anyhow!("page id overflow writing fact pages"))?;
+            backend.write_page(page_id, page_data)?;
+        }
+
+        let index_start = 1u64
+            .checked_add(num_fact_pages)
+            .ok_or_else(|| anyhow::anyhow!("page count overflow computing index_start"))?;
+        let (eavt_root, next1) = build_btree(
+            btree_entries(eavt_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            index_start,
+        )?;
+        let (aevt_root, next2) = build_btree(
+            btree_entries(aevt_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            next1,
+        )?;
+        let (avet_root, next3) = build_btree(
+            btree_entries(avet_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            next2,
+        )?;
+        let (vaet_root, next4) = build_btree(
+            btree_entries(vaet_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            next3,
+        )?;
+        backend.sync()?;
+
+        let total_data_pages = next4.saturating_sub(1);
+        let checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+        let mut header = FileHeader::new();
+        header.page_count = next4;
+        header.node_count = node_count;
+        header.last_checkpointed_tx_count = checkpoint_tx_count;
+        header.eavt_root_page = eavt_root;
+        header.aevt_root_page = aevt_root;
+        header.avet_root_page = avet_root;
+        header.vaet_root_page = vaet_root;
+        header.index_checksum = checksum;
+        header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
+        header.fact_page_count = num_fact_pages;
+        header.header_checksum = compute_header_checksum(&header);
+
+        let header_page = build_header_page(header)?;
+        let manifest_selection =
+            select_header_manifest_slot_from_page0(header.version, &header_page)?;
+        backend.write_page(0, &header_page)?;
+        backend.sync()?;
+        drop(backend);
+
+        self.header_manifest_selection = manifest_selection;
+        self.delta_manifest_selection = PersistedManifestSelection::NoDeltaManifest;
+        self.committed_fact_pages
+            .store(num_fact_pages, Ordering::SeqCst);
+        self.last_checkpointed_tx_count = checkpoint_tx_count;
+        self.dirty = false;
+        self.wire_committed_readers(&header, Vec::new())?;
+        self.storage.post_checkpoint_clear();
+        Ok(())
+    }
+
     /// Load all facts from the backend into memory.
     fn load(&mut self) -> Result<()> {
         let (header, raw_header_bytes) = {
@@ -265,6 +512,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             anyhow::bail!("Delta manifest recovery required: {reason}");
         }
         self.delta_manifest_selection = delta_manifest_selection;
+        let selected_delta_manifest = self.delta_manifest_selection.manifest().cloned();
+        let selected_delta_has_segments = selected_delta_manifest
+            .as_ref()
+            .is_some_and(|manifest| !manifest.segments().is_empty());
 
         // Store last_checkpointed_tx_count from header (0 for v2 files)
         self.last_checkpointed_tx_count = header.last_checkpointed_tx_count;
@@ -286,24 +537,23 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
 
         // Packed fact-page format (v6+).
-        let num_fact_pages = if header.version >= 10 {
-            header.fact_page_count
-        } else if header.version >= 6 && header.fact_page_count > 0 {
-            header.fact_page_count
-        } else {
-            let first_index_page = [
-                header.eavt_root_page,
-                header.aevt_root_page,
-                header.avet_root_page,
-                header.vaet_root_page,
-            ]
-            .iter()
-            .filter(|&&p| p > 0)
-            .copied()
-            .min()
-            .unwrap_or(header.page_count);
-            first_index_page.saturating_sub(1)
-        };
+        let num_fact_pages =
+            if header.version >= 10 || (header.version >= 6 && header.fact_page_count > 0) {
+                header.fact_page_count
+            } else {
+                let first_index_page = [
+                    header.eavt_root_page,
+                    header.aevt_root_page,
+                    header.avet_root_page,
+                    header.vaet_root_page,
+                ]
+                .iter()
+                .filter(|&&p| p > 0)
+                .copied()
+                .min()
+                .unwrap_or(header.page_count);
+                first_index_page.saturating_sub(1)
+            };
         self.committed_fact_pages
             .store(num_fact_pages, Ordering::SeqCst);
 
@@ -312,7 +562,27 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         // Old files (pre-fix): checksum covers only fact pages.
         // Try full checksum first; fall back to fact-only for backwards compat.
         let needs_format_upgrade = header.version < crate::storage::FORMAT_VERSION;
-        let needs_rebuild = if needs_format_upgrade && num_fact_pages > 0 {
+        let needs_rebuild = if selected_delta_has_segments {
+            if needs_format_upgrade {
+                anyhow::bail!("Delta manifest requires current v10 file format");
+            }
+            if header.eavt_root_page == 0 {
+                anyhow::bail!("Delta manifest requires base index roots");
+            }
+            let backend = self
+                .backend
+                .lock()
+                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+            let stored = header.index_checksum;
+            let total_data_pages = header.page_count.saturating_sub(1);
+            let full_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+            if full_checksum != stored {
+                anyhow::bail!(
+                    "Delta checkpoint checksum mismatch: possible file corruption. Database may be damaged."
+                );
+            }
+            false
+        } else if needs_format_upgrade && num_fact_pages > 0 {
             true
         } else if num_fact_pages == 0 || header.eavt_root_page == 0 {
             num_fact_pages > 0 // rebuild if facts exist but no index root
@@ -338,16 +608,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
         };
 
-        // Register CommittedFactReader on FactStorage (before WAL replay)
-        let loader: std::sync::Arc<dyn crate::storage::CommittedFactReader> =
-            std::sync::Arc::new(CommittedFactLoaderImpl {
-                backend: self.backend.clone(),
-                backend_adapter: MutexStorageBackend(self.backend.clone()),
-                page_cache: self.page_cache.clone(),
-                committed_fact_pages: self.committed_fact_pages.clone(),
-                first_fact_page: 1,
-            });
-        self.storage.set_committed_reader(loader);
+        // Register CommittedFactReader on FactStorage (before WAL replay).
+        // If a delta manifest is visible, this base reader is replaced below
+        // with a layered reader after the segment payloads are verified.
+        self.storage.set_committed_reader(self.base_fact_loader());
 
         // Restore tx_counter from header
         self.storage
@@ -485,17 +749,16 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
 
             if header.eavt_root_page != 0 {
-                // Fast path: v6 — wire OnDiskIndexReader from header roots, no RAM index load
-                let index_reader: std::sync::Arc<dyn crate::storage::CommittedIndexReader> =
-                    std::sync::Arc::new(OnDiskIndexReader::new(
-                        self.backend.clone(),
-                        self.page_cache.clone(),
-                        header.eavt_root_page,
-                        header.aevt_root_page,
-                        header.avet_root_page,
-                        header.vaet_root_page,
-                    ));
-                self.storage.set_committed_index_reader(index_reader);
+                let delta_segments = if let Some(manifest) = selected_delta_manifest.as_ref() {
+                    let backend = self
+                        .backend
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+                    Self::load_delta_segments_from_manifest(&*backend, &header, manifest)?
+                } else {
+                    Vec::new()
+                };
+                self.wire_committed_readers(&header, delta_segments)?;
             }
         }
         // else: empty DB — indexes are empty by default, nothing to do.
@@ -829,6 +1092,98 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
     }
 
+    fn try_save_single_segment_delta(&mut self, pending_facts: &[Fact]) -> Result<bool> {
+        if pending_facts.is_empty() {
+            return Ok(false);
+        }
+        if !matches!(
+            self.delta_manifest_selection,
+            PersistedManifestSelection::NoDeltaManifest
+        ) {
+            return Ok(false);
+        }
+
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        let curr_header = match backend.read_page(0) {
+            Ok(bytes) => FileHeader::from_bytes(&bytes)?,
+            Err(_) if backend.is_new() => return Ok(false),
+            Err(e) => anyhow::bail!("Failed to read header from existing file: {}", e),
+        };
+        if curr_header.version != crate::storage::FORMAT_VERSION
+            || curr_header.fact_page_format != FACT_PAGE_FORMAT_PACKED
+            || curr_header.eavt_root_page == 0
+            || curr_header.aevt_root_page == 0
+            || curr_header.avet_root_page == 0
+            || curr_header.vaet_root_page == 0
+        {
+            return Ok(false);
+        }
+
+        let segment_page_start = curr_header.page_count;
+        let segment = DeltaSegment::from_facts(pending_facts.to_vec(), segment_page_start)?;
+        self.page_cache.invalidate_from(segment_page_start);
+        let segment_page_count = write_segment_pages(&mut *backend, segment_page_start, &segment)?;
+        let manifest_segment = DeltaManifestSegment::from_segment_header(
+            segment_page_start,
+            segment_page_count,
+            segment.header(),
+        )?;
+        let generation = curr_header
+            .last_checkpointed_tx_count
+            .saturating_add(1)
+            .max(1);
+        let manifest = DeltaManifest::new(generation, vec![manifest_segment])?;
+        let manifest_page_start = segment_page_start
+            .checked_add(segment_page_count)
+            .ok_or_else(|| anyhow::anyhow!("Delta manifest page start overflow"))?;
+        let descriptor = write_manifest_pages(&mut *backend, manifest_page_start, &manifest)?;
+        let next_page_count = manifest_page_start
+            .checked_add(descriptor.manifest_page_count())
+            .ok_or_else(|| anyhow::anyhow!("Delta checkpoint page count overflow"))?;
+
+        // New segment and manifest pages must be durable before page 0 publishes
+        // the descriptor that makes them visible.
+        backend.sync()?;
+
+        let mut header = curr_header;
+        header.page_count = next_page_count;
+        let pending_len = u64::try_from(pending_facts.len())
+            .map_err(|_| anyhow::anyhow!("pending fact count exceeds u64::MAX"))?;
+        header.node_count = curr_header
+            .node_count
+            .checked_add(pending_len)
+            .ok_or_else(|| anyhow::anyhow!("node_count overflow"))?;
+        header.last_checkpointed_tx_count = self.storage.current_tx_count();
+        let total_data_pages = next_page_count.saturating_sub(1);
+        header.index_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+        header.header_checksum = compute_header_checksum(&header);
+
+        let header_page = build_header_page_with_extension(
+            header,
+            HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
+        )?;
+        backend.write_page(0, &header_page)?;
+        backend.sync()?;
+        drop(backend);
+
+        self.header_manifest_selection = HeaderManifestSlotSelection::Use {
+            slot: HeaderManifestSlotName::Primary,
+            descriptor,
+        };
+        self.delta_manifest_selection = PersistedManifestSelection::Use {
+            slot: HeaderManifestSlotName::Primary,
+            manifest,
+        };
+        self.last_checkpointed_tx_count = self.storage.current_tx_count();
+        self.dirty = false;
+        self.wire_committed_readers(&header, vec![segment])?;
+        self.storage.post_checkpoint_clear();
+        Ok(true)
+    }
+
     /// Save all facts from memory to the backend using packed pages and v6 on-disk B+tree indexes.
     pub fn save(&mut self) -> Result<()> {
         if !self.dirty {
@@ -837,6 +1192,16 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         // ── Step A: read current header + stream old B+tree entries BEFORE overwriting ──
         let pending_facts = self.storage.get_pending_facts();
+        if matches!(self.try_save_single_segment_delta(&pending_facts), Ok(true)) {
+            return Ok(());
+        }
+        if matches!(
+            self.delta_manifest_selection,
+            PersistedManifestSelection::Use { .. }
+        ) {
+            return self.save_full_rebuild_from_visible_facts();
+        }
+
         let mut backend = self
             .backend
             .lock()
@@ -2092,6 +2457,113 @@ mod tests {
             Err(err) => err.to_string(),
         };
         assert!(message.contains("corrupt manifest slot"));
+    }
+
+    #[test]
+    fn test_delta_checkpoint_fact_log_matches_visible_full_rebuild() {
+        fn fact_projection(storage: &FactStorage) -> Vec<(Uuid, String, Vec<u8>, u64, u64, bool)> {
+            let mut facts: Vec<_> = storage
+                .get_all_facts()
+                .expect("facts should load")
+                .into_iter()
+                .map(|fact| {
+                    (
+                        fact.entity,
+                        fact.attribute,
+                        encode_value(&fact.value),
+                        fact.tx_count,
+                        fact.tx_id,
+                        fact.asserted,
+                    )
+                })
+                .collect();
+            facts.sort();
+            facts
+        }
+
+        let base = Uuid::from_u128(0xabc);
+        let target = Uuid::from_u128(0xdef);
+        let base_fact = Fact::with_valid_time(
+            base,
+            ":name".to_string(),
+            Value::String("base".to_string()),
+            100,
+            1,
+            100,
+            VALID_TIME_FOREVER,
+        );
+        let edge_fact = Fact::with_valid_time(
+            base,
+            ":edge/to".to_string(),
+            Value::Ref(target),
+            200,
+            2,
+            200,
+            VALID_TIME_FOREVER,
+        );
+        let target_fact = Fact::with_valid_time(
+            target,
+            ":name".to_string(),
+            Value::String("target".to_string()),
+            200,
+            2,
+            200,
+            VALID_TIME_FOREVER,
+        );
+
+        let mut delta_storage =
+            PersistentFactStorage::new(MemoryBackend::new(), 256).expect("storage should create");
+        delta_storage
+            .storage()
+            .load_fact(base_fact.clone())
+            .expect("base fact should load");
+        delta_storage.storage().restore_tx_counter_from(1);
+        delta_storage.mark_dirty();
+        delta_storage.save().expect("base checkpoint should save");
+        delta_storage
+            .storage()
+            .load_fact(edge_fact.clone())
+            .expect("edge fact should load");
+        delta_storage
+            .storage()
+            .load_fact(target_fact.clone())
+            .expect("target fact should load");
+        delta_storage.storage().restore_tx_counter_from(2);
+        delta_storage.mark_dirty();
+        delta_storage.save().expect("delta checkpoint should save");
+        assert!(matches!(
+            delta_storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+
+        let mut rebuild_storage =
+            PersistentFactStorage::new(MemoryBackend::new(), 256).expect("storage should create");
+        rebuild_storage
+            .storage()
+            .load_fact(base_fact)
+            .expect("base fact should load");
+        rebuild_storage.storage().restore_tx_counter_from(1);
+        rebuild_storage.mark_dirty();
+        rebuild_storage.save().expect("base checkpoint should save");
+        rebuild_storage
+            .storage()
+            .load_fact(edge_fact)
+            .expect("edge fact should load");
+        rebuild_storage
+            .storage()
+            .load_fact(target_fact)
+            .expect("target fact should load");
+        rebuild_storage.storage().restore_tx_counter_from(2);
+        rebuild_storage.mark_dirty();
+        rebuild_storage
+            .save_full_rebuild_from_visible_facts()
+            .expect("full rebuild should save");
+
+        assert_eq!(
+            fact_projection(delta_storage.storage()),
+            fact_projection(rebuild_storage.storage()),
+            "delta checkpoint and full rebuild must expose the same fact identities"
+        );
     }
 
     #[test]

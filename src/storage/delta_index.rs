@@ -308,6 +308,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn vaet_with_valid_window(
         source_entity: Uuid,
         ref_target: Uuid,

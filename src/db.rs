@@ -163,6 +163,7 @@ impl OpenOptionsWithPath {
 // ─── WriteContext ─────────────────────────────────────────────────────────────
 
 /// Internal write context: distinguishes in-memory from file-backed databases.
+#[allow(clippy::large_enum_variant)]
 enum WriteContext {
     /// In-memory database: no WAL, no persistence.
     Memory,

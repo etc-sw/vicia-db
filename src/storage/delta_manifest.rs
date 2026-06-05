@@ -41,6 +41,30 @@ impl DeltaManifestSegment {
             high_tx_count: segment_header.high_tx_count,
         })
     }
+
+    pub(crate) fn segment_page_start(&self) -> u64 {
+        self.segment_page_start
+    }
+
+    pub(crate) fn segment_page_count(&self) -> u64 {
+        self.segment_page_count
+    }
+
+    pub(crate) fn fact_page_start(&self) -> u64 {
+        self.fact_page_start
+    }
+
+    pub(crate) fn fact_page_count(&self) -> u64 {
+        self.fact_page_count
+    }
+
+    pub(crate) fn low_tx_count(&self) -> u64 {
+        self.low_tx_count
+    }
+
+    pub(crate) fn high_tx_count(&self) -> u64 {
+        self.high_tx_count
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,6 +105,10 @@ impl DeltaManifest {
 
     pub(crate) fn high_tx_count(&self) -> u64 {
         self.high_tx_count
+    }
+
+    pub(crate) fn segments(&self) -> &[DeltaManifestSegment] {
+        &self.segments
     }
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
@@ -387,7 +415,7 @@ pub(crate) fn load_persisted_manifest_selection<B: StorageBackend>(
         return Ok(PersistedManifestSelection::NoDeltaManifest);
     }
 
-    candidates.sort_by(|a, b| b.1.generation().cmp(&a.1.generation()));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1.generation()));
     for (slot, descriptor) in candidates {
         if let Ok(manifest) = read_manifest_from_descriptor(backend, header, descriptor) {
             return Ok(PersistedManifestSelection::Use { slot, manifest });
