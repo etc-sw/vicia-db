@@ -42,6 +42,25 @@ impl DeltaManifestSegment {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        segment_page_start: u64,
+        segment_page_count: u64,
+        fact_page_start: u64,
+        fact_page_count: u64,
+        low_tx_count: u64,
+        high_tx_count: u64,
+    ) -> Self {
+        Self {
+            segment_page_start,
+            segment_page_count,
+            fact_page_start,
+            fact_page_count,
+            low_tx_count,
+            high_tx_count,
+        }
+    }
+
     pub(crate) fn segment_page_start(&self) -> u64 {
         self.segment_page_start
     }
@@ -94,7 +113,7 @@ impl DeltaBaseIdentity {
     }
 
     #[cfg(test)]
-    fn fixture(page_count: u64, checkpoint_tx_count: u64) -> Self {
+    pub(crate) fn fixture(page_count: u64, checkpoint_tx_count: u64) -> Self {
         Self {
             page_count,
             fact_page_count: page_count.saturating_sub(1),
@@ -105,6 +124,10 @@ impl DeltaBaseIdentity {
             avet_root: 4,
             vaet_root: 5,
         }
+    }
+
+    pub(crate) fn page_count(&self) -> u64 {
+        self.page_count
     }
 
     fn validate_for_segments(&self, segments: &[DeltaManifestSegment]) -> Result<()> {

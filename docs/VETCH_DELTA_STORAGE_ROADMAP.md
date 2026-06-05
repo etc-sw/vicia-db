@@ -320,8 +320,8 @@ Policy inputs:
 - `visible_delta_segment_count`
 - `visible_delta_page_growth` and derived bytes
 - `visible_delta_base_page_ratio`
-- `visible_delta_fact_count`
-- `visible_delta_fact_base_ratio`
+- exact `visible_delta_fact_count` and `visible_delta_fact_base_ratio` when
+  available
 - optional manifest payload byte count if T9B can expose it cheaply
 
 Initial decision surface:
@@ -348,6 +348,14 @@ Policy rules:
 - A hard threshold returns `MaintenanceBackpressure`; the storage layer may keep
   appending deltas for correctness, but Vetch should stop treating per-receipt
   checkpoint cadence as healthy until background maintenance runs.
+- Ratio thresholds have absolute floors. Page ratio applies only after at least
+  `1,024` delta pages (`4 MiB`), and fact ratio applies only after exact delta
+  and base fact counts are available with at least `1,000` delta facts. This
+  prevents tiny base files from scheduling maintenance after a few small writes.
+- The current manifest descriptor does not store exact fact counts. T9B should
+  use segment/page metrics from the selected manifest and treat fact-ratio
+  checks as unavailable unless exact fact counts are supplied by a future
+  internal caller.
 - Threshold checks must be based on the selected visible manifest and base page
   identity, not on unpublished trailing bytes.
 - Full rebuild/recompact remains the repair and maintenance mechanism, not a
@@ -378,13 +386,16 @@ Tests first:
 - manifest crossing hard segment threshold returns `MaintenanceBackpressure`
 - manifest crossing soft/hard page-growth thresholds returns the matching
   decision
-- fact-ratio threshold is secondary and does not mask segment/page thresholds
+- small-base ratio cases below the absolute floor return
+  `ContinueDeltaAppend`
+- fact-ratio threshold is optional, secondary, and does not mask segment/page
+  thresholds
 - threshold metrics ignore unpublished trailing delta/manifest pages
 
 Implementation shape:
 
 - Add a private `DeltaGrowthMetrics` struct derived from the selected manifest,
-  base page count, fact count, and page growth.
+  base page count, optional exact fact count, and page growth.
 - Add a private `DeltaMaintenanceDecision` enum.
 - Keep `checkpoint()` on the delta append path; do not execute recompact in T9B.
 - Wire no public API unless the Vetch scheduling contract exists.
@@ -538,7 +549,7 @@ Name: T9B private threshold metrics and decision tests.
 
 Objective:
 
-- Implement the private metric and decision surface that tells Minigraf/Vetch
+- Implement the private metric and decision surface that tells Minigraf internals
   when delta growth needs background maintenance, without triggering recompact
   inside foreground `checkpoint()`.
 
@@ -555,6 +566,8 @@ Done:
 
 - Unit tests cover no-manifest, healthy, soft-threshold, and hard-threshold
   decisions.
+- Unit tests cover ratio floors and the optional nature of exact fact-count
+  metrics.
 - `DeltaGrowthMetrics` is derived from the selected visible manifest and base
   identity, not from unpublished trailing bytes.
 - `DeltaMaintenanceDecision` returns `ContinueDeltaAppend`,

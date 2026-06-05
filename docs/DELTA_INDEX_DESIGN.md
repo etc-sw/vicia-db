@@ -203,6 +203,13 @@ inside normal `checkpoint()`. The fact-ratio threshold is a secondary broad
 import signal; T8C shows tiny receipt cadence must be bounded primarily by
 segment count and page/file growth.
 
+Ratio thresholds are guarded by absolute floors. Page ratio applies only after
+at least `1,024` visible delta pages (`4 MiB`), and fact ratio applies only when
+exact base/delta fact counts are available with at least `1,000` visible delta
+facts. The v10 manifest descriptors store page ranges and tx ranges, not exact
+fact counts, so T9B's manifest-derived metric must ignore fact-ratio checks
+unless an internal caller supplies exact counts.
+
 ## Recompact Semantics
 
 `recompact()` is a full rebuild from base plus all visible delta segments.
