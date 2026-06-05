@@ -258,6 +258,8 @@ Current roadmap scope for this worktree:
 
 Reference survey for the delta/index design note: `docs/DELTA_INDEX_REFERENCE_SURVEY.md`.
 
+First implementation slice design and test spec: `docs/DELTA_INDEX_DESIGN.md`.
+
 Future roadmap parking lot outside this worktree's implementation scope:
 
 - Vector-first storage in Minigraf core, including `Value::Vector`, HNSW, SIMD distance functions, and vector quantization.
