@@ -298,6 +298,7 @@ impl DeltaManifest {
             bail!("Delta manifest base checkpoint tx_count must precede segment tx range");
         }
 
+        let mut previous_segment: Option<&DeltaManifestSegment> = None;
         for segment in &self.segments {
             if segment.segment_page_count == 0 {
                 bail!("Delta manifest segment page count must be non-zero");
@@ -313,6 +314,25 @@ impl DeltaManifest {
             if segment.low_tx_count > segment.high_tx_count {
                 bail!("Delta manifest segment tx range is invalid");
             }
+            if let Some(previous) = previous_segment {
+                if previous.low_tx_count >= segment.low_tx_count {
+                    bail!("Delta manifest segments must be ordered by tx_count");
+                }
+                if previous.high_tx_count >= segment.low_tx_count {
+                    bail!("Delta manifest segment tx ranges must not overlap");
+                }
+                if previous.segment_page_start >= segment.segment_page_start {
+                    bail!("Delta manifest segments must be ordered by page range");
+                }
+                let previous_end = previous
+                    .segment_page_start
+                    .checked_add(previous.segment_page_count)
+                    .ok_or_else(|| anyhow::anyhow!("Delta manifest segment page range overflow"))?;
+                if previous_end > segment.segment_page_start {
+                    bail!("Delta manifest segment page ranges must not overlap");
+                }
+            }
+            previous_segment = Some(segment);
         }
 
         Ok(())
@@ -683,6 +703,36 @@ mod tests {
         .expect("segment should build")
     }
 
+    fn segment_with_tx_counts(tx_counts: &[u64], fact_page_start: u64) -> DeltaSegment {
+        let facts = tx_counts
+            .iter()
+            .map(|tx_count| {
+                let entity = Uuid::from_u128(u128::from(*tx_count));
+                fact(
+                    entity,
+                    ":edge/to",
+                    Value::Ref(Uuid::from_u128(10_000 + u128::from(*tx_count))),
+                    *tx_count,
+                )
+            })
+            .collect();
+        DeltaSegment::from_facts(facts, fact_page_start).expect("segment should build")
+    }
+
+    fn manifest_segment(
+        tx_count: u64,
+        segment_page_start: u64,
+        segment_page_count: u64,
+    ) -> DeltaManifestSegment {
+        let segment = segment(tx_count);
+        DeltaManifestSegment::from_segment_header(
+            segment_page_start,
+            segment_page_count,
+            segment.header(),
+        )
+        .expect("manifest segment should build")
+    }
+
     fn manifest_bytes(generation: u64, segment: &DeltaSegment) -> Vec<u8> {
         DeltaManifest::new(
             generation,
@@ -976,6 +1026,52 @@ mod tests {
             )
             .is_err(),
             "manifest high_tx below referenced segment high_tx must reject"
+        );
+    }
+
+    #[test]
+    fn manifest_segments_must_be_ordered_by_tx_count() {
+        assert!(
+            DeltaManifest::new(
+                1,
+                DeltaBaseIdentity::fixture(500, 0),
+                vec![manifest_segment(2, 900, 1), manifest_segment(1, 901, 1)],
+            )
+            .is_err(),
+            "manifest must reject segments sorted newer-before-older"
+        );
+    }
+
+    #[test]
+    fn manifest_segments_must_not_have_overlapping_tx_ranges() {
+        let first = segment_with_tx_counts(&[1, 3], 901);
+        let second = segment(3);
+        let first_descriptor = DeltaManifestSegment::from_segment_header(900, 1, first.header())
+            .expect("first manifest segment should build");
+        let second_descriptor = DeltaManifestSegment::from_segment_header(901, 1, second.header())
+            .expect("second manifest segment should build");
+
+        assert!(
+            DeltaManifest::new(
+                1,
+                DeltaBaseIdentity::fixture(500, 0),
+                vec![first_descriptor, second_descriptor],
+            )
+            .is_err(),
+            "manifest must reject overlapping segment tx ranges"
+        );
+    }
+
+    #[test]
+    fn manifest_segments_must_not_have_overlapping_page_ranges() {
+        assert!(
+            DeltaManifest::new(
+                1,
+                DeltaBaseIdentity::fixture(500, 0),
+                vec![manifest_segment(1, 900, 2), manifest_segment(2, 901, 1)],
+            )
+            .is_err(),
+            "manifest must reject overlapping segment page ranges"
         );
     }
 }

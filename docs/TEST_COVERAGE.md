@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Vetch ledger identity + scoped retract valid-time parity + fact-log export (June 2026), 995 tests ✅
+**Last Updated**: Vetch delta multi-segment manifest publish + ledger identity/export regressions (June 2026), 1001 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 995 ✅ (987 passing, 8 ignored)
-- ✅ 658 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions)
+**Total Tests**: 1001 ✅ (993 passing, 8 ignored)
+- ✅ 714 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -32,7 +32,9 @@
 - ✅ 6 migration matrix tests (integration, Wave 3 #215 + v7/v8→v9 format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
 - ✅ 7 multi-value index tests (integration, #287 — same entity+attribute batch values survive indexed public query paths, ref edges, `:as-of`, `:valid-at`, retraction, checkpoint/reopen)
 - ✅ 5 retract valid-time tests (integration, Vetch ledger parity — scoped retract removes only the matching valid-time window, legacy retract still wipes all windows, Ref edge value, WriteTransaction parity, checkpoint/reopen)
-- ✅ 3 fact-log export tests (integration, Vetch ledger receipts — public append-only export includes `asserted`, `tx_id`, `tx_count`, valid-time scope, legacy retractions, scoped Ref-edge retractions, checkpoint/reopen)
+- ✅ 4 fact-log export tests (integration, Vetch ledger receipts — public append-only export includes `asserted`, `tx_id`, `tx_count`, valid-time scope, legacy retractions, scoped Ref-edge retractions, checkpoint/reopen)
+- ✅ 17 delta checkpoint integration tests (integration, Vetch delta storage — v10 manifest publish, multi-segment append, base/delta and segment/segment Ref edges, later-segment retraction, deterministic export, corrupt-slot fallback)
+- ✅ 5 delta checkpoint crash recovery tests (integration, Vetch delta storage — unpublished delta ignored, WAL replay, selected corrupt/truncated delta errors, stale WAL skip after header publish)
 - ✅ 5 index corruption tests (integration, Wave 3 #216 — checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)
@@ -41,7 +43,7 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 987 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
+**Status**: ✅ **All 993 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -713,11 +715,34 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ explicit `WriteTransaction` scoped retract matches implicit `Minigraf::execute`
 - ✅ checkpoint/reopen preserves scoped retraction semantics
 
-### Fact-Log Export (`tests/fact_log_export_test.rs`) - ✅ 3 tests
+### Fact-Log Export (`tests/fact_log_export_test.rs`) - ✅ 4 tests
 
 - ✅ append-only export includes assertion and legacy retraction records with `tx_id`, `tx_count`, valid-time scope, and `asserted`
 - ✅ scoped Ref-edge retractions export as exact valid-time windows, not all-valid-time legacy wipes
+- ✅ same Ref E/A/V retract and assert in one `WriteTransaction` exports as two same-tx rows distinguished by `asserted`
 - ✅ checkpoint/reopen preserves Ref values and per-window fact-log records
+
+### Delta Checkpoint Integration (`tests/delta_checkpoint_integration_test.rs`) - ✅ 17 tests
+
+- ✅ delta checkpoint writes a v10 manifest payload and retires WAL only after durable publish
+- ✅ base checksum remains scoped to the base view during delta publish
+- ✅ manifest base-root mismatch rejects reopen
+- ✅ second checkpoint over visible delta rotates to the inactive manifest slot
+- ✅ second checkpoint appends only pending segment pages instead of rewriting accumulated delta facts
+- ✅ base-to-delta and segment-to-segment `Value::Ref` edges survive checkpoint/reopen
+- ✅ later delta segment retraction hides an earlier delta assertion in current view while history remains queryable
+- ✅ multi-segment export preserves deterministic tx order across base and deltas
+- ✅ corrupt newer header slot, manifest payload, or delta segment falls back to the previous valid manifest
+- ✅ corrupt older segment referenced by the selected multi-segment manifest errors instead of opening base-only
+- ✅ both invalid manifest slots error instead of silently dropping committed delta writes
+- ✅ full rebuild fallback after a visible delta preserves results and fact-log rows
+
+### Delta Checkpoint Crash Recovery (`tests/delta_checkpoint_crash_recovery_test.rs`) - ✅ 5 tests
+
+- ✅ pre-header crash replays WAL and ignores unpublished delta bytes
+- ✅ unpublished corrupt delta pages do not block WAL recovery
+- ✅ selected corrupt or truncated delta errors even if a WAL exists
+- ✅ post-header/pre-WAL-delete crash skips stale WAL without duplicating facts
 
 ### Index Corruption (`tests/index_corruption_test.rs`) - ✅ 5 tests (Wave 3 #216)
 
@@ -917,7 +942,9 @@ cargo test --test prepared_statements_test # prepared statements (17)
 cargo test --test migration_matrix_test    # migration matrix (6)
 cargo test --test multivalue_index_test    # same entity+attribute multi-value regression (7)
 cargo test --test retract_valid_time_test  # scoped retract valid-time parity (5)
-cargo test --test fact_log_export_test     # append-only fact-log export (3)
+cargo test --test fact_log_export_test     # append-only fact-log export (4)
+cargo test --test delta_checkpoint_integration_test # v10 delta checkpoint integration (17)
+cargo test --test delta_checkpoint_crash_recovery_test # v10 delta checkpoint crash recovery (5)
 cargo test --test index_corruption_test    # index corruption (5)
 cargo test --test property_test            # property-based (3)
 cargo test --test xtdb_compat_test         # XTDB compat (10)
@@ -960,12 +987,14 @@ cargo test -- --nocapture
 - Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v9 migration)
 - Multi-value index regression verified: same entity+attribute batch values survive indexed public query paths, ref edge lookups, temporal replay, retraction, and checkpoint/reopen (#287)
 - Retract valid-time parity verified: scoped retractions remove only the matching valid-time window while legacy retractions still wipe every valid-time window for the same EAV triple
+- Delta checkpoint integration verified: v10 multi-segment manifest append, base/delta and segment/segment `Value::Ref` edges, later-segment retractions, deterministic multi-delta export, and corrupt-slot fallback
+- Delta checkpoint crash recovery verified: unpublished delta bytes ignored, WAL replay preserved, selected corrupt/truncated deltas rejected, stale WAL skipped after header publish
 - Index corruption resilience verified: checksum corruption triggers rebuild, btree corruption returns Err not panic (Wave 3)
 - Property-based testing verified: EAV model, bi-temporal monotonicity, retract visibility (Wave 3)
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 995 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions (including browser WASM + WASI + cross-platform compat + fuzzing CI)
+- 1001 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint regressions (including browser WASM + WASI + cross-platform compat + fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

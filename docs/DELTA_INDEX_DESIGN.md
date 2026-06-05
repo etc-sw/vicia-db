@@ -2,7 +2,9 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: living design and test specification. T0-T7C guardrails are implemented on this branch; T7C records the accumulated-receipt benchmark gate before multi-segment manifest work.
+Status: living design and test specification. T0-T8A guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append.
+
+Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution plan and gate sequence.
 
 ## Decision
 
@@ -29,9 +31,9 @@ The design target is:
 The current v10 file has page 0 with the legacy 84-byte header plus the delta manifest extension area. The base header still carries four committed index roots and checksums. `PersistentFactStorage::save()` can currently take three internal paths:
 
 1. No-op when there is no dirty state.
-2. Single-segment delta publish when a clean v10 base has pending facts and no visible delta manifest.
-3. Single-segment replacement delta publish when a visible delta has new pending facts: the new segment contains the previous selected delta facts plus the new pending facts, and the previous selected slot remains the fallback root.
-4. Full rebuild from base-plus-pending facts when the delta path is not available.
+2. Delta segment publish when a clean v10 base has pending facts and no visible delta manifest.
+3. Multi-segment delta publish when a visible delta has new pending facts: the new segment contains only the pending facts, and the newly published manifest preserves previous segment descriptors plus the appended segment.
+4. Full rebuild from base-plus-pending or base-plus-delta facts when the delta path is not available or when recompact/repair is required.
 
 Every durable path still follows the same discipline:
 
@@ -142,7 +144,7 @@ Behavior:
 - Candidate deduplication must use full-history identity, not just E/A/V.
 - The reader may return a `Vec<FactRef>` initially because the current trait returns vectors. A later streaming trait can be designed only after correctness is locked.
 
-The first reader implementation proved merge semantics against the existing index key types and test fixtures. The current branch now writes v10 files with a single visible delta segment and can publish a replacement single-segment delta through the inactive manifest slot when a visible delta already exists.
+The first reader implementation proved merge semantics against the existing index key types and test fixtures. The current branch writes v10 files with one or more visible delta segments. A checkpoint over a visible delta appends only the pending facts as a new segment and publishes a manifest list through the inactive slot; it does not rewrite previously selected delta facts.
 
 ## Flush Semantics
 
@@ -165,6 +167,13 @@ T7C policy update for Vetch:
 - Full rebuild is import/maintenance only and must not be a foreground path in normal Vetch work.
 - The next storage slice should replace single-segment replacement with a multi-segment manifest. Internal/background recompact thresholds still matter, but they do not remove the need for append-only segment publish.
 - Agent-brief read latency must be measured separately from publish latency. T7C shows immediate current queries stay sub-millisecond, while as-of/replay queries over a 1M base stay around seconds and need a separate read/query-path improvement.
+
+T8A implementation update:
+
+- A visible-delta checkpoint now appends one new segment for pending facts and publishes a manifest containing all selected previous segment descriptors plus the new descriptor.
+- Reopen loads every segment referenced by the selected manifest before wiring `LayeredFactLoaderImpl` and `LayeredIndexReader`.
+- Manifest validation rejects out-of-order segments, overlapping tx ranges, and overlapping page ranges.
+- Corrupt newest segment/manifest/slot still falls back to the previous valid slot; corrupt older segment referenced by the selected multi-segment manifest makes that selected manifest invalid.
 
 ### Checkpoint Outcome And WAL Retire Policy
 
@@ -290,7 +299,10 @@ Cases:
 - checkpoint after one pending write on checkpointed base does not rebuild all base index pages
 - reopen after delta checkpoint sees delta-only fact
 - reopen after delta checkpoint sees base-to-delta `Value::Ref` edge
-- `export_fact_log()` includes base and delta records in deterministic order
+- second delta checkpoint appends only pending segment pages instead of rewriting accumulated delta facts
+- reopen after two delta checkpoints sees segment-to-segment `Value::Ref` edge
+- later delta segment retraction hides earlier delta segment assertion in current view
+- `export_fact_log()` includes base and multiple delta records in deterministic tx order
 - current-view query matches full-rebuild checkpoint result
 - retraction in delta hides base assertion in current-view query but remains in export log
 - recompact removes visible delta manifest and preserves results
@@ -314,7 +326,7 @@ T5B adds the recovery-policy surface:
 - clean save returns `CheckpointOutcome::Noop`
 - first base checkpoint returns `CheckpointOutcome::FullRebuild`
 - small append on a clean base returns `CheckpointOutcome::DeltaSegment`
-- pending facts on a visible delta return `CheckpointOutcome::DeltaSegment` by publishing a replacement delta through the inactive manifest slot
+- pending facts on a visible delta return `CheckpointOutcome::DeltaSegment` by appending a new segment and publishing the expanded manifest through the inactive manifest slot
 - `checkpoint()` treats `Noop` as insufficient evidence for deleting a non-empty WAL
 
 ### T6: Benchmark Gate
@@ -350,11 +362,12 @@ Current T7C result, recorded in `docs/BENCHMARKS.md`: single-segment replacement
 8. Wire first delta flush into `checkpoint()` with full rebuild fallback.
 9. Add T4/T5 integration and crash tests.
 10. Scope selected-delta checksum validation to base identity plus delta bytes.
-11. Use double-buffered manifest slots as the publish boundary for replacement single-segment deltas.
+11. Use double-buffered manifest slots as the publish boundary for replacement single-segment deltas. Done in T7B; retained as fallback evidence for T8A.
 12. Re-run T6/T7 benchmark gates and update `docs/BENCHMARKS.md`.
-13. Implement multi-segment manifest publish so small checkpoints append one new segment instead of rewriting all accumulated delta facts.
-14. Add internal/background recompact thresholds for segment count, delta bytes, and long-term file growth.
-15. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
+13. Implement multi-segment manifest publish so small checkpoints append one new segment instead of rewriting all accumulated delta facts. Done in T8A.
+14. Run the T8B mini benchmark and then the full T8C accumulation matrix.
+15. Add internal/background recompact thresholds for segment count, delta bytes, and long-term file growth if T8B/T8C show segment growth pressure.
+16. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
 
 ## Open Questions
 

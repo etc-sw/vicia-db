@@ -1198,7 +1198,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
     }
 
-    fn try_save_single_segment_delta(
+    fn try_save_delta_segment(
         &mut self,
         pending_facts: &[Fact],
     ) -> Result<Option<CheckpointOutcome>> {
@@ -1231,31 +1231,23 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             return Ok(None);
         }
 
-        let (base_identity, segment_facts) =
+        let (base_identity, mut manifest_segments, mut visible_delta_segments) =
             if let Some(manifest) = selected_delta_manifest.as_ref() {
-                let mut facts = Vec::new();
-                for segment in
-                    Self::load_delta_segments_from_manifest(&*backend, &curr_header, manifest)?
-                {
-                    facts.extend(
-                        segment
-                            .payload()
-                            .facts()
-                            .iter()
-                            .map(|(_, fact)| fact.clone()),
-                    );
-                }
-                facts.extend_from_slice(pending_facts);
-                (manifest.base_identity(), facts)
+                (
+                    manifest.base_identity(),
+                    manifest.segments().to_vec(),
+                    Self::load_delta_segments_from_manifest(&*backend, &curr_header, manifest)?,
+                )
             } else {
                 (
                     DeltaBaseIdentity::from_header(&curr_header),
-                    pending_facts.to_vec(),
+                    Vec::new(),
+                    Vec::new(),
                 )
             };
 
         let segment_page_start = curr_header.page_count;
-        let segment = DeltaSegment::from_facts(segment_facts, segment_page_start)?;
+        let segment = DeltaSegment::from_facts(pending_facts.to_vec(), segment_page_start)?;
         self.page_cache.invalidate_from(segment_page_start);
         let segment_page_count = write_segment_pages(&mut *backend, segment_page_start, &segment)?;
         let manifest_segment = DeltaManifestSegment::from_segment_header(
@@ -1268,7 +1260,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .current_tx_count()
             .max(curr_header.last_checkpointed_tx_count.saturating_add(1))
             .max(1);
-        let manifest = DeltaManifest::new(generation, base_identity, vec![manifest_segment])?;
+        manifest_segments.push(manifest_segment);
+        let manifest = DeltaManifest::new(generation, base_identity, manifest_segments)?;
         let manifest_page_start = segment_page_start
             .checked_add(segment_page_count)
             .ok_or_else(|| anyhow::anyhow!("Delta manifest page start overflow"))?;
@@ -1314,7 +1307,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         };
         self.last_checkpointed_tx_count = self.storage.current_tx_count();
         self.dirty = false;
-        self.wire_committed_readers(&header, vec![segment])?;
+        visible_delta_segments.push(segment);
+        self.wire_committed_readers(&header, visible_delta_segments)?;
         self.storage.post_checkpoint_clear();
         Ok(Some(CheckpointOutcome::DeltaSegment))
     }
@@ -1327,7 +1321,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         // ── Step A: read current header + stream old B+tree entries BEFORE overwriting ──
         let pending_facts = self.storage.get_pending_facts();
-        if let Ok(Some(outcome)) = self.try_save_single_segment_delta(&pending_facts) {
+        if let Ok(Some(outcome)) = self.try_save_delta_segment(&pending_facts) {
             return Ok(outcome);
         }
         if matches!(

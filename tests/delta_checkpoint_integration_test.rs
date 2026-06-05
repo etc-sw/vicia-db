@@ -176,6 +176,19 @@ fn query_count(db: &Minigraf, query: &str) -> usize {
     query_rows(db, query).len()
 }
 
+fn transact_many_ref_facts(db: &Minigraf, entity_prefix: &str, count: usize) {
+    let mut command = String::from("(transact [");
+    for index in 0..count {
+        let target = Uuid::from_u128(index as u128 + 10_000);
+        command.push_str(&format!(
+            r#"[:{entity_prefix}-{index} :edge/to #uuid "{target}"]"#
+        ));
+    }
+    command.push_str("])");
+    db.execute(&command)
+        .expect("bulk ref transact should execute");
+}
+
 #[test]
 fn delta_checkpoint_reopen_sees_delta_only_fact_and_export_log() {
     let dir = tempfile::tempdir().expect("tempdir should create");
@@ -336,6 +349,175 @@ fn second_delta_checkpoint_uses_inactive_slot_and_newest_survives_reopen() {
 }
 
 #[test]
+fn second_delta_checkpoint_appends_only_pending_segment_pages() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("append-only-segment.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+    }
+    let base_page_count = read_u64_le(&read_page0(&path), PAGE_COUNT_OFFSET);
+
+    {
+        let db = Minigraf::open(&path).expect("database should reopen");
+        transact_many_ref_facts(&db, "bulk-delta", 1_000);
+        db.checkpoint()
+            .expect("large first delta checkpoint should succeed");
+    }
+    let first_delta_page_count = read_u64_le(&read_page0(&path), PAGE_COUNT_OFFSET);
+    let first_delta_growth = first_delta_page_count.saturating_sub(base_page_count);
+
+    {
+        let db = Minigraf::open(&path).expect("database should reopen");
+        db.execute(r#"(transact [[:tiny-delta :edge/to :target]])"#)
+            .expect("tiny second delta transact should execute");
+        db.checkpoint()
+            .expect("tiny second delta checkpoint should succeed");
+    }
+    let second_delta_page_count = read_u64_le(&read_page0(&path), PAGE_COUNT_OFFSET);
+    let second_delta_growth = second_delta_page_count.saturating_sub(first_delta_page_count);
+
+    assert!(
+        first_delta_growth > 20,
+        "first large delta should occupy enough pages to prove replacement cost"
+    );
+    assert!(
+        second_delta_growth.saturating_mul(10) < first_delta_growth,
+        "second delta checkpoint should append only pending pages, not rewrite the accumulated delta"
+    );
+}
+
+#[test]
+fn multi_segment_checkpoint_reopen_sees_segment_to_segment_ref_edge() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("segment-ref-edge.graph");
+    let source = Uuid::from_u128(0x300);
+    let target = Uuid::from_u128(0x400);
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+
+        db.execute(&format!(
+            r#"(transact [[#uuid "{source}" :edge/to #uuid "{target}"]])"#
+        ))
+        .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+
+        db.execute(&format!(
+            r#"(transact [[#uuid "{target}" :name "target"]])"#
+        ))
+        .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    let db = Minigraf::open(&path).expect("database should reopen");
+    let edge_rows = query_rows(
+        &db,
+        &format!(
+            r#"(query [:find ?name
+                      :where [#uuid "{source}" :edge/to ?target]
+                             [?target :name ?name]])"#
+        ),
+    );
+    assert_eq!(
+        edge_rows.len(),
+        1,
+        "segment-to-segment ref edge must resolve after reopen"
+    );
+    match &edge_rows[0][0] {
+        Value::String(name) => assert_eq!(name, "target"),
+        _ => panic!("target name should be a string"),
+    }
+}
+
+#[test]
+fn later_delta_segment_retraction_hides_earlier_delta_assertion() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("segment-retraction.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+
+        db.execute(r#"(transact [[:item :status :active]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+
+        db.execute(r#"(retract [[:item :status :active]])"#)
+            .expect("second delta retract should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    let db = Minigraf::open(&path).expect("database should reopen");
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?s :where [:item :status ?s]])"#),
+        0,
+        "later delta retraction must hide earlier delta assertion"
+    );
+    assert_eq!(
+        query_count(
+            &db,
+            r#"(query [:find ?s :as-of 2 :valid-at :any-valid-time :where [:item :status ?s]])"#,
+        ),
+        1,
+        "earlier delta assertion must remain visible in history"
+    );
+}
+
+#[test]
+fn export_fact_log_preserves_multiple_delta_segments_in_tx_order() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("multi-delta-export.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+
+        db.execute(r#"(transact [[:delta1 :name "Delta 1"]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+
+        db.execute(r#"(transact [[:delta2 :name "Delta 2"]])"#)
+            .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    let db = Minigraf::open(&path).expect("database should reopen");
+    let records = db.export_fact_log().expect("fact log should export");
+    assert_eq!(
+        records.len(),
+        3,
+        "export log must include base and both delta segments"
+    );
+    let tx_counts: Vec<u64> = records.iter().map(|record| record.tx_count).collect();
+    assert_eq!(
+        tx_counts,
+        vec![1, 2, 3],
+        "export log must preserve deterministic tx order across segments"
+    );
+    assert!(
+        records.iter().all(|record| record.asserted),
+        "all records in this fixture should be assertions"
+    );
+}
+
+#[test]
 fn corrupt_newer_header_slot_falls_back_to_previous_manifest() {
     let dir = tempfile::tempdir().expect("tempdir should create");
     let path = dir.path().join("corrupt-newer-slot.graph");
@@ -439,6 +621,34 @@ fn corrupt_newer_delta_segment_falls_back_to_previous_manifest() {
         query_count(&db, r#"(query [:find ?name :where [:delta2 :name ?name]])"#),
         0,
         "corrupt newer segment should not expose second delta"
+    );
+}
+
+#[test]
+fn corrupt_older_segment_in_selected_multi_segment_manifest_errors() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("corrupt-selected-older-segment.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+        db.execute(r#"(transact [[:delta1 :name "Delta 1"]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+        db.execute(r#"(transact [[:delta2 :name "Delta 2"]])"#)
+            .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    corrupt_first_delta_segment(&path);
+    let reopened = Minigraf::open(&path);
+    assert!(
+        reopened.is_err(),
+        "corrupt older segment referenced by the selected manifest must not open cleanly"
     );
 }
 
