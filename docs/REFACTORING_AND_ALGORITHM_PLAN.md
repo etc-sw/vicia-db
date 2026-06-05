@@ -238,6 +238,32 @@ The preferred design candidate, if Vetch proves that batching cannot meet checkp
 
 Rejected for Gate 2 implementation: immediate incremental B+tree mutation. It may be a later optimization, but it touches page splits, partial writes, checksums, and four-index consistency before Vetch has proven that append-friendly delta pages are insufficient.
 
+### Gate 2 Update: Vetch 1M Baseline and Borrowed Ideas
+
+Vetch now treats 1M+ facts as a baseline workload because source import, projection versioning, local activity logs, and region/case-memory recalculation can reach that scale before multimodal/object graph expansion. That changes Gate 2 from "maybe design delta/index if batching is insufficient" to "write the delta/index design note as the next storage artifact." This worktree still must not implement storage algorithm or file-format changes without that design note.
+
+Current roadmap scope for this worktree:
+
+- Define the delta index target: small append checkpoint/flush cost should be tied to pending/delta size, not committed graph size.
+- Treat checkpointing as work that Vetch can push outside the interactive agent rhythm.
+- Translate GrafeoDB's writable layered compact store idea into Minigraf terms: committed base B+trees plus append-friendly delta index segments plus explicit `recompact()`/full-rebuild fallback.
+- Consider Bloom filters and zone maps only as segment-level skip metadata for facts/index entries, not as a general query-engine rewrite.
+- Consider streaming execution for checkpoint, export, rebuild, and compaction paths where buffering all committed entries is the current cost source.
+- Borrow design patterns from existing Rust storage engines without adopting them wholesale:
+  - Fjall/LSM: sorted delta segments, journal durability, and compaction policy.
+  - sled: page/update deltas with threshold-based squashing.
+  - redb: crash-safe root/commit-slot discipline and checksum framing.
+  - Sanakirja/Persy: versioned roots, copy-on-write page discipline, and single-file transaction constraints.
+- Preserve full-history identity across base and delta: `entity`, `attribute`, encoded `value`, `valid_from`, `valid_to`, `tx_count`, `tx_id`, and `asserted`.
+
+Future roadmap parking lot outside this worktree's implementation scope:
+
+- Vector-first storage in Minigraf core, including `Value::Vector`, HNSW, SIMD distance functions, and vector quantization.
+- BM25, hybrid text/vector search, RRF, and graph+vector query planning as Minigraf core features. These belong first in Vetch projection/search layers backed by receipts.
+- Heavy multimodal payload storage, embedding bulk storage, OCR/transcript/chunk payloads, and object-detection artifacts. Minigraf should store authority graph pointers, hashes, metadata, and relationships; Vetch should own rebuildable object/search/vector stores.
+- Broad execution-engine rewrites such as push-based vectorized execution, morsel-driven parallelism, Block-STM, full columnar storage, DPccp join optimization, adaptive query execution, and transparent spilling.
+- Adopting an external Rust database backend as a dependency. Revisit only if a later benchmark-backed migration proposal proves that preserving Minigraf's single-file, bi-temporal, full-history identity semantics is cheaper than implementing a narrow delta-index layer.
+
 ## R3: Split Positive Candidate Fetch from Nested Clauses
 
 ### Problem
