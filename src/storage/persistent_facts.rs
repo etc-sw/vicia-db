@@ -84,7 +84,7 @@ struct CommittedFactLoaderImpl<B: StorageBackend> {
     backend_adapter: MutexStorageBackend<B>,
     committed_fact_pages: Arc<AtomicU64>,
     #[allow(dead_code)]
-    first_fact_page: u64, // always 1 in current layout
+    committed_fact_page_start: Arc<AtomicU64>,
 }
 
 impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
@@ -104,11 +104,12 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
 
     fn stream_all(&self) -> anyhow::Result<Vec<crate::graph::types::Fact>> {
         let n = self.committed_fact_pages.load(Ordering::SeqCst);
+        let first_fact_page = self.committed_fact_page_start.load(Ordering::SeqCst);
         let backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        crate::storage::packed_pages::read_all_from_pages(&*backend, 1, n)
+        crate::storage::packed_pages::read_all_from_pages(&*backend, first_fact_page, n)
     }
 
     fn committed_page_count(&self) -> u64 {
@@ -133,6 +134,14 @@ impl CheckpointOutcome {
     pub(crate) fn permits_wal_retire(self) -> bool {
         !matches!(self, Self::Noop)
     }
+}
+
+struct RecompactCandidate {
+    header: FileHeader,
+    header_page: Vec<u8>,
+    base_fact_page_start: u64,
+    fact_page_count: u64,
+    checkpoint_tx_count: u64,
 }
 
 impl LayeredFactLoaderImpl {
@@ -223,6 +232,7 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     header_manifest_selection: HeaderManifestSlotSelection,
     delta_manifest_selection: PersistedManifestSelection,
     committed_fact_pages: Arc<AtomicU64>,
+    committed_fact_page_start: Arc<AtomicU64>,
 }
 
 impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
@@ -237,6 +247,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let backend = Arc::new(Mutex::new(backend));
         let page_cache = Arc::new(PageCache::new(page_cache_capacity));
         let committed_fact_pages = Arc::new(AtomicU64::new(0));
+        let committed_fact_page_start = Arc::new(AtomicU64::new(1));
         let mut persistent = PersistentFactStorage {
             backend,
             page_cache,
@@ -246,6 +257,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             header_manifest_selection: HeaderManifestSlotSelection::NoDeltaManifest,
             delta_manifest_selection: PersistedManifestSelection::NoDeltaManifest,
             committed_fact_pages,
+            committed_fact_page_start,
         };
 
         // Try to load existing data.
@@ -279,7 +291,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             backend_adapter: MutexStorageBackend(self.backend.clone()),
             page_cache: self.page_cache.clone(),
             committed_fact_pages: self.committed_fact_pages.clone(),
-            first_fact_page: 1,
+            committed_fact_page_start: self.committed_fact_page_start.clone(),
         })
     }
 
@@ -426,19 +438,22 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 slot: HeaderManifestSlotName::Primary,
                 ..
             } => Ok((
-                HeaderExtension::new(extension.primary(), descriptor),
+                HeaderExtension::new(extension.primary(), descriptor)
+                    .with_base_fact_page_start(extension.base_fact_page_start())?,
                 HeaderManifestSlotName::Secondary,
             )),
             HeaderManifestSlotSelection::Use {
                 slot: HeaderManifestSlotName::Secondary,
                 ..
             } => Ok((
-                HeaderExtension::new(descriptor, extension.secondary()),
+                HeaderExtension::new(descriptor, extension.secondary())
+                    .with_base_fact_page_start(extension.base_fact_page_start())?,
                 HeaderManifestSlotName::Primary,
             )),
             HeaderManifestSlotSelection::NoDeltaManifest
             | HeaderManifestSlotSelection::RecoveryRequired { .. } => Ok((
-                HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
+                HeaderExtension::new(descriptor, HeaderManifestSlot::empty())
+                    .with_base_fact_page_start(extension.base_fact_page_start())?,
                 HeaderManifestSlotName::Primary,
             )),
         }
@@ -499,6 +514,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         Ok(segment)
     }
 
+    #[allow(dead_code)]
     fn save_full_rebuild_from_visible_facts(&mut self) -> Result<CheckpointOutcome> {
         let all_facts = self.storage.get_all_facts()?;
         let (fact_pages, fact_refs) = pack_facts(&all_facts, 1)?;
@@ -579,9 +595,130 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.delta_manifest_selection = PersistedManifestSelection::NoDeltaManifest;
         self.committed_fact_pages
             .store(num_fact_pages, Ordering::SeqCst);
+        self.committed_fact_page_start.store(1, Ordering::SeqCst);
         self.last_checkpointed_tx_count = checkpoint_tx_count;
         self.dirty = false;
         self.wire_committed_readers(&header, Vec::new())?;
+        self.storage.post_checkpoint_clear();
+        Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
+    }
+
+    fn write_recompact_candidate_from_visible_facts(&mut self) -> Result<RecompactCandidate> {
+        let all_facts = self.storage.get_all_facts()?;
+        let checkpoint_tx_count = self.storage.current_tx_count();
+
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        let curr_header_page = backend.read_page(0)?;
+        let curr_header = FileHeader::from_bytes(&curr_header_page)?;
+        curr_header.validate()?;
+        let base_fact_page_start = curr_header.page_count;
+        if base_fact_page_start == 0 {
+            anyhow::bail!("Recompact base candidate cannot start on page 0");
+        }
+
+        let (fact_pages, fact_refs) = pack_facts(&all_facts, base_fact_page_start)?;
+        let num_fact_pages = u64::try_from(fact_pages.len())
+            .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
+        let (eavt_entries, aevt_entries, avet_entries, vaet_entries) =
+            build_sorted_index_entries(&all_facts, &fact_refs);
+        let node_count = u64::try_from(all_facts.len())
+            .map_err(|_| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
+
+        self.page_cache.invalidate_from(base_fact_page_start);
+        for (i, page_data) in fact_pages.iter().enumerate() {
+            let page_offset =
+                u64::try_from(i).map_err(|_| anyhow::anyhow!("page index {i} exceeds u64::MAX"))?;
+            let page_id = base_fact_page_start
+                .checked_add(page_offset)
+                .ok_or_else(|| anyhow::anyhow!("page id overflow writing recompact facts"))?;
+            backend.write_page(page_id, page_data)?;
+        }
+
+        let index_start = base_fact_page_start
+            .checked_add(num_fact_pages)
+            .ok_or_else(|| {
+                anyhow::anyhow!("page count overflow computing recompact index_start")
+            })?;
+        let (eavt_root, next1) = build_btree(
+            btree_entries(eavt_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            index_start,
+        )?;
+        let (aevt_root, next2) = build_btree(
+            btree_entries(aevt_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            next1,
+        )?;
+        let (avet_root, next3) = build_btree(
+            btree_entries(avet_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            next2,
+        )?;
+        let (vaet_root, next4) = build_btree(
+            btree_entries(vaet_entries.into_iter())?.into_iter(),
+            &mut *backend,
+            &self.page_cache,
+            next3,
+        )?;
+
+        backend.sync()?;
+
+        let total_data_pages = next4.saturating_sub(base_fact_page_start);
+        let checksum = compute_page_checksum(&*backend, base_fact_page_start, total_data_pages)?;
+        let mut header = FileHeader::new();
+        header.page_count = next4;
+        header.node_count = node_count;
+        header.last_checkpointed_tx_count = checkpoint_tx_count;
+        header.eavt_root_page = eavt_root;
+        header.aevt_root_page = aevt_root;
+        header.avet_root_page = avet_root;
+        header.vaet_root_page = vaet_root;
+        header.index_checksum = checksum;
+        header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
+        header.fact_page_count = num_fact_pages;
+        header.header_checksum = compute_header_checksum(&header);
+
+        let header_page = build_header_page_with_base_start(header, base_fact_page_start)?;
+        Ok(RecompactCandidate {
+            header,
+            header_page,
+            base_fact_page_start,
+            fact_page_count: num_fact_pages,
+            checkpoint_tx_count,
+        })
+    }
+
+    fn publish_recompact_candidate(
+        &mut self,
+        candidate: RecompactCandidate,
+    ) -> Result<CheckpointOutcome> {
+        let manifest_selection = select_header_manifest_slot_from_page0(
+            candidate.header.version,
+            &candidate.header_page,
+        )?;
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        backend.write_page(0, &candidate.header_page)?;
+        backend.sync()?;
+        drop(backend);
+
+        self.header_manifest_selection = manifest_selection;
+        self.delta_manifest_selection = PersistedManifestSelection::NoDeltaManifest;
+        self.committed_fact_pages
+            .store(candidate.fact_page_count, Ordering::SeqCst);
+        self.committed_fact_page_start
+            .store(candidate.base_fact_page_start, Ordering::SeqCst);
+        self.last_checkpointed_tx_count = candidate.checkpoint_tx_count;
+        self.dirty = false;
+        self.wire_committed_readers(&candidate.header, Vec::new())?;
         self.storage.post_checkpoint_clear();
         Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
     }
@@ -619,6 +756,18 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 );
             }
         }
+
+        let base_fact_page_start =
+            HeaderExtension::read_from_page0(header.version, &raw_header_bytes)?
+                .map(|extension| extension.base_fact_page_start())
+                .unwrap_or(1);
+        if (base_fact_page_start == 0 || base_fact_page_start >= header.page_count.max(1))
+            && header.fact_page_count > 0
+        {
+            anyhow::bail!("Header base fact page start is out of bounds");
+        }
+        self.committed_fact_page_start
+            .store(base_fact_page_start, Ordering::SeqCst);
 
         let (header_manifest_selection, delta_manifest_selection, selected_delta_segments) = {
             let backend = self
@@ -709,13 +858,15 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
             let stored = header.index_checksum;
             // Total data pages: pages 1 through page_count-1 (everything except header)
-            let total_data_pages = header.page_count.saturating_sub(1);
-            let full_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+            let total_data_pages = header.page_count.saturating_sub(base_fact_page_start);
+            let full_checksum =
+                compute_page_checksum(&*backend, base_fact_page_start, total_data_pages)?;
             if full_checksum == stored {
                 false // new-style checksum matches: facts + indexes verified
             } else {
                 // Fall back: old files stored checksum over fact pages only
-                let fact_checksum = compute_page_checksum(&*backend, 1, num_fact_pages)?;
+                let fact_checksum =
+                    compute_page_checksum(&*backend, base_fact_page_start, num_fact_pages)?;
                 if fact_checksum == stored {
                     false // old-style checksum matches: facts verified, indexes unprotected
                 } else {
@@ -741,7 +892,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                     .backend
                     .lock()
                     .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-                crate::storage::packed_pages::read_all_from_pages(&*backend, 1, num_fact_pages)?
+                crate::storage::packed_pages::read_all_from_pages(
+                    &*backend,
+                    base_fact_page_start,
+                    num_fact_pages,
+                )?
             };
             if header.version < 9 {
                 normalize_legacy_retractions(&mut all_facts);
@@ -834,6 +989,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             self.last_checkpointed_tx_count = max_tx;
             self.committed_fact_pages
                 .store(num_fact_pages, Ordering::SeqCst);
+            self.committed_fact_page_start.store(1, Ordering::SeqCst);
 
             // Wire OnDiskIndexReader
             let index_reader: std::sync::Arc<dyn crate::storage::CommittedIndexReader> =
@@ -1064,6 +1220,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
         self.committed_fact_pages
             .store(new_fact_page_count, Ordering::SeqCst);
+        self.committed_fact_page_start.store(1, Ordering::SeqCst);
         let (eavt, aevt, avet, vaet) = build_sorted_index_entries(&all_facts, &fact_refs);
         let node_count = u64::try_from(all_facts.len())
             .map_err(|_| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
@@ -1153,7 +1310,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 backend_adapter: MutexStorageBackend(self.backend.clone()),
                 page_cache: self.page_cache.clone(),
                 committed_fact_pages: self.committed_fact_pages.clone(),
-                first_fact_page: 1,
+                committed_fact_page_start: self.committed_fact_page_start.clone(),
             });
         self.storage.set_committed_reader(loader);
 
@@ -1329,7 +1486,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             self.delta_manifest_selection,
             PersistedManifestSelection::Use { .. }
         ) {
-            return self.save_full_rebuild_from_visible_facts();
+            let candidate = self.write_recompact_candidate_from_visible_facts()?;
+            return self.publish_recompact_candidate(candidate);
         }
 
         let mut backend = self
@@ -1338,7 +1496,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
 
         let old_fact_page_count = self.committed_fact_pages.load(Ordering::SeqCst);
-        let new_fact_start = 1u64
+        let base_fact_page_start = self.committed_fact_page_start.load(Ordering::SeqCst);
+        let new_fact_start = base_fact_page_start
             .checked_add(old_fact_page_count)
             .ok_or_else(|| anyhow::anyhow!("page count overflow computing new_fact_start"))?;
 
@@ -1399,7 +1558,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             build_sorted_index_entries(&pending_facts, &new_fact_refs);
 
         // ── Step D: merge committed + pending entries, build new B+trees ─────────
-        let index_start = 1u64
+        let index_start = base_fact_page_start
             .checked_add(new_total_fact_pages)
             .ok_or_else(|| anyhow::anyhow!("page count overflow computing index_start"))?;
 
@@ -1447,8 +1606,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         // CRC32 over ALL data pages (facts + indexes), excluding page 0 (header).
         // This detects corruption in both fact pages and B+tree index pages.
-        let total_data_pages = next4.saturating_sub(1);
-        let checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+        let total_data_pages = next4.saturating_sub(base_fact_page_start);
+        let checksum = compute_page_checksum(&*backend, base_fact_page_start, total_data_pages)?;
 
         // ── Step E: write header (last write = crash-safe boundary) ─────────────
         let mut header = FileHeader::new(); // current format
@@ -1469,7 +1628,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         header.fact_page_count = new_total_fact_pages;
         header.header_checksum = compute_header_checksum(&header);
 
-        let header_page = build_header_page(header)?;
+        let header_page = build_header_page_with_base_start(header, base_fact_page_start)?;
         let manifest_selection =
             select_header_manifest_slot_from_page0(header.version, &header_page)?;
         backend.write_page(0, &header_page)?;
@@ -1480,6 +1639,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.delta_manifest_selection = PersistedManifestSelection::NoDeltaManifest;
         self.committed_fact_pages
             .store(new_total_fact_pages, Ordering::SeqCst);
+        self.committed_fact_page_start
+            .store(base_fact_page_start, Ordering::SeqCst);
         self.last_checkpointed_tx_count = self.storage.current_tx_count();
         self.dirty = false;
 
@@ -1490,7 +1651,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 backend_adapter: MutexStorageBackend(self.backend.clone()),
                 page_cache: self.page_cache.clone(),
                 committed_fact_pages: self.committed_fact_pages.clone(),
-                first_fact_page: 1,
+                committed_fact_page_start: self.committed_fact_page_start.clone(),
             });
         self.storage.set_committed_reader(loader);
 
@@ -1563,7 +1724,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             PersistedManifestSelection::RecoveryRequired { reason } => {
                 anyhow::bail!("Cannot recompact delta manifest requiring recovery: {reason:?}");
             }
-            PersistedManifestSelection::Use { .. } => self.save_full_rebuild_from_visible_facts(),
+            PersistedManifestSelection::Use { .. } => {
+                let candidate = self.write_recompact_candidate_from_visible_facts()?;
+                self.publish_recompact_candidate(candidate)
+            }
         }
     }
 
@@ -1685,6 +1849,18 @@ fn compute_header_checksum_from_bytes(bytes: &[u8]) -> u32 {
         hasher.update(slice);
     }
     hasher.finalize()
+}
+
+fn build_header_page_with_base_start(
+    header: FileHeader,
+    base_fact_page_start: u64,
+) -> Result<Vec<u8>> {
+    if header.version == crate::storage::FORMAT_VERSION {
+        let extension = HeaderExtension::empty().with_base_fact_page_start(base_fact_page_start)?;
+        build_header_page_with_extension(header, extension)
+    } else {
+        build_header_page(header)
+    }
 }
 
 /// Build sorted index entry vecs for a slice of facts and their corresponding FactRefs.
@@ -2843,6 +3019,10 @@ mod tests {
             storage.delta_manifest_selection(),
             PersistedManifestSelection::NoDeltaManifest
         ));
+        assert!(
+            storage.committed_fact_page_start.load(Ordering::SeqCst) > 1,
+            "recompact must publish a copy-on-write base after the previous image"
+        );
         assert_eq!(
             before,
             fact_projection(storage.storage())?,
@@ -2859,6 +3039,35 @@ mod tests {
             before,
             fact_projection(reopened.storage())?,
             "reopened recompact base must preserve full-history identity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_recompact_pre_header_candidate_keeps_previous_manifest_visible() -> Result<()> {
+        let mut storage = storage_with_visible_ref_delta()?;
+        let before = fact_projection(storage.storage())?;
+
+        let candidate = storage.write_recompact_candidate_from_visible_facts()?;
+        assert!(
+            candidate.base_fact_page_start > 1,
+            "candidate pages must be written after the current published image"
+        );
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+
+        let backend = storage.into_backend()?;
+        let reopened = PersistentFactStorage::new(backend, 256)?;
+        assert!(matches!(
+            reopened.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+        assert_eq!(
+            before,
+            fact_projection(reopened.storage())?,
+            "unpublished recompact pages must not change the visible graph"
         );
         Ok(())
     }

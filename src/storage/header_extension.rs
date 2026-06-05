@@ -7,7 +7,7 @@ pub(crate) const HEADER_EXTENSION_OFFSET: usize = 84;
 const HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX001";
 pub(crate) const HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 10;
 pub(crate) const HEADER_EXTENSION_LEN: usize =
-    HeaderExtension::PREFIX_LEN + (HeaderManifestSlot::LEN * 2);
+    HeaderExtension::PREFIX_LEN + (HeaderManifestSlot::LEN * 2) + HeaderExtension::BASE_LAYOUT_LEN;
 const _: () = assert!(HEADER_EXTENSION_OFFSET + HEADER_EXTENSION_LEN <= PAGE_SIZE);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,13 +169,22 @@ impl HeaderManifestSlot {
 pub(crate) struct HeaderExtension {
     primary: HeaderManifestSlot,
     secondary: HeaderManifestSlot,
+    base_fact_page_start: u64,
+    base_layout_checksum: u32,
 }
 
 impl HeaderExtension {
     pub(crate) const PREFIX_LEN: usize = 12;
+    pub(crate) const BASE_LAYOUT_LEN: usize = 12;
 
     pub(crate) fn new(primary: HeaderManifestSlot, secondary: HeaderManifestSlot) -> Self {
-        Self { primary, secondary }
+        let base_fact_page_start = 1;
+        Self {
+            primary,
+            secondary,
+            base_fact_page_start,
+            base_layout_checksum: Self::compute_base_layout_checksum(base_fact_page_start),
+        }
     }
 
     pub(crate) fn empty() -> Self {
@@ -190,12 +199,27 @@ impl HeaderExtension {
         self.secondary
     }
 
+    pub(crate) fn base_fact_page_start(&self) -> u64 {
+        self.base_fact_page_start
+    }
+
+    pub(crate) fn with_base_fact_page_start(mut self, base_fact_page_start: u64) -> Result<Self> {
+        if base_fact_page_start == 0 {
+            bail!("Base fact pages must not start on page 0");
+        }
+        self.base_fact_page_start = base_fact_page_start;
+        self.base_layout_checksum = Self::compute_base_layout_checksum(base_fact_page_start);
+        Ok(self)
+    }
+
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(HEADER_EXTENSION_LEN);
         bytes.extend_from_slice(&HEADER_EXTENSION_MAGIC);
         bytes.extend_from_slice(&HEADER_EXTENSION_FILE_FORMAT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&self.primary.to_bytes());
         bytes.extend_from_slice(&self.secondary.to_bytes());
+        bytes.extend_from_slice(&self.base_fact_page_start.to_le_bytes());
+        bytes.extend_from_slice(&self.base_layout_checksum.to_le_bytes());
         debug_assert_eq!(bytes.len(), HEADER_EXTENSION_LEN);
         bytes
     }
@@ -257,6 +281,10 @@ impl HeaderExtension {
         let secondary_end = secondary_start
             .checked_add(HeaderManifestSlot::LEN)
             .ok_or_else(|| anyhow::anyhow!("Header extension end offset overflow"))?;
+        let base_fact_page_start_offset = secondary_end;
+        let base_layout_checksum_offset = base_fact_page_start_offset
+            .checked_add(8)
+            .ok_or_else(|| anyhow::anyhow!("Header extension base layout checksum overflow"))?;
 
         let primary = HeaderManifestSlot::from_bytes(
             extension_bytes
@@ -268,8 +296,40 @@ impl HeaderExtension {
                 .get(secondary_start..secondary_end)
                 .ok_or_else(|| anyhow::anyhow!("Header extension secondary slot out of bounds"))?,
         )?;
+        let raw_base_fact_page_start = read_u64_le(
+            extension_bytes,
+            base_fact_page_start_offset,
+            "header extension base fact page start",
+        )?;
+        let raw_base_layout_checksum = read_u32_le(
+            extension_bytes,
+            base_layout_checksum_offset,
+            "header extension base layout checksum",
+        )?;
+        let base_fact_page_start = if raw_base_fact_page_start == 0 && raw_base_layout_checksum == 0
+        {
+            1
+        } else {
+            if raw_base_fact_page_start == 0 {
+                bail!("Header extension base fact page start must be non-zero");
+            }
+            let expected = Self::compute_base_layout_checksum(raw_base_fact_page_start);
+            if raw_base_layout_checksum != expected {
+                bail!("Header extension base layout checksum mismatch");
+            }
+            raw_base_fact_page_start
+        };
 
-        Ok(Some(Self { primary, secondary }))
+        Ok(Some(Self {
+            primary,
+            secondary,
+            base_fact_page_start,
+            base_layout_checksum: Self::compute_base_layout_checksum(base_fact_page_start),
+        }))
+    }
+
+    fn compute_base_layout_checksum(base_fact_page_start: u64) -> u32 {
+        crc32fast::hash(&base_fact_page_start.to_le_bytes())
     }
 }
 
@@ -526,6 +586,56 @@ mod tests {
 
         assert_eq!(decoded.primary(), descriptor);
         assert!(decoded.secondary().is_empty());
+        assert_eq!(decoded.base_fact_page_start(), 1);
+    }
+
+    #[test]
+    fn v10_header_extension_records_base_fact_page_start() {
+        let header = FileHeader::new();
+        let extension = HeaderExtension::new(slot(12, 345), HeaderManifestSlot::empty())
+            .with_base_fact_page_start(900)
+            .expect("base start should be valid");
+        let page = build_header_page_with_extension(header, extension.clone())
+            .expect("explicit extension page should build");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("extension should decode")
+            .expect("extension should be present");
+
+        assert_eq!(decoded, extension);
+        assert_eq!(decoded.base_fact_page_start(), 900);
+    }
+
+    #[test]
+    fn legacy_v10_extension_tail_defaults_base_fact_page_start_to_one() {
+        let extension = HeaderExtension::new(slot(7, 100), HeaderManifestSlot::empty());
+        let mut page = page_with_extension(&extension);
+        let base_layout_start =
+            HEADER_EXTENSION_OFFSET + HeaderExtension::PREFIX_LEN + HeaderManifestSlot::LEN * 2;
+        page[base_layout_start..base_layout_start + HeaderExtension::BASE_LAYOUT_LEN].fill(0);
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("legacy extension should decode")
+            .expect("extension should be present");
+
+        assert_eq!(decoded.base_fact_page_start(), 1);
+    }
+
+    #[test]
+    fn base_fact_page_start_checksum_mismatch_is_rejected() {
+        let extension = HeaderExtension::new(slot(7, 100), HeaderManifestSlot::empty())
+            .with_base_fact_page_start(900)
+            .expect("base start should be valid");
+        let mut page = page_with_extension(&extension);
+        let base_layout_start =
+            HEADER_EXTENSION_OFFSET + HeaderExtension::PREFIX_LEN + HeaderManifestSlot::LEN * 2;
+        page[base_layout_start] ^= 0x55;
+        let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
+        let result = HeaderExtension::read_from_page0(header.version, &page);
+
+        assert!(
+            result.is_err(),
+            "base fact page start checksum mismatch must reject"
+        );
     }
 
     #[test]

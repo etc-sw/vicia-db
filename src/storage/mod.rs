@@ -134,7 +134,8 @@ pub trait StorageBackend: Send + Sync {
 ///   64..68  index_checksum (u32)
 ///   68      fact_page_format (u8)
 ///   69..72  _padding ([u8; 3])
-///   72..80  fact_page_count (u64)     — new in v6
+///   72..80  fact_page_count (u64)     — new in v6; v10 uses the header
+///                                      extension for the first base fact page
 ///   80..84  header_checksum (u32)    — new in v7
 #[derive(Debug, Clone, Copy)]
 pub struct FileHeader {
@@ -151,8 +152,10 @@ pub struct FileHeader {
     /// fact_page_format (v5+): 0x00 = unset/legacy, 0x01 = one-per-page, 0x02 = packed.
     pub fact_page_format: u8,
     pub(crate) _padding: [u8; 3],
-    /// Number of pages (starting at page 1) holding committed fact data.
+    /// Number of pages holding committed fact data.
     /// New in v6; zero-initialised when reading v5 or older headers.
+    /// v6-v9 bases start at page 1; v10 can publish a later base start in
+    /// the header extension for copy-on-write recompact.
     pub fact_page_count: u64,
     /// CRC32 checksum of the first 80 bytes of the header (excluding this field).
     /// New in v7; zero-initialised when reading v6 or older headers.

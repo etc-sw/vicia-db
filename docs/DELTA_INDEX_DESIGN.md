@@ -2,7 +2,7 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: living design and test specification. T0-T9C-A guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, T9A documents the threshold policy, T9B implements private threshold decisions, and T9C-A adds a private explicit recompact primitive.
+Status: living design and test specification. T0-T9C-B guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, T9A documents the threshold policy, T9B implements private threshold decisions, T9C-A adds a private explicit recompact primitive, and T9C-B makes recompact publish copy-on-write.
 
 Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution plan and gate sequence.
 
@@ -33,7 +33,7 @@ The current v10 file has page 0 with the legacy 84-byte header plus the delta ma
 1. No-op when there is no dirty state.
 2. Delta segment publish when a clean v10 base has pending facts and no visible delta manifest.
 3. Multi-segment delta publish when a visible delta has new pending facts: the new segment contains only the pending facts, and the newly published manifest preserves previous segment descriptors plus the appended segment.
-4. Full rebuild from base-plus-pending or base-plus-delta facts when the delta path is not available or when recompact/repair is required.
+4. Full rebuild from base-plus-pending when the delta path is not available, and copy-on-write recompact from base-plus-delta facts when visible delta maintenance or repair is required.
 
 Every durable path still follows the same discipline:
 
@@ -59,10 +59,12 @@ The v10 header extension should contain:
 | `delta_manifest_slot0_len` / `slot1_len` | Number of bytes in the manifest payload. |
 | `delta_manifest_slot0_checksum` / `slot1_checksum` | Checksum of the manifest payload. |
 | `delta_manifest_slot0_descriptor_checksum` / `slot1_descriptor_checksum` | Checksum of the slot descriptor fields. A corrupt slot is ignored if the alternate slot is valid. |
+| `base_fact_page_start` | First packed fact page of the currently published base. Defaults to page `1` for older v10 extension tails. Copy-on-write recompact publishes a later start page. |
+| `base_layout_checksum` | Checksum over `base_fact_page_start`, so a corrupt base-start pointer rejects reopen instead of silently reading page `1`. |
 
 Publish rule:
 
-1. Write and sync all new fact pages, delta pages, and manifest payload pages.
+1. Write and sync all new fact pages, delta pages, and manifest payload pages. FileBackend append writes update only the in-memory page count; disk page 0 is not modified here.
 2. Fill the inactive manifest slot with generation, page range, length, payload checksum, and descriptor checksum.
 3. Write and sync page 0 as the publish point.
 4. Only after this succeeds, wire readers and retire WAL entries covered by the checkpoint.
@@ -219,14 +221,14 @@ Rules:
 - Build the new base from the current visible view: base fact pages plus delta fact pages in tx order.
 - Preserve full-history rows, including retractions.
 - Build new EAVT, AEVT, AVET, and VAET B+trees.
-- Sync all new pages before publishing page 0.
+- Write the new base fact and index pages after the currently published image, and sync them before publishing page 0.
 - Publish a new base header with no delta manifest, or with a fresh empty manifest.
+- Record the new base fact page start in the v10 header extension.
 - Retire covered delta segments only after the new base header is durable.
-- T9C-A caveat: the existing full-rebuild writer rewrites fact/index pages in
-  place from page 1. It is suitable as an explicit success-path primitive, but
-  it must not be scheduled automatically until T9C-B adds a crash-safe publish
-  design that preserves pages reachable from the old header before the new
-  header is durable.
+- T9C-B result: `recompact_visible_delta()` now writes a copy-on-write base
+  candidate first and changes visibility only when page 0 is published. The
+  older in-place full-rebuild helper remains private fallback/test support and
+  is not the recompact publish path.
 
 This keeps the current full-rebuild implementation as the safety net.
 
@@ -373,7 +375,7 @@ Current T8B result, recorded in `docs/BENCHMARKS.md`: multi-segment append passe
 
 Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is the right default path but needs T9 thresholds for unbounded tiny-segment growth. The 1M base plus 1 fact x 10K case drops from T7C's 1,051.300 ms flush p95 and 18.9 GB file growth to 99.818 ms p95 and 662,257,664 B growth, but that is still above the hot flush target. The batching rows show the dominant pressure is segment count and manifest/file growth rather than delta fact count alone: 10K delta facts in 1K segments have flush p95 36.821 ms, and 10K facts in 100 segments have flush p95 38.347 ms. Current reads stay sub-millisecond, reopen stays below the 250-500 ms gate, corrupt-latest fallback remains true, and as-of/replay remains Q1 read-path work.
 
-Current T9A/T9B/T9C-A policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B implements the pure/private metrics and decision tests. T9C-A adds an explicit private recompact primitive that preserves visible semantics on successful completion, but threshold-triggered/background recompact remains blocked on T9C-B crash-safe publish.
+Current T9A/T9B/T9C policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B implements the pure/private metrics and decision tests. T9C-A adds an explicit private recompact primitive, and T9C-B gives that primitive a copy-on-write publish path. Threshold-triggered/background execution is still not wired into foreground `checkpoint()`; scheduling policy remains a separate caller decision.
 
 ## Implementation Order
 
@@ -394,7 +396,7 @@ Current T9A/T9B/T9C-A policy: keep multi-segment publish as the default delta ch
 15. Document internal/background recompact thresholds for segment count, delta bytes, and long-term file growth. Done in T9A.
 16. Implement private threshold metrics and decision tests. Done in T9B.
 17. Add a private explicit recompact primitive. Done in T9C-A.
-18. Add crash-safe recompact publish before any threshold-triggered internal/background scheduling.
+18. Add crash-safe recompact publish before any threshold-triggered internal/background scheduling. Done in T9C-B with a v10 `base_fact_page_start` extension field and copy-on-write base publish.
 19. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
 
 ## Open Questions
@@ -402,6 +404,6 @@ Current T9A/T9B/T9C-A policy: keep multi-segment publish as the default delta ch
 - Should `CommittedIndexReader` grow a streaming range-scan trait before persistent delta lands, or should the first implementation keep `Vec<FactRef>` to reduce blast radius?
 - Should `export_fact_log()` read through the same base-plus-delta manifest, or should it keep a dedicated fact-log stream path?
 - Is a sync-data mode enough for delta segment publish on all supported platforms, or should v10 use full sync for the first release?
-- What crash-safe publish shape should T9C-B use for recompact without breaking the single-file invariant: in-file journal pages, a base-start header extension, or another copy-on-write marker?
+- Should threshold-triggered recompact be wired to an internal idle/background caller, or stay explicit until Vetch provides a concrete scheduling contract?
 - Should `recompact()` become public later, or stay internal until Vetch has a real scheduling caller?
 - Which query executor path should make as-of receipt reads cheap enough for Vetch agent briefs: tighter index pushdown, a fact-log replay reader, or a prepared current/as-of receipt API?

@@ -216,11 +216,12 @@ impl StorageBackend for FileBackend {
             // Page 0 is the header itself, parse it to update our cached copy
             self.header = FileHeader::from_bytes(data)?;
         } else if page_id >= self.header.page_count {
-            // Update page count if this is a new page (but not page 0)
+            // Keep the current handle able to read appended pages, but do not
+            // publish page 0 here. Higher layers sync data pages first and make
+            // them visible with an explicit header write as the commit point.
             self.header.page_count = page_id
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("page_count overflow for page_id {}", page_id))?;
-            Self::write_header(&mut self.file, &self.header)?;
         }
 
         Ok(())
@@ -272,6 +273,15 @@ impl StorageBackend for FileBackend {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    fn publish_page_count(backend: &mut FileBackend, page_count: u64) {
+        let mut header = FileHeader::new();
+        header.page_count = page_count;
+        let page = build_header_page(header).expect("header page should build");
+        backend
+            .write_page(0, &page)
+            .expect("header publish should write");
+    }
 
     #[test]
     fn test_file_backend_create() {
@@ -332,6 +342,7 @@ mod tests {
             let mut backend = FileBackend::open(&temp_path).unwrap();
             let data = vec![99u8; PAGE_SIZE];
             backend.write_page(1, &data).unwrap();
+            publish_page_count(&mut backend, 2);
             backend.close().unwrap();
         }
 
@@ -340,6 +351,35 @@ mod tests {
             let backend = FileBackend::open(&temp_path).unwrap();
             let read_data = backend.read_page(1).unwrap();
             assert_eq!(read_data[0], 99);
+        }
+    }
+
+    #[test]
+    fn test_file_backend_non_header_write_is_not_published_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp_path = dir.path().join("test_file_backend_unpublished.graph");
+
+        {
+            let mut backend = FileBackend::open(&temp_path).unwrap();
+            backend.write_page(1, &vec![77u8; PAGE_SIZE]).unwrap();
+            assert_eq!(
+                backend.page_count().unwrap(),
+                2,
+                "current handle should read appended pages"
+            );
+        }
+
+        {
+            let backend = FileBackend::open(&temp_path).unwrap();
+            assert_eq!(
+                backend.page_count().unwrap(),
+                1,
+                "page 0 publish is the durable page-count boundary"
+            );
+            assert!(
+                backend.read_page(1).is_err(),
+                "unpublished trailing page must not be visible after reopen"
+            );
         }
     }
 

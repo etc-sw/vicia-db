@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Vetch delta multi-segment manifest publish + ledger identity/export regressions (June 2026), 1001 tests ✅
+**Last Updated**: Vetch T9C-B crash-safe recompact publish + base-start header extension (June 2026), 1111 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1001 ✅ (993 passing, 8 ignored)
-- ✅ 714 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates)
+**Total Tests**: 1111 ✅ (1103 passing, 8 ignored)
+- ✅ 738 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, and T9C-B recompact base-start publish guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -14,7 +14,7 @@
 - ✅ 2 cross-platform compat tests (integration, Phase 8.1)
 - ✅ 6 index tests (integration, Phase 6.1)
 - ✅ 7 performance tests (integration, Phase 6.2/6.4b)
-- ✅ 7 retraction tests (integration, Phase 6.4a)
+- ✅ 8 retraction tests (integration, Phase 6.4a)
 - ✅ 4 edge case tests (integration, Phase 6.4a)
 - ✅ 8 B+tree v6 tests (integration, Phase 6.5)
 - ✅ 10 negation (`not`) tests (integration, Phase 7.1a)
@@ -35,6 +35,11 @@
 - ✅ 4 fact-log export tests (integration, Vetch ledger receipts — public append-only export includes `asserted`, `tx_id`, `tx_count`, valid-time scope, legacy retractions, scoped Ref-edge retractions, checkpoint/reopen)
 - ✅ 17 delta checkpoint integration tests (integration, Vetch delta storage — v10 manifest publish, multi-segment append, base/delta and segment/segment Ref edges, later-segment retraction, deterministic export, corrupt-slot fallback)
 - ✅ 5 delta checkpoint crash recovery tests (integration, Vetch delta storage — unpublished delta ignored, WAL replay, selected corrupt/truncated delta errors, stale WAL skip after header publish)
+- ✅ 1 checkpoint rebuild benchmark test (integration, Vetch delta storage — small pending write benchmark gate)
+- ✅ 1 delta index reader test (integration, Vetch delta storage — non-persistent layered reader gate)
+- ✅ 1 delta index segment test (integration, Vetch delta storage — segment codec gate)
+- ✅ 1 delta manifest recovery test (integration, Vetch delta storage — manifest recovery gate)
+- ✅ 1 header extension gate test (integration, Vetch delta storage — v10 extension module gate)
 - ✅ 5 index corruption tests (integration, Wave 3 #216 — checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)
@@ -736,6 +741,8 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ corrupt older segment referenced by the selected multi-segment manifest errors instead of opening base-only
 - ✅ both invalid manifest slots error instead of silently dropping committed delta writes
 - ✅ full rebuild fallback after a visible delta preserves results and fact-log rows
+- ✅ recompact writes a copy-on-write base, records checksum-protected base fact start, and keeps unpublished candidate pages invisible before page 0 publish
+- ✅ FileBackend non-header page writes do not publish disk page 0; durable page-count changes require an explicit header write
 
 ### Delta Checkpoint Crash Recovery (`tests/delta_checkpoint_crash_recovery_test.rs`) - ✅ 5 tests
 
