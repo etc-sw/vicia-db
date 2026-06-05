@@ -205,6 +205,39 @@ Fixture: `tests/checkpoint_rebuild_benchmark.rs` builds a checkpointed base file
 
 R2 observation: checkpoint cost is strongly tied to total committed graph size. With a one-fact pending append, cost rises from 44.9 ms at 10K committed facts to 405.5 ms at 100K and 4.83 s at 1M. Pending size has a secondary effect, especially at smaller committed sizes, but the measurements do not look pending-proportional. Gate 2 adopted batching guidance as the immediate policy and requires a separate delta/index storage design note before any storage algorithm or file-format change. The first design candidate is append-friendly index delta pages with explicit compaction, not immediate incremental B+tree mutation.
 
+### T6: Delta Checkpoint After Small Pending Writes
+
+Run: 2026-06-05, `cargo test --release --test checkpoint_rebuild_benchmark -- --ignored --nocapture`.
+
+Fixture: same public-API fixture as R2, now updated for the v10 single-segment delta path. It builds a checkpointed base file, copies it, adds pending writes with auto-checkpoint disabled, then measures:
+
+- `delta_flush_ms`: one explicit `checkpoint()` on a clean base with pending facts.
+- `reopen_delta_ms`: reopening the file after the selected delta manifest is published.
+- `recompact_proxy_ms`: one additional pending fact followed by `checkpoint()` while a delta manifest is visible. This is the current public proxy for recompact because the branch does not expose a public `recompact()` API yet.
+
+Pending writes include `Value::Ref` assertions and legacy retractions. The fixture is still an ignored single-run benchmark, not a Criterion distribution.
+
+| Committed facts | Pending facts | Assertions/retractions | Delta flush | Reopen delta | Recompact proxy | Base pages | Delta pages | Recompact pages | Delta WAL bytes | Recompact WAL bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10K | 1 | 1/0 | 9.614 ms | 2.845 ms | 51.744 ms | 970 | 972 | 972 | 126 | 126 |
+| 10K | 10 | 8/2 | 12.252 ms | 3.788 ms | 47.045 ms | 970 | 973 | 973 | 786 | 126 |
+| 10K | 100 | 75/25 | 20.328 ms | 3.096 ms | 43.079 ms | 970 | 980 | 984 | 7,382 | 126 |
+| 10K | 1K | 750/250 | 105.387 ms | 5.592 ms | 74.707 ms | 970 | 1,057 | 1,089 | 73,384 | 126 |
+| 100K | 1 | 1/0 | 56.493 ms | 28.744 ms | 382.917 ms | 9,778 | 9,780 | 9,780 | 126 | 126 |
+| 100K | 10 | 8/2 | 163.232 ms | 28.154 ms | 413.220 ms | 9,778 | 9,781 | 9,781 | 786 | 126 |
+| 100K | 100 | 75/25 | 136.122 ms | 29.136 ms | 422.527 ms | 9,778 | 9,788 | 9,790 | 7,382 | 126 |
+| 100K | 1K | 750/250 | 176.673 ms | 34.197 ms | 453.180 ms | 9,778 | 9,865 | 9,896 | 73,384 | 126 |
+| 1M | 1 | 1/0 | 512.109 ms | 307.388 ms | 6,453.747 ms | 99,412 | 99,414 | 99,414 | 127 | 127 |
+| 1M | 10 | 8/2 | 507.650 ms | 302.631 ms | 7,072.497 ms | 99,412 | 99,415 | 99,416 | 796 | 127 |
+| 1M | 100 | 75/25 | 541.249 ms | 284.025 ms | 7,005.091 ms | 99,412 | 99,422 | 99,425 | 7,482 | 127 |
+| 1M | 1K | 750/250 | 634.182 ms | 280.315 ms | 6,713.898 ms | 99,412 | 99,501 | 99,528 | 74,384 | 127 |
+
+T6 observation: the delta path is a large improvement over R2 full rebuild for the critical 1M base plus one pending fact case: 4,829.691 ms -> 512.109 ms. Page growth is also bounded for small deltas, which indicates that the checkpoint is publishing appended delta pages rather than rebuilding all base index pages.
+
+T6 does not fully satisfy the stricter Vetch target yet. Delta flush and delta reopen still scale with committed file size: 10K/1 pending is 9.614 ms, 100K/1 pending is 56.493 ms, and 1M/1 pending is 512.109 ms. The likely cause is visible in the storage path: delta publish and reopen both compute a checksum over all data pages when a selected delta is present. Recompact proxy remains O(total facts), which is acceptable only if scheduled outside the interactive agent rhythm.
+
+Next gate: make delta publish and delta reopen validate only the newly appended delta segment/manifest plus stable base metadata, while preserving full-file checksum validation for full rebuild, repair, and explicit recompact.
+
 ---
 
 ## Concurrency (In-Memory)

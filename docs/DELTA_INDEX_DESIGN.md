@@ -322,6 +322,8 @@ Acceptance:
 - Delta flush should scale primarily with pending fact count and segment metadata size.
 - Recompact may remain O(total facts), because it is explicitly scheduled outside Vetch's interactive work rhythm.
 
+Current T6 result, recorded in `docs/BENCHMARKS.md`: v10 single-segment delta reduces the 1M base plus one pending fact checkpoint from the R2 full-rebuild baseline of 4,829.691 ms to 512.109 ms. This is a meaningful improvement, but not the final Vetch target. Delta flush and reopen still scale with committed file size because both paths validate a selected delta by checksumming all data pages. The next storage gate is to make small delta publish/reopen validate only new delta segment/manifest bytes plus stable base metadata, while keeping full-file validation for repair/full rebuild/recompact.
+
 ## Implementation Order
 
 1. Add `LayeredIndexReader` and in-memory delta entry fixtures.
