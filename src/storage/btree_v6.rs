@@ -529,7 +529,7 @@ where
 
 // ─── range_scan ───────────────────────────────────────────────────────────────
 
-/// Scan the B+tree for all `FactRef`s whose key is in `[start, end]`.
+/// Scan the B+tree for all `FactRef`s whose key is in `[start, end)`.
 ///
 /// `end: None` means unbounded (scan to last leaf).
 // Called by OnDiskIndexReader::range_scan_* (via trait object dispatch).
@@ -541,6 +541,27 @@ pub fn range_scan<K>(
     backend: &dyn StorageBackend,
     cache: &PageCache,
 ) -> Result<Vec<FactRef>>
+where
+    K: Serialize + for<'de> Deserialize<'de> + Ord,
+{
+    Ok(
+        range_scan_entries(root_page_id, start, end, backend, cache)?
+            .into_iter()
+            .map(|(_, fact_ref)| fact_ref)
+            .collect(),
+    )
+}
+
+/// Scan the B+tree for all keyed entries whose key is in `[start, end)`.
+///
+/// `end: None` means unbounded (scan to last leaf).
+pub(crate) fn range_scan_entries<K>(
+    root_page_id: u64,
+    start: &K,
+    end: Option<&K>,
+    backend: &dyn StorageBackend,
+    cache: &PageCache,
+) -> Result<Vec<(K, FactRef)>>
 where
     K: Serialize + for<'de> Deserialize<'de> + Ord,
 {
@@ -569,7 +590,7 @@ where
             {
                 break 'outer;
             }
-            result.push(fr);
+            result.push((k, fr));
         }
 
         if next_leaf == 0 {
@@ -713,6 +734,78 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         }
         let adapter = MutexStorageBackend(Arc::clone(&self.backend));
         range_scan(self.vaet_root, start, end, &adapter, &self.cache)
+    }
+}
+
+impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
+    for OnDiskIndexReader<B>
+{
+    fn range_scan_eavt_entries(
+        &self,
+        start: &crate::storage::index::EavtKey,
+        end: Option<&crate::storage::index::EavtKey>,
+    ) -> anyhow::Result<
+        Vec<(
+            crate::storage::index::EavtKey,
+            crate::storage::index::FactRef,
+        )>,
+    > {
+        if self.eavt_root == 0 {
+            return Ok(Vec::new());
+        }
+        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
+        range_scan_entries(self.eavt_root, start, end, &adapter, &self.cache)
+    }
+
+    fn range_scan_aevt_entries(
+        &self,
+        start: &crate::storage::index::AevtKey,
+        end: Option<&crate::storage::index::AevtKey>,
+    ) -> anyhow::Result<
+        Vec<(
+            crate::storage::index::AevtKey,
+            crate::storage::index::FactRef,
+        )>,
+    > {
+        if self.aevt_root == 0 {
+            return Ok(Vec::new());
+        }
+        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
+        range_scan_entries(self.aevt_root, start, end, &adapter, &self.cache)
+    }
+
+    fn range_scan_avet_entries(
+        &self,
+        start: &crate::storage::index::AvetKey,
+        end: Option<&crate::storage::index::AvetKey>,
+    ) -> anyhow::Result<
+        Vec<(
+            crate::storage::index::AvetKey,
+            crate::storage::index::FactRef,
+        )>,
+    > {
+        if self.avet_root == 0 {
+            return Ok(Vec::new());
+        }
+        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
+        range_scan_entries(self.avet_root, start, end, &adapter, &self.cache)
+    }
+
+    fn range_scan_vaet_entries(
+        &self,
+        start: &crate::storage::index::VaetKey,
+        end: Option<&crate::storage::index::VaetKey>,
+    ) -> anyhow::Result<
+        Vec<(
+            crate::storage::index::VaetKey,
+            crate::storage::index::FactRef,
+        )>,
+    > {
+        if self.vaet_root == 0 {
+            return Ok(Vec::new());
+        }
+        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
+        range_scan_entries(self.vaet_root, start, end, &adapter, &self.cache)
     }
 }
 
