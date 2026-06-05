@@ -2,7 +2,7 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: living design and test specification. T0-T8B guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, and T8B confirms the mini accumulation gate.
+Status: living design and test specification. T0-T8C guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, and T8C routes long-tail segment growth to T9 thresholds.
 
 Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution plan and gate sequence.
 
@@ -352,6 +352,8 @@ Current T7C result, recorded in `docs/BENCHMARKS.md`: single-segment replacement
 
 Current T8B result, recorded in `docs/BENCHMARKS.md`: multi-segment append passes the mini accumulation gate. With a 1M base and 1 fact per checkpoint, 1K accumulated delta facts have flush p95 11.679 ms, max 15.874 ms, reopen p95 6.290 ms, file growth 12,234,752 B, segment count 1,000, and corrupt-latest fallback remains true. With 10 facts x 100 checkpoints, flush p95 is 6.882 ms, reopen p95 is 2.644 ms, file growth is 1,228,800 B, segment count is 100, and fallback remains true. Immediate current-query reads remain sub-millisecond. As-of/replay queries still take about 1.45 s p95 and remain a separate Q1 read-path lane.
 
+Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is the right default path but needs T9 thresholds for unbounded tiny-segment growth. The 1M base plus 1 fact x 10K case drops from T7C's 1,051.300 ms flush p95 and 18.9 GB file growth to 99.818 ms p95 and 662,257,664 B growth, but that is still above the hot flush target. The batching rows show the dominant pressure is segment count and manifest/file growth rather than delta fact count alone: 10K delta facts in 1K segments have flush p95 36.821 ms, and 10K facts in 100 segments have flush p95 38.347 ms. Current reads stay sub-millisecond, reopen stays below the 250-500 ms gate, corrupt-latest fallback remains true, and as-of/replay remains Q1 read-path work.
+
 ## Implementation Order
 
 1. Add `LayeredIndexReader` and in-memory delta entry fixtures.
@@ -367,8 +369,8 @@ Current T8B result, recorded in `docs/BENCHMARKS.md`: multi-segment append passe
 11. Use double-buffered manifest slots as the publish boundary for replacement single-segment deltas. Done in T7B; retained as fallback evidence for T8A.
 12. Re-run T6/T7 benchmark gates and update `docs/BENCHMARKS.md`.
 13. Implement multi-segment manifest publish so small checkpoints append one new segment instead of rewriting all accumulated delta facts. Done in T8A.
-14. Run the T8B mini benchmark. Done; proceed to the full T8C accumulation matrix.
-15. Add internal/background recompact thresholds for segment count, delta bytes, and long-term file growth if T8B/T8C show segment growth pressure.
+14. Run the T8B mini benchmark and T8C full accumulation matrix. Done; proceed to T9 thresholds.
+15. Add internal/background recompact thresholds for segment count, delta bytes, and long-term file growth. Required by T8C's 10K tiny-segment result.
 16. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
 
 ## Open Questions

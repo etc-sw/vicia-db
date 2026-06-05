@@ -331,6 +331,30 @@ The remaining issue is unchanged from T7C: as-of/replay receipt reads still take
 
 T8B verdict: proceed to T8C full accumulation matrix. Do not add a manifest-cost fix or recompact threshold before T8C; keep T9 as the follow-up only if the full matrix shows long-term segment/file growth pressure.
 
+### T8C: Multi-Segment Full Accumulation Matrix
+
+Run: 2026-06-05, `cargo bench --bench delta_accumulation_benchmark`.
+
+Fixture: same as T8B, now running the full accumulated receipt matrix. The benchmark builds a checkpointed 1M-fact base, copies it per scenario, disables auto-checkpoint, appends receipt-like `Value::Ref` facts, explicitly checkpoints after each receipt batch, samples reopen/current/as-of query latency at up to 32 probe points, counts visible delta segments, and verifies corrupt-latest fallback for every scenario.
+
+Base file: 407,179,264 bytes / 99,409 pages.
+
+| Facts/checkpoint | Checkpoints | Delta facts | Probes | Flush p50 | Flush p95 | Flush max | Reopen p50 | Reopen p95 | Reopen max | Current query p50 | Current query p95 | Current query max | As-of query p50 | As-of query p95 | As-of query max | File growth | Page growth | Actual delta facts | Segment count | Corrupt fallback |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 10 | 10 | 10 | 3.636 ms | 5.397 ms | 5.397 ms | 0.086 ms | 0.130 ms | 0.130 ms | 0.055 ms | 0.070 ms | 0.070 ms | 1,404.633 ms | 1,486.731 ms | 1,486.731 ms | 81,920 B | 20 | 10 | 10 | true |
+| 1 | 100 | 100 | 32 | 3.216 ms | 3.915 ms | 4.681 ms | 0.348 ms | 0.694 ms | 0.701 ms | 0.055 ms | 0.076 ms | 0.084 ms | 1,416.453 ms | 1,500.385 ms | 1,530.367 ms | 819,200 B | 200 | 100 | 100 | true |
+| 1 | 1K | 1K | 32 | 7.615 ms | 12.318 ms | 46.607 ms | 3.312 ms | 6.589 ms | 8.203 ms | 0.058 ms | 0.071 ms | 0.082 ms | 1,448.560 ms | 1,784.936 ms | 1,813.797 ms | 12,234,752 B | 2,987 | 1,000 | 1,000 | true |
+| 1 | 10K | 10K | 32 | 52.916 ms | 99.818 ms | 133.904 ms | 32.171 ms | 67.537 ms | 73.892 ms | 0.074 ms | 0.121 ms | 0.123 ms | 1,436.584 ms | 1,758.060 ms | 1,954.915 ms | 662,257,664 B | 161,684 | 10,000 | 10,000 | true |
+| 10 | 100 | 1K | 32 | 5.669 ms | 7.139 ms | 8.454 ms | 1.321 ms | 2.759 ms | 2.831 ms | 0.063 ms | 0.102 ms | 0.111 ms | 1,547.368 ms | 1,611.668 ms | 1,733.350 ms | 1,228,800 B | 300 | 1,000 | 100 | true |
+| 10 | 1K | 10K | 32 | 20.162 ms | 36.821 ms | 62.489 ms | 13.439 ms | 27.639 ms | 27.731 ms | 0.069 ms | 0.125 ms | 0.140 ms | 1,569.639 ms | 1,666.077 ms | 1,684.640 ms | 16,330,752 B | 3,987 | 10,000 | 1,000 | true |
+| 100 | 100 | 10K | 32 | 25.199 ms | 38.347 ms | 39.371 ms | 10.947 ms | 24.001 ms | 24.016 ms | 0.082 ms | 0.129 ms | 0.179 ms | 1,596.430 ms | 1,668.256 ms | 1,713.440 ms | 4,505,600 B | 1,100 | 10,000 | 100 | true |
+
+T8C observation: multi-segment append is a decisive improvement over T7C single-segment replacement, but it is not a complete long-term policy by itself. The 1x10K scenario improves from T7C's 1,051.300 ms flush p95 and 18.9 GB file growth to 99.818 ms p95 and 662.3 MB growth, with corrupt fallback still true. That is much better, but it still shows segment-count/manifest accumulation entering the hot path once the database reaches 10K tiny segments.
+
+The batching rows separate fact count from segment count. Both 10x1K and 100x100 contain 10K delta facts, but their segment counts are 1K and 100, and their flush p95 stays at 36.821 ms and 38.347 ms. Immediate current-query reads remain sub-millisecond across the matrix. Reopen remains well under the 250-500 ms gate even at 10K segments, with p95 67.537 ms. As-of/replay receipt reads remain about 1.5-1.8 s p95 and still belong to the separate Q1 read-path lane.
+
+T8C verdict: keep multi-segment publish as the default delta checkpoint path for now, but add T9 segment/file-growth thresholds before treating this as production-ready for unbounded per-receipt checkpoint cadence. The next storage slice should be T9A threshold and maintenance policy: bound segment count and manifest/file growth through idle/background recompact, while keeping foreground Vetch work on pending-sized checkpoints. Do not add a broad storage engine, sidecar index, or query API change for this result.
+
 ---
 
 ## Concurrency (In-Memory)
