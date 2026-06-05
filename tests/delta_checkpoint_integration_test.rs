@@ -7,6 +7,18 @@ const PAGE_COUNT_OFFSET: usize = 8;
 const EAVT_ROOT_OFFSET: usize = 32;
 const INDEX_CHECKSUM_OFFSET: usize = 64;
 const HEADER_CHECKSUM_OFFSET: usize = 80;
+const HEADER_EXTENSION_OFFSET: usize = 84;
+const HEADER_EXTENSION_PREFIX_LEN: usize = 12;
+const HEADER_MANIFEST_SLOT_LEN: usize = 40;
+const HEADER_MANIFEST_SLOT_GENERATION_OFFSET: usize = 0;
+const HEADER_MANIFEST_SLOT_PAGE_START_OFFSET: usize = 8;
+const HEADER_MANIFEST_SLOT_CHECKSUM_OFFSET: usize = 36;
+
+#[derive(Clone, Copy)]
+enum ManifestSlot {
+    Primary,
+    Secondary,
+}
 
 fn rows(result: QueryResult) -> Vec<Vec<Value>> {
     match result {
@@ -35,6 +47,20 @@ fn corrupt_first_delta_segment(path: &std::path::Path) {
         .windows(b"MGDSG001".len())
         .position(|window| window == b"MGDSG001")
         .expect("delta segment payload should exist");
+    bytes[segment_offset] ^= 0x01;
+    std::fs::write(path, bytes).expect("database file should write");
+}
+
+fn corrupt_last_delta_segment(path: &std::path::Path) {
+    let mut bytes = std::fs::read(path).expect("database file should read");
+    let marker = b"MGDSG001";
+    let mut segment_offset = None;
+    for (offset, window) in bytes.windows(marker.len()).enumerate() {
+        if window == marker {
+            segment_offset = Some(offset);
+        }
+    }
+    let segment_offset = segment_offset.expect("delta segment payload should exist");
     bytes[segment_offset] ^= 0x01;
     std::fs::write(path, bytes).expect("database file should write");
 }
@@ -91,6 +117,63 @@ fn rewrite_page0(path: &Path, mut page0: Vec<u8>) {
         .expect("database file should include page 0")
         .copy_from_slice(&page0);
     std::fs::write(path, bytes).expect("database file should write");
+}
+
+fn slot_offset(slot: ManifestSlot) -> usize {
+    let slot_index = match slot {
+        ManifestSlot::Primary => 0,
+        ManifestSlot::Secondary => 1,
+    };
+    HEADER_EXTENSION_OFFSET + HEADER_EXTENSION_PREFIX_LEN + (slot_index * HEADER_MANIFEST_SLOT_LEN)
+}
+
+fn read_slot_generation(page0: &[u8], slot: ManifestSlot) -> u64 {
+    read_u64_le(
+        page0,
+        slot_offset(slot) + HEADER_MANIFEST_SLOT_GENERATION_OFFSET,
+    )
+}
+
+fn read_slot_manifest_page_start(page0: &[u8], slot: ManifestSlot) -> u64 {
+    read_u64_le(
+        page0,
+        slot_offset(slot) + HEADER_MANIFEST_SLOT_PAGE_START_OFFSET,
+    )
+}
+
+fn newest_manifest_slot(page0: &[u8]) -> ManifestSlot {
+    let primary_generation = read_slot_generation(page0, ManifestSlot::Primary);
+    let secondary_generation = read_slot_generation(page0, ManifestSlot::Secondary);
+    assert!(
+        primary_generation > 0 && secondary_generation > 0,
+        "both manifest slots should be populated"
+    );
+    if primary_generation >= secondary_generation {
+        ManifestSlot::Primary
+    } else {
+        ManifestSlot::Secondary
+    }
+}
+
+fn corrupt_slot_checksum(path: &Path, slot: ManifestSlot) {
+    let mut page0 = read_page0(path);
+    page0[slot_offset(slot) + HEADER_MANIFEST_SLOT_CHECKSUM_OFFSET] ^= 0x55;
+    rewrite_page0(path, page0);
+}
+
+fn corrupt_manifest_payload(path: &Path, slot: ManifestSlot) {
+    let page0 = read_page0(path);
+    let manifest_page_start = read_slot_manifest_page_start(&page0, slot);
+    let manifest_offset = usize::try_from(manifest_page_start)
+        .expect("manifest page start should fit usize")
+        * PAGE_SIZE;
+    let mut bytes = std::fs::read(path).expect("database file should read");
+    bytes[manifest_offset] ^= 0x55;
+    std::fs::write(path, bytes).expect("database file should write");
+}
+
+fn query_count(db: &Minigraf, query: &str) -> usize {
+    query_rows(db, query).len()
 }
 
 #[test]
@@ -196,6 +279,196 @@ fn delta_manifest_base_root_mismatch_rejected_on_reopen() {
     assert!(
         message.contains("base roots"),
         "error should mention base roots"
+    );
+}
+
+#[test]
+fn second_delta_checkpoint_uses_inactive_slot_and_newest_survives_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("slot-rotation.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+        db.execute(r#"(transact [[:delta1 :name "Delta 1"]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+
+        let first_page0 = read_page0(&path);
+        assert!(
+            read_slot_generation(&first_page0, ManifestSlot::Primary) > 0,
+            "first delta publish should populate primary slot"
+        );
+        assert_eq!(
+            read_slot_generation(&first_page0, ManifestSlot::Secondary),
+            0,
+            "first delta publish should leave secondary slot empty"
+        );
+
+        db.execute(r#"(transact [[:delta2 :name "Delta 2"]])"#)
+            .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    let second_page0 = read_page0(&path);
+    let primary_generation = read_slot_generation(&second_page0, ManifestSlot::Primary);
+    let secondary_generation = read_slot_generation(&second_page0, ManifestSlot::Secondary);
+    assert!(
+        primary_generation > 0 && secondary_generation > primary_generation,
+        "second delta publish should rotate to the inactive secondary slot"
+    );
+
+    let db = Minigraf::open(&path).expect("database should reopen");
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta1 :name ?name]])"#),
+        1,
+        "first delta fact must remain visible after second delta"
+    );
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta2 :name ?name]])"#),
+        1,
+        "newest delta fact must be visible after reopen"
+    );
+}
+
+#[test]
+fn corrupt_newer_header_slot_falls_back_to_previous_manifest() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("corrupt-newer-slot.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+        db.execute(r#"(transact [[:delta1 :name "Delta 1"]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+        db.execute(r#"(transact [[:delta2 :name "Delta 2"]])"#)
+            .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    let newest_slot = newest_manifest_slot(&read_page0(&path));
+    corrupt_slot_checksum(&path, newest_slot);
+
+    let db = Minigraf::open(&path).expect("database should reopen through older slot");
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta1 :name ?name]])"#),
+        1,
+        "older manifest should preserve first delta"
+    );
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta2 :name ?name]])"#),
+        0,
+        "corrupt newer slot should not expose second delta"
+    );
+}
+
+#[test]
+fn corrupt_newer_manifest_payload_falls_back_to_previous_manifest() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("corrupt-newer-manifest.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+        db.execute(r#"(transact [[:delta1 :name "Delta 1"]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+        db.execute(r#"(transact [[:delta2 :name "Delta 2"]])"#)
+            .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    let newest_slot = newest_manifest_slot(&read_page0(&path));
+    corrupt_manifest_payload(&path, newest_slot);
+
+    let db = Minigraf::open(&path).expect("database should reopen through older manifest payload");
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta1 :name ?name]])"#),
+        1,
+        "older manifest should preserve first delta"
+    );
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta2 :name ?name]])"#),
+        0,
+        "corrupt newer manifest should not expose second delta"
+    );
+}
+
+#[test]
+fn corrupt_newer_delta_segment_falls_back_to_previous_manifest() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("corrupt-newer-segment.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+        db.execute(r#"(transact [[:delta1 :name "Delta 1"]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+        db.execute(r#"(transact [[:delta2 :name "Delta 2"]])"#)
+            .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    corrupt_last_delta_segment(&path);
+
+    let db = Minigraf::open(&path).expect("database should reopen through older delta segment");
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta1 :name ?name]])"#),
+        1,
+        "older segment should preserve first delta"
+    );
+    assert_eq!(
+        query_count(&db, r#"(query [:find ?name :where [:delta2 :name ?name]])"#),
+        0,
+        "corrupt newer segment should not expose second delta"
+    );
+}
+
+#[test]
+fn both_manifest_slots_invalid_with_committed_delta_errors() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let path = dir.path().join("both-slots-invalid.graph");
+
+    {
+        let db = Minigraf::open(&path).expect("database should open");
+        db.execute(r#"(transact [[:base :kind :root]])"#)
+            .expect("base transact should execute");
+        db.checkpoint().expect("base checkpoint should succeed");
+        db.execute(r#"(transact [[:delta1 :name "Delta 1"]])"#)
+            .expect("first delta transact should execute");
+        db.checkpoint()
+            .expect("first delta checkpoint should succeed");
+        db.execute(r#"(transact [[:delta2 :name "Delta 2"]])"#)
+            .expect("second delta transact should execute");
+        db.checkpoint()
+            .expect("second delta checkpoint should succeed");
+    }
+
+    corrupt_slot_checksum(&path, ManifestSlot::Primary);
+    corrupt_slot_checksum(&path, ManifestSlot::Secondary);
+
+    let reopened = Minigraf::open(&path);
+    assert!(
+        reopened.is_err(),
+        "both invalid manifest slots must not silently open base-only"
     );
 }
 

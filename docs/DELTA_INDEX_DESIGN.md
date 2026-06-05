@@ -30,7 +30,8 @@ The current v10 file has page 0 with the legacy 84-byte header plus the delta ma
 
 1. No-op when there is no dirty state.
 2. Single-segment delta publish when a clean v10 base has pending facts and no visible delta manifest.
-3. Full rebuild from either base-plus-pending facts or the current visible base-plus-delta view.
+3. Single-segment replacement delta publish when a visible delta has new pending facts: the new segment contains the previous selected delta facts plus the new pending facts, and the previous selected slot remains the fallback root.
+4. Full rebuild from base-plus-pending facts when the delta path is not available.
 
 Every durable path still follows the same discipline:
 
@@ -50,29 +51,29 @@ The v10 header extension should contain:
 
 | Field | Purpose |
 | --- | --- |
-| `delta_manifest_primary_slot` | Selects slot 0 or slot 1 as the visible manifest pointer. |
-| `delta_manifest_slot0_page` / `slot1_page` | Root page for each manifest slot. `0` means no delta manifest. |
+| `delta_manifest_slot0_generation` / `slot1_generation` | Monotonic manifest generation. Reopen chooses the highest valid generation. `0` means the slot is empty. |
+| `delta_manifest_slot0_page` / `slot1_page` | Manifest payload start page for each slot. |
+| `delta_manifest_slot0_page_count` / `slot1_page_count` | Number of pages occupied by the manifest payload. |
 | `delta_manifest_slot0_len` / `slot1_len` | Number of bytes in the manifest payload. |
-| `delta_manifest_slot0_high_tx_count` / `slot1_high_tx_count` | Highest `tx_count` covered by that manifest. Used to choose the newer valid slot after crash. |
 | `delta_manifest_slot0_checksum` / `slot1_checksum` | Checksum of the manifest payload. |
-| `delta_manifest_header_checksum` | Checksum of the v10 extension fields with this checksum field zeroed. |
+| `delta_manifest_slot0_descriptor_checksum` / `slot1_descriptor_checksum` | Checksum of the slot descriptor fields. A corrupt slot is ignored if the alternate slot is valid. |
 
 Publish rule:
 
 1. Write and sync all new fact pages, delta pages, and manifest payload pages.
-2. Fill the inactive manifest slot with page, length, high tx, and checksum.
-3. Write and sync the header with the inactive slot still secondary if using a two-phase publish.
-4. Flip `delta_manifest_primary_slot`.
-5. Write and sync page 0.
-6. Only after this succeeds, wire readers and retire WAL entries covered by the manifest high tx.
+2. Fill the inactive manifest slot with generation, page range, length, payload checksum, and descriptor checksum.
+3. Write and sync page 0 as the publish point.
+4. Only after this succeeds, wire readers and retire WAL entries covered by the checkpoint.
 
 Recovery rule:
 
-- If the primary manifest slot has a valid header checksum, valid manifest checksum, and a `high_tx_count` at least as new as the secondary, use it.
-- If the primary slot is corrupt or points outside `page_count`, try the secondary.
-- If both slots are invalid and the WAL still covers txs newer than the base checkpoint, replay the WAL and force a full rebuild/repair.
-- If both slots are invalid and the WAL has already been retired past the base checkpoint, report file corruption. Do not silently drop delta-covered writes.
-- Never use a manifest whose segment list references incomplete or out-of-bounds pages.
+- Evaluate both header slots independently.
+- For each descriptor-valid slot, verify the manifest payload checksum and decode the manifest.
+- For each manifest-valid slot, verify every referenced delta segment before making it visible.
+- Use the highest generation that passes all of those checks.
+- If a newer slot, manifest payload, or delta segment is corrupt but an older slot passes all checks, fall back to the older slot.
+- If no usable slot remains for a committed delta state, report file corruption. Do not silently open base-only.
+- Ignore corrupt trailing delta/manifest pages that were never published by page 0.
 
 This borrows redb's root-publish discipline without importing redb's allocator or MVCC page model.
 
@@ -304,7 +305,7 @@ T5B adds the recovery-policy surface:
 - clean save returns `CheckpointOutcome::Noop`
 - first base checkpoint returns `CheckpointOutcome::FullRebuild`
 - small append on a clean base returns `CheckpointOutcome::DeltaSegment`
-- pending facts on a visible delta return `CheckpointOutcome::FullRebuildFromVisibleDelta`
+- pending facts on a visible delta return `CheckpointOutcome::DeltaSegment` by publishing a replacement delta through the inactive manifest slot
 - `checkpoint()` treats `Noop` as insufficient evidence for deleting a non-empty WAL
 
 ### T6: Benchmark Gate
@@ -314,15 +315,17 @@ Extend `tests/checkpoint_rebuild_benchmark.rs` or add an ignored delta benchmark
 - committed base: 10K, 100K, 1M
 - pending facts: 1, 10, 100, 1K
 - include `Value::Ref` and retractions
-- measure delta flush wall time, recompact wall time, reopen recovery time, and final file page count
+- measure first delta flush wall time, reopen recovery time, second rotated delta flush wall time, and final file page count
 
 Acceptance:
 
 - 1 pending fact on a 1M base must not perform an O(1M) committed-index rebuild during delta flush.
 - Delta flush should scale primarily with pending fact count and segment metadata size.
-- Recompact may remain O(total facts), because it is explicitly scheduled outside Vetch's interactive work rhythm.
+- Full rebuild/recompact may remain O(total facts), because it is explicitly scheduled outside Vetch's interactive work rhythm.
 
 Current T7A result, recorded in `docs/BENCHMARKS.md`: v10 single-segment delta plus scoped checksum validation reduces the 1M base plus one pending fact checkpoint from the R2 full-rebuild baseline of 4,829.691 ms and the T6 delta baseline of 512.109 ms to 5.266 ms. Reopen of that selected delta view drops from 307.388 ms to 0.114 ms. Delta publish/reopen now validates base identity plus new delta segment/manifest bytes instead of checksumming all committed pages. Full rebuild, repair, and recompact continue to use full-file checksums.
+
+Current T7B result, recorded in `docs/BENCHMARKS.md`: v10 now uses both manifest slots as the real publish boundary. A second small write over a visible delta publishes a replacement single-segment delta through the inactive slot instead of forcing an interactive full rebuild. The 1M base plus one pending fact gate remains pending-sized at 3.336 ms for first delta flush and 0.088 ms for reopen; the second rotated delta flush is 2.852 ms.
 
 ## Implementation Order
 
@@ -333,9 +336,11 @@ Current T7A result, recorded in `docs/BENCHMARKS.md`: v10 single-segment delta p
 5. Add manifest structs and recovery selection logic in memory.
 6. Add tests T3.
 7. Implement v10 header extension read/write.
-8. Wire delta flush into `checkpoint()` with full rebuild fallback.
+8. Wire first delta flush into `checkpoint()` with full rebuild fallback.
 9. Add T4/T5 integration and crash tests.
-10. Re-run T6 benchmark gate and update `docs/BENCHMARKS.md`.
+10. Scope selected-delta checksum validation to base identity plus delta bytes.
+11. Use double-buffered manifest slots as the publish boundary for replacement single-segment deltas.
+12. Re-run T6/T7 benchmark gates and update `docs/BENCHMARKS.md`.
 
 ## Open Questions
 

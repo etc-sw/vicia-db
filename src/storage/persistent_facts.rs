@@ -13,12 +13,13 @@ use crate::storage::cache::PageCache;
 use crate::storage::delta_index::{DeltaIndexEntries, KeyedIndexReader, LayeredIndexReader};
 use crate::storage::delta_manifest::{
     DeltaBaseIdentity, DeltaManifest, DeltaManifestSegment, PersistedManifestRecoveryReason,
-    PersistedManifestSelection, load_persisted_manifest_selection, write_manifest_pages,
+    PersistedManifestSelection, read_manifest_from_descriptor, write_manifest_pages,
 };
 use crate::storage::delta_segment::{DeltaSegment, write_segment_pages};
 use crate::storage::header_extension::{
-    HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName, HeaderManifestSlotSelection,
-    build_header_page, build_header_page_with_extension, select_header_manifest_slot_from_page0,
+    HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName, HeaderManifestSlotRecoveryReason,
+    HeaderManifestSlotSelection, build_header_page, build_header_page_with_extension,
+    select_header_manifest_slot_from_page0,
 };
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey, encode_value};
 use crate::storage::packed_pages::pack_facts;
@@ -333,6 +334,115 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         Ok(())
     }
 
+    fn load_usable_delta_selection(
+        backend: &B,
+        header: &FileHeader,
+        page0: &[u8],
+    ) -> Result<(
+        HeaderManifestSlotSelection,
+        PersistedManifestSelection,
+        Vec<DeltaSegment>,
+    )> {
+        let Some(extension) = HeaderExtension::read_from_page0(header.version, page0)? else {
+            return Ok((
+                HeaderManifestSlotSelection::NoDeltaManifest,
+                PersistedManifestSelection::NoDeltaManifest,
+                Vec::new(),
+            ));
+        };
+
+        let primary = extension.primary();
+        let secondary = extension.secondary();
+        let has_invalid_slot = (!primary.is_empty() && !primary.is_selectable())
+            || (!secondary.is_empty() && !secondary.is_selectable());
+
+        let mut candidates = Vec::new();
+        if primary.is_selectable() {
+            candidates.push((HeaderManifestSlotName::Primary, primary));
+        }
+        if secondary.is_selectable() {
+            candidates.push((HeaderManifestSlotName::Secondary, secondary));
+        }
+
+        if candidates.is_empty() {
+            if has_invalid_slot {
+                return Ok((
+                    HeaderManifestSlotSelection::RecoveryRequired {
+                        reason: HeaderManifestSlotRecoveryReason::CorruptManifestSlot,
+                    },
+                    PersistedManifestSelection::RecoveryRequired {
+                        reason: PersistedManifestRecoveryReason::CorruptManifestSlot,
+                    },
+                    Vec::new(),
+                ));
+            }
+            return Ok((
+                HeaderManifestSlotSelection::NoDeltaManifest,
+                PersistedManifestSelection::NoDeltaManifest,
+                Vec::new(),
+            ));
+        }
+
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1.generation()));
+        for (slot, descriptor) in candidates {
+            let Ok(manifest) = read_manifest_from_descriptor(backend, header, descriptor) else {
+                continue;
+            };
+            let Ok(delta_segments) =
+                Self::load_delta_segments_from_manifest(backend, header, &manifest)
+            else {
+                continue;
+            };
+            return Ok((
+                HeaderManifestSlotSelection::Use { slot, descriptor },
+                PersistedManifestSelection::Use { slot, manifest },
+                delta_segments,
+            ));
+        }
+
+        Ok((
+            HeaderManifestSlotSelection::RecoveryRequired {
+                reason: HeaderManifestSlotRecoveryReason::CorruptManifestSlot,
+            },
+            PersistedManifestSelection::RecoveryRequired {
+                reason: PersistedManifestRecoveryReason::NoValidManifest,
+            },
+            Vec::new(),
+        ))
+    }
+
+    fn build_next_manifest_extension(
+        header: &FileHeader,
+        page0: &[u8],
+        current_selection: HeaderManifestSlotSelection,
+        descriptor: HeaderManifestSlot,
+    ) -> Result<(HeaderExtension, HeaderManifestSlotName)> {
+        let extension = HeaderExtension::read_from_page0(header.version, page0)?
+            .unwrap_or_else(HeaderExtension::empty);
+
+        match current_selection {
+            HeaderManifestSlotSelection::Use {
+                slot: HeaderManifestSlotName::Primary,
+                ..
+            } => Ok((
+                HeaderExtension::new(extension.primary(), descriptor),
+                HeaderManifestSlotName::Secondary,
+            )),
+            HeaderManifestSlotSelection::Use {
+                slot: HeaderManifestSlotName::Secondary,
+                ..
+            } => Ok((
+                HeaderExtension::new(descriptor, extension.secondary()),
+                HeaderManifestSlotName::Primary,
+            )),
+            HeaderManifestSlotSelection::NoDeltaManifest
+            | HeaderManifestSlotSelection::RecoveryRequired { .. } => Ok((
+                HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
+                HeaderManifestSlotName::Primary,
+            )),
+        }
+    }
+
     fn load_delta_segments_from_manifest(
         backend: &B,
         header: &FileHeader,
@@ -509,15 +619,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
         }
 
-        self.header_manifest_selection =
-            select_header_manifest_slot_from_page0(header.version, &raw_header_bytes)?;
-        let delta_manifest_selection = {
+        let (header_manifest_selection, delta_manifest_selection, selected_delta_segments) = {
             let backend = self
                 .backend
                 .lock()
                 .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-            load_persisted_manifest_selection(&*backend, &header, &raw_header_bytes)?
+            Self::load_usable_delta_selection(&*backend, &header, &raw_header_bytes)?
         };
+        self.header_manifest_selection = header_manifest_selection;
         if let PersistedManifestSelection::RecoveryRequired { reason } = delta_manifest_selection {
             let reason = match reason {
                 PersistedManifestRecoveryReason::CorruptManifestSlot => "corrupt manifest slot",
@@ -755,16 +864,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
 
             if header.eavt_root_page != 0 {
-                let delta_segments = if let Some(manifest) = selected_delta_manifest.as_ref() {
-                    let backend = self
-                        .backend
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-                    Self::load_delta_segments_from_manifest(&*backend, &header, manifest)?
-                } else {
-                    Vec::new()
-                };
-                self.wire_committed_readers(&header, delta_segments)?;
+                self.wire_committed_readers(&header, selected_delta_segments)?;
             }
         }
         // else: empty DB — indexes are empty by default, nothing to do.
@@ -1105,22 +1205,22 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         if pending_facts.is_empty() {
             return Ok(None);
         }
-        if !matches!(
-            self.delta_manifest_selection,
-            PersistedManifestSelection::NoDeltaManifest
-        ) {
-            return Ok(None);
-        }
+        let selected_delta_manifest = match &self.delta_manifest_selection {
+            PersistedManifestSelection::NoDeltaManifest => None,
+            PersistedManifestSelection::Use { manifest, .. } => Some(manifest.clone()),
+            PersistedManifestSelection::RecoveryRequired { .. } => return Ok(None),
+        };
 
         let mut backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        let curr_header = match backend.read_page(0) {
-            Ok(bytes) => FileHeader::from_bytes(&bytes)?,
+        let curr_header_page = match backend.read_page(0) {
+            Ok(bytes) => bytes,
             Err(_) if backend.is_new() => return Ok(None),
             Err(e) => anyhow::bail!("Failed to read header from existing file: {}", e),
         };
+        let curr_header = FileHeader::from_bytes(&curr_header_page)?;
         if curr_header.version != crate::storage::FORMAT_VERSION
             || curr_header.fact_page_format != FACT_PAGE_FORMAT_PACKED
             || curr_header.eavt_root_page == 0
@@ -1131,8 +1231,31 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             return Ok(None);
         }
 
+        let (base_identity, segment_facts) =
+            if let Some(manifest) = selected_delta_manifest.as_ref() {
+                let mut facts = Vec::new();
+                for segment in
+                    Self::load_delta_segments_from_manifest(&*backend, &curr_header, manifest)?
+                {
+                    facts.extend(
+                        segment
+                            .payload()
+                            .facts()
+                            .iter()
+                            .map(|(_, fact)| fact.clone()),
+                    );
+                }
+                facts.extend_from_slice(pending_facts);
+                (manifest.base_identity(), facts)
+            } else {
+                (
+                    DeltaBaseIdentity::from_header(&curr_header),
+                    pending_facts.to_vec(),
+                )
+            };
+
         let segment_page_start = curr_header.page_count;
-        let segment = DeltaSegment::from_facts(pending_facts.to_vec(), segment_page_start)?;
+        let segment = DeltaSegment::from_facts(segment_facts, segment_page_start)?;
         self.page_cache.invalidate_from(segment_page_start);
         let segment_page_count = write_segment_pages(&mut *backend, segment_page_start, &segment)?;
         let manifest_segment = DeltaManifestSegment::from_segment_header(
@@ -1140,19 +1263,22 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             segment_page_count,
             segment.header(),
         )?;
-        let generation = curr_header
-            .last_checkpointed_tx_count
-            .saturating_add(1)
+        let generation = self
+            .storage
+            .current_tx_count()
+            .max(curr_header.last_checkpointed_tx_count.saturating_add(1))
             .max(1);
-        let manifest = DeltaManifest::new(
-            generation,
-            DeltaBaseIdentity::from_header(&curr_header),
-            vec![manifest_segment],
-        )?;
+        let manifest = DeltaManifest::new(generation, base_identity, vec![manifest_segment])?;
         let manifest_page_start = segment_page_start
             .checked_add(segment_page_count)
             .ok_or_else(|| anyhow::anyhow!("Delta manifest page start overflow"))?;
         let descriptor = write_manifest_pages(&mut *backend, manifest_page_start, &manifest)?;
+        let (extension, published_slot) = Self::build_next_manifest_extension(
+            &curr_header,
+            &curr_header_page,
+            self.header_manifest_selection,
+            descriptor,
+        )?;
         let next_page_count = manifest_page_start
             .checked_add(descriptor.manifest_page_count())
             .ok_or_else(|| anyhow::anyhow!("Delta checkpoint page count overflow"))?;
@@ -1173,20 +1299,17 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         header.index_checksum = curr_header.index_checksum;
         header.header_checksum = compute_header_checksum(&header);
 
-        let header_page = build_header_page_with_extension(
-            header,
-            HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
-        )?;
+        let header_page = build_header_page_with_extension(header, extension)?;
         backend.write_page(0, &header_page)?;
         backend.sync()?;
         drop(backend);
 
         self.header_manifest_selection = HeaderManifestSlotSelection::Use {
-            slot: HeaderManifestSlotName::Primary,
+            slot: published_slot,
             descriptor,
         };
         self.delta_manifest_selection = PersistedManifestSelection::Use {
-            slot: HeaderManifestSlotName::Primary,
+            slot: published_slot,
             manifest,
         };
         self.last_checkpointed_tx_count = self.storage.current_tx_count();
@@ -2699,8 +2822,8 @@ mod tests {
         storage.mark_dirty();
         assert_eq!(
             storage.save().unwrap(),
-            CheckpointOutcome::FullRebuildFromVisibleDelta,
-            "pending facts on a visible delta should fold into a full rebuild"
+            CheckpointOutcome::DeltaSegment,
+            "pending facts on a visible delta should publish through the inactive manifest slot"
         );
     }
 

@@ -263,6 +263,31 @@ Code change: v10 delta manifests now carry base identity (base page count, fact 
 
 T7A observation: the strict Vetch small-write target is now met for the measured single-segment path. The critical 1M base plus one pending fact case improved from the R2 full-rebuild baseline of 4,829.691 ms and the T6 delta baseline of 512.109 ms to 5.266 ms. Reopen improved from 307.388 ms to 0.114 ms. Small delta publish and reopen are now tied to pending/delta size plus sync overhead, not committed graph size. Recompact proxy remains O(total facts), as intended for work scheduled outside the interactive agent rhythm.
 
+### T7B: Double-Buffered Manifest Publish
+
+Run: 2026-06-05, `cargo test --release --test checkpoint_rebuild_benchmark -- --ignored --nocapture`.
+
+Fixture update: the third timing column is now `second_delta_flush_ms`, not `recompact_proxy_ms`. T7B changes the visible-delta checkpoint policy: a second small write over a selected delta publishes a replacement single-segment delta through the inactive manifest slot instead of forcing an interactive full rebuild. Explicit recompact/full rebuild remains a separate O(total) maintenance path.
+
+Code change: v10 header extension slots are now the real publish boundary. Checkpoint writes the new segment and manifest, syncs them, then publishes the descriptor into the inactive slot. Reopen validates both slots independently and selects the highest generation whose slot descriptor, manifest payload, and referenced segment pages all verify. A corrupt newer slot, manifest payload, or delta segment falls back to the previous valid slot; no valid committed delta slot remains an error.
+
+| Committed facts | Pending facts | Assertions/retractions | Delta flush | Reopen delta | Second delta flush | Base pages | Delta pages | Second delta pages | Delta WAL bytes | Second delta WAL bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10K | 1 | 1/0 | 3.606 ms | 0.081 ms | 3.120 ms | 970 | 972 | 974 | 126 | 126 |
+| 10K | 10 | 8/2 | 4.570 ms | 0.139 ms | 4.296 ms | 970 | 973 | 976 | 786 | 126 |
+| 10K | 100 | 75/25 | 13.572 ms | 0.304 ms | 15.838 ms | 970 | 980 | 990 | 7,382 | 126 |
+| 10K | 1K | 750/250 | 120.629 ms | 3.444 ms | 128.456 ms | 970 | 1,057 | 1,144 | 73,384 | 126 |
+| 100K | 1 | 1/0 | 2.843 ms | 0.099 ms | 3.830 ms | 9,778 | 9,780 | 9,782 | 126 | 126 |
+| 100K | 10 | 8/2 | 4.572 ms | 0.102 ms | 3.751 ms | 9,778 | 9,781 | 9,784 | 786 | 126 |
+| 100K | 100 | 75/25 | 13.704 ms | 0.649 ms | 12.283 ms | 9,778 | 9,788 | 9,798 | 7,382 | 126 |
+| 100K | 1K | 750/250 | 102.439 ms | 2.412 ms | 109.317 ms | 9,778 | 9,865 | 9,952 | 73,384 | 126 |
+| 1M | 1 | 1/0 | 3.336 ms | 0.088 ms | 2.852 ms | 99,412 | 99,414 | 99,416 | 127 | 127 |
+| 1M | 10 | 8/2 | 4.395 ms | 0.148 ms | 3.853 ms | 99,412 | 99,415 | 99,418 | 796 | 127 |
+| 1M | 100 | 75/25 | 11.734 ms | 0.325 ms | 13.440 ms | 99,412 | 99,422 | 99,433 | 7,482 | 127 |
+| 1M | 1K | 750/250 | 109.515 ms | 2.547 ms | 113.091 ms | 99,412 | 99,501 | 99,590 | 74,384 | 127 |
+
+T7B observation: T7A's 1M+1 small-write gate did not regress. It improved from 5.266 ms / 0.114 ms to 3.336 ms / 0.088 ms in this run. The second write over an already visible delta is also pending-sized at 2.852 ms for 1M+1, because it publishes through the inactive manifest slot instead of rebuilding the base graph.
+
 ---
 
 ## Concurrency (In-Memory)

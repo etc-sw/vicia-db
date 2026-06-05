@@ -23,15 +23,15 @@ struct CheckpointMeasurement {
     pending_retractions: usize,
     delta_flush: Duration,
     reopen_delta: Duration,
-    recompact_proxy: Duration,
+    second_delta_flush: Duration,
     base_file_bytes: u64,
     delta_file_bytes: u64,
-    recompact_file_bytes: u64,
+    second_delta_file_bytes: u64,
     base_pages: u64,
     delta_pages: u64,
-    recompact_pages: u64,
+    second_delta_pages: u64,
     wal_bytes_before_delta_flush: u64,
-    wal_bytes_before_recompact_proxy: u64,
+    wal_bytes_before_second_delta_flush: u64,
 }
 
 #[test]
@@ -39,7 +39,7 @@ struct CheckpointMeasurement {
 fn delta_checkpoint_cost_after_small_pending_writes() -> Result<()> {
     let root = tempfile::tempdir()?;
     println!(
-        "committed_facts,pending_facts,pending_assertions,pending_retractions,delta_flush_ms,reopen_delta_ms,recompact_proxy_ms,base_file_bytes,delta_file_bytes,recompact_file_bytes,base_pages,delta_pages,recompact_pages,wal_bytes_before_delta_flush,wal_bytes_before_recompact_proxy"
+        "committed_facts,pending_facts,pending_assertions,pending_retractions,delta_flush_ms,reopen_delta_ms,second_delta_flush_ms,base_file_bytes,delta_file_bytes,second_delta_file_bytes,base_pages,delta_pages,second_delta_pages,wal_bytes_before_delta_flush,wal_bytes_before_second_delta_flush"
     );
 
     let mut measurements = Vec::new();
@@ -71,13 +71,13 @@ fn delta_checkpoint_cost_after_small_pending_writes() -> Result<()> {
             let db = open_no_auto_checkpoint(&run_path)?;
             let reopen_delta = started.elapsed();
 
-            add_recompact_proxy_fact(&db, committed_facts, pending_facts)?;
-            let wal_bytes_before_recompact_proxy = file_len_optional(&wal_path_for(&run_path))?;
+            add_second_delta_fact(&db, committed_facts, pending_facts)?;
+            let wal_bytes_before_second_delta_flush = file_len_optional(&wal_path_for(&run_path))?;
             let started = Instant::now();
             db.checkpoint().map_err(db_error)?;
-            let recompact_proxy = started.elapsed();
-            let recompact_file_bytes = file_len(&run_path)?;
-            let recompact_pages = file_page_count(&run_path)?;
+            let second_delta_flush = started.elapsed();
+            let second_delta_file_bytes = file_len(&run_path)?;
+            let second_delta_pages = file_page_count(&run_path)?;
             drop(db);
 
             let measurement = CheckpointMeasurement {
@@ -87,15 +87,15 @@ fn delta_checkpoint_cost_after_small_pending_writes() -> Result<()> {
                 pending_retractions,
                 delta_flush,
                 reopen_delta,
-                recompact_proxy,
+                second_delta_flush,
                 base_file_bytes,
                 delta_file_bytes,
-                recompact_file_bytes,
+                second_delta_file_bytes,
                 base_pages,
                 delta_pages,
-                recompact_pages,
+                second_delta_pages,
                 wal_bytes_before_delta_flush,
-                wal_bytes_before_recompact_proxy,
+                wal_bytes_before_second_delta_flush,
             };
             print_measurement(&measurement);
             measurements.push(measurement);
@@ -195,7 +195,7 @@ fn add_pending_fact_mix(
     Ok((pending_assertions, pending_retractions))
 }
 
-fn add_recompact_proxy_fact(
+fn add_second_delta_fact(
     db: &Minigraf,
     committed_facts: usize,
     pending_facts: usize,
@@ -203,9 +203,9 @@ fn add_recompact_proxy_fact(
     let index = committed_facts
         .checked_add(pending_facts)
         .and_then(|n| n.checked_add(1_000_000_000))
-        .ok_or_else(|| anyhow::anyhow!("recompact proxy fact index overflow"))?;
+        .ok_or_else(|| anyhow::anyhow!("second delta fact index overflow"))?;
     let mut command = String::from("(transact [");
-    push_fact(&mut command, index, "bench/recompact", true);
+    push_fact(&mut command, index, "bench/second-delta", true);
     command.push_str("])");
     db.execute(&command).map_err(db_error)?;
     Ok(())
@@ -266,14 +266,14 @@ fn print_measurement(m: &CheckpointMeasurement) {
         m.pending_retractions,
         m.delta_flush.as_secs_f64() * 1000.0,
         m.reopen_delta.as_secs_f64() * 1000.0,
-        m.recompact_proxy.as_secs_f64() * 1000.0,
+        m.second_delta_flush.as_secs_f64() * 1000.0,
         m.base_file_bytes,
         m.delta_file_bytes,
-        m.recompact_file_bytes,
+        m.second_delta_file_bytes,
         m.base_pages,
         m.delta_pages,
-        m.recompact_pages,
+        m.second_delta_pages,
         m.wal_bytes_before_delta_flush,
-        m.wal_bytes_before_recompact_proxy
+        m.wal_bytes_before_second_delta_flush
     );
 }
