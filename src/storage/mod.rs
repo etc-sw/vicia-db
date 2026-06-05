@@ -10,6 +10,7 @@ pub mod btree;
 pub mod btree_v6;
 pub mod cache;
 pub(crate) mod delta_index;
+pub(crate) mod delta_segment;
 pub mod index;
 pub mod packed_pages;
 pub mod persistent_facts;
