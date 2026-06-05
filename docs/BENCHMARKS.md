@@ -182,6 +182,29 @@ Measures time to flush the WAL to committed `.graph` pages (including B+tree reb
 
 Checkpoint now includes a merge-sort of committed + pending entries and a B+tree rebuild across all four indexes (EAVT, AEVT, AVET, VAET). At 10K facts this is **11.8 ms** — slightly faster than the v5 paged-blob serialisation (16.5 ms), as the B+tree writer makes fewer random-access passes.
 
+### R2: Checkpoint Rebuild After Small Pending Writes
+
+Run: 2026-06-05, `cargo test --release --test checkpoint_rebuild_benchmark -- --ignored --nocapture`.
+
+Fixture: `tests/checkpoint_rebuild_benchmark.rs` builds a checkpointed base file, copies it, adds pending writes through the public API with auto-checkpoint disabled, then measures one explicit `checkpoint()` call. Pending writes include `Value::Ref` assertions and legacy retractions. The fixture is an ignored test, not a Criterion benchmark, so these are single-run measurements meant to answer the R2 scaling question rather than produce CI-grade distributions.
+
+| Committed facts | Pending facts | Pending assertions | Pending retractions | Checkpoint time | Base file bytes | Post-checkpoint file bytes | WAL bytes before checkpoint |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 10K | 1 | 1 | 0 | 44.907 ms | 3,973,120 | 3,981,312 | 126 |
+| 10K | 10 | 8 | 2 | 47.043 ms | 3,973,120 | 3,985,408 | 786 |
+| 10K | 100 | 75 | 25 | 60.152 ms | 3,973,120 | 4,030,464 | 7,382 |
+| 10K | 1K | 750 | 250 | 185.111 ms | 3,973,120 | 4,464,640 | 73,384 |
+| 100K | 1 | 1 | 0 | 405.497 ms | 40,050,688 | 40,058,880 | 126 |
+| 100K | 10 | 8 | 2 | 409.203 ms | 40,050,688 | 40,062,976 | 786 |
+| 100K | 100 | 75 | 25 | 568.861 ms | 40,050,688 | 40,103,936 | 7,382 |
+| 100K | 1K | 750 | 250 | 749.671 ms | 40,050,688 | 40,538,112 | 73,384 |
+| 1M | 1 | 1 | 0 | 4,829.691 ms | 407,191,552 | 407,195,648 | 127 |
+| 1M | 10 | 8 | 2 | 5,368.482 ms | 407,191,552 | 407,212,032 | 796 |
+| 1M | 100 | 75 | 25 | 4,468.865 ms | 407,191,552 | 407,236,608 | 7,482 |
+| 1M | 1K | 750 | 250 | 4,492.069 ms | 407,191,552 | 407,670,784 | 74,384 |
+
+R2 observation: checkpoint cost is strongly tied to total committed graph size. With a one-fact pending append, cost rises from 44.9 ms at 10K committed facts to 405.5 ms at 100K and 4.83 s at 1M. Pending size has a secondary effect, especially at smaller committed sizes, but the measurements do not look pending-proportional. Gate 2 should decide whether batching guidance is enough or whether a separate storage design note is needed; no storage algorithm or file-format change was made for this run.
+
 ---
 
 ## Concurrency (In-Memory)

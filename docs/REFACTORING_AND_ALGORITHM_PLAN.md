@@ -217,6 +217,12 @@ If benchmarks show unacceptable cost, evaluate these options in order:
 - Any later storage algorithm proposal has numeric acceptance criteria.
 - No file format change is proposed without migration, crash-safety, and rollback analysis.
 
+### R2 Closeout
+
+Status: measured in `docs/BENCHMARKS.md` using `tests/checkpoint_rebuild_benchmark.rs`.
+
+The benchmark fixture covered committed fact counts of 10K, 100K, and 1M with pending fact counts of 1, 10, 100, and 1K. Pending writes included `Value::Ref` assertions and legacy retractions. The result is not pending-proportional: a one-fact pending checkpoint measured 44.907 ms at 10K committed facts, 405.497 ms at 100K, and 4,829.691 ms at 1M. Gate 2 should treat current checkpoint cost as strongly tied to total committed graph size and decide separately whether batching guidance is sufficient or a storage design note is needed.
+
 ## R3: Split Positive Candidate Fetch from Nested Clauses
 
 ### Problem
