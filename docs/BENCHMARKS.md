@@ -203,7 +203,7 @@ Fixture: `tests/checkpoint_rebuild_benchmark.rs` builds a checkpointed base file
 | 1M | 100 | 75 | 25 | 4,468.865 ms | 407,191,552 | 407,236,608 | 7,482 |
 | 1M | 1K | 750 | 250 | 4,492.069 ms | 407,191,552 | 407,670,784 | 74,384 |
 
-R2 observation: checkpoint cost is strongly tied to total committed graph size. With a one-fact pending append, cost rises from 44.9 ms at 10K committed facts to 405.5 ms at 100K and 4.83 s at 1M. Pending size has a secondary effect, especially at smaller committed sizes, but the measurements do not look pending-proportional. Gate 2 should decide whether batching guidance is enough or whether a separate storage design note is needed; no storage algorithm or file-format change was made for this run.
+R2 observation: checkpoint cost is strongly tied to total committed graph size. With a one-fact pending append, cost rises from 44.9 ms at 10K committed facts to 405.5 ms at 100K and 4.83 s at 1M. Pending size has a secondary effect, especially at smaller committed sizes, but the measurements do not look pending-proportional. Gate 2 adopted batching guidance as the immediate policy and requires a separate delta/index storage design note before any storage algorithm or file-format change. The first design candidate is append-friendly index delta pages with explicit compaction, not immediate incremental B+tree mutation.
 
 ---
 

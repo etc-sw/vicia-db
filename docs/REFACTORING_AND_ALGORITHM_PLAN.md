@@ -223,6 +223,21 @@ Status: measured in `docs/BENCHMARKS.md` using `tests/checkpoint_rebuild_benchma
 
 The benchmark fixture covered committed fact counts of 10K, 100K, and 1M with pending fact counts of 1, 10, 100, and 1K. Pending writes included `Value::Ref` assertions and legacy retractions. The result is not pending-proportional: a one-fact pending checkpoint measured 44.907 ms at 10K committed facts, 405.497 ms at 100K, and 4,829.691 ms at 1M. Gate 2 should treat current checkpoint cost as strongly tied to total committed graph size and decide separately whether batching guidance is sufficient or a storage design note is needed.
 
+### Gate 2 Closeout: Storage Direction
+
+Decision: adopt batching guidance immediately, and require a separate delta/index storage design note before any storage algorithm or file-format change. Current full index rebuild remains acceptable for small graphs, infrequent checkpoints, and reliability-first callers. It is not acceptable as the only long-term answer if Vetch needs frequent checkpoints on 100K+ fact ledgers.
+
+The preferred design candidate, if Vetch proves that batching cannot meet checkpoint cadence, is append-friendly index delta pages with explicit compaction. This preserves the single-file direction better than sidecar indexes and is easier to reason about than immediate incremental B+tree mutation. A design note must cover:
+
+- base-plus-delta lookup and merge semantics for EAVT, AEVT, AVET, and VAET
+- full-history identity preservation, including `Value::Ref`, `tx_id`, `tx_count`, `asserted`, and valid-time fields
+- current-view selector behavior after merging base and delta facts
+- compaction trigger, crash recovery, checksum/header update order, and full-rebuild fallback
+- file-format migration and rollback story if new page metadata is required
+- numeric acceptance criteria against the R2 benchmark fixture
+
+Rejected for Gate 2 implementation: immediate incremental B+tree mutation. It may be a later optimization, but it touches page splits, partial writes, checksums, and four-index consistency before Vetch has proven that append-friendly delta pages are insufficient.
+
 ## R3: Split Positive Candidate Fetch from Nested Clauses
 
 ### Problem
