@@ -2,10 +2,11 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: overall execution plan as of 2026-06-05. T7C is measured, T8A
+Status: overall execution plan as of 2026-06-06. T7C is measured, T8A
 multi-segment manifest publish is implemented on this branch, T8B mini benchmark
-has passed, T8C full matrix is measured, and T9A threshold policy is the next
-storage gate. This document is the single high-level plan for the Vetch-driven
+has passed, T8C full matrix is measured, T9A threshold policy is documented,
+and T9B private threshold metrics are the next storage gate. This document is
+the single high-level plan for the Vetch-driven
 Minigraf delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
 `docs/BENCHMARKS.md`.
@@ -172,8 +173,9 @@ Vetch should use Minigraf with this cadence:
 | T8A | Done | Append a new delta segment per checkpoint and publish a multi-segment manifest. | Integration and corrupt-segment fallback tests pass. |
 | T8B | Done | Mini benchmark gate after T8A. | Flush/reopen/file growth meet near-term Vetch targets. |
 | T8C | Done | Full accumulated benchmark matrix. | Multi-segment is the default path; tiny-segment accumulation needs thresholds. |
-| T9A | Planned next | Segment/file-growth threshold policy. | Long-term segment/file growth is bounded outside hot path. |
-| T9B | Planned | Recompact implementation and maintenance path. | Threshold-triggered maintenance preserves visible semantics and crash guarantees. |
+| T9A | Done | Segment/file-growth threshold policy. | Long-term segment/file growth is bounded outside hot path. |
+| T9B | Planned next | Private threshold metrics and decision tests. | The storage layer can tell Vetch when background maintenance is needed without doing foreground full rebuild. |
+| T9C | Planned | Recompact implementation and maintenance path. | Threshold-triggered maintenance preserves visible semantics and crash guarantees. |
 | Q1 | Planned separate lane | Agent-brief receipt/as-of read-path improvement. | Just-written receipt can be read cheaply on a 1M base. |
 | Q2 | Planned cleanup lane | Streaming/allocation cleanup after correctness shape stabilizes. | Export/checkpoint/recompact memory improves without semantic drift. |
 
@@ -308,25 +310,91 @@ make the threshold shape clear: 10K delta facts with 1K segments have flush p95
 Current reads remain sub-millisecond, reopen remains below the `250-500 ms`
 gate, fallback remains true, and as-of reads remain a Q1 lane.
 
-### Phase T9: Recompact Thresholds and Maintenance Path
+### Phase T9A: Segment/File-Growth Threshold Policy
 
-Goal: keep long-term delta growth from hurting reopen, read/query, and file
-growth while preserving cheap hot writes.
+Goal: define the private policy that keeps long-term delta growth from hurting
+flush, reopen, read/query, and file growth while preserving cheap hot writes.
+
+Policy inputs:
+
+- `visible_delta_segment_count`
+- `visible_delta_page_growth` and derived bytes
+- `visible_delta_base_page_ratio`
+- `visible_delta_fact_count`
+- `visible_delta_fact_base_ratio`
+- optional manifest payload byte count if T9B can expose it cheaply
+
+Initial decision surface:
+
+| Decision | Meaning | Allowed foreground behavior |
+| --- | --- | --- |
+| `ContinueDeltaAppend` | Delta growth is healthy. | Keep checkpoint on the pending-sized delta append path. |
+| `ScheduleBackgroundRecompact` | Soft threshold crossed. | Keep appending deltas, but surface an internal maintenance recommendation. |
+| `MaintenanceBackpressure` | Hard threshold crossed. | Do not run foreground full rebuild inside `checkpoint()`; Vetch should batch further checkpoints and prioritize background maintenance. |
+
+Initial threshold candidates, derived from T8C:
+
+| Threshold | Soft | Hard | Rationale |
+| --- | ---:| ---:| --- |
+| Delta segment count | `1,024` | `4,096` | T8C shows `1K` segments healthy (`12.318 ms` p95) and `10K` tiny segments above target (`99.818 ms` p95). |
+| Delta page growth | `16,384` pages (`64 MiB`) | `65,536` pages (`256 MiB`) | T8C `1x10K` reaches `161,684` pages / `662,257,664 B`; this should be caught before hot-path cost returns. |
+| Delta/base page ratio | `0.10` | `0.25` | Keeps delta growth meaningfully smaller than the checkpointed base without overreacting to tiny bases. |
+| Delta fact/base ratio | `0.10` | `0.25` | Secondary signal for broad imports; T8C shows tiny receipt cadence needs segment/page thresholds because fact ratio alone stays low. |
+
+Policy rules:
+
+- A soft threshold returns `ScheduleBackgroundRecompact`, not a foreground
+  rebuild.
+- A hard threshold returns `MaintenanceBackpressure`; the storage layer may keep
+  appending deltas for correctness, but Vetch should stop treating per-receipt
+  checkpoint cadence as healthy until background maintenance runs.
+- Threshold checks must be based on the selected visible manifest and base page
+  identity, not on unpublished trailing bytes.
+- Full rebuild/recompact remains the repair and maintenance mechanism, not a
+  normal `checkpoint()` side effect.
+- No public `recompact()` API is added in T9A. A public maintenance surface
+  requires a concrete Vetch scheduling caller.
+
+Acceptance:
+
+- T8C numbers justify the default thresholds.
+- The policy has no dependency, file-format, or public API change.
+- The policy prevents unbounded per-receipt checkpoint cadence from being called
+  production-ready without background maintenance.
+- T9B has a concrete tests-first implementation plan.
+
+### Phase T9B: Private Threshold Metrics and Decision Tests
+
+Goal: implement the private metric and decision surface without triggering
+recompact yet.
+
+Tests first:
+
+- empty/no-manifest database returns `ContinueDeltaAppend`
+- manifest with `1,000` tiny segments and `12 MiB` growth returns
+  `ContinueDeltaAppend`
+- manifest with `1,024` tiny segments returns `ScheduleBackgroundRecompact`
+- manifest crossing soft segment threshold returns `ScheduleBackgroundRecompact`
+- manifest crossing hard segment threshold returns `MaintenanceBackpressure`
+- manifest crossing soft/hard page-growth thresholds returns the matching
+  decision
+- fact-ratio threshold is secondary and does not mask segment/page thresholds
+- threshold metrics ignore unpublished trailing delta/manifest pages
 
 Implementation shape:
 
-- Add internal thresholds for segment count, delta bytes, and delta/base ratio.
-- Keep threshold values conservative and documented.
-- Use existing full rebuild from visible base + deltas as `recompact()`.
-- Do not expose a public `recompact()` API until Vetch has a real scheduling
-  caller or a clear operator story.
-- Ensure recompact publish follows the same crash-safe page 0 commit discipline.
+- Add a private `DeltaGrowthMetrics` struct derived from the selected manifest,
+  base page count, fact count, and page growth.
+- Add a private `DeltaMaintenanceDecision` enum.
+- Keep `checkpoint()` on the delta append path; do not execute recompact in T9B.
+- Wire no public API unless the Vetch scheduling contract exists.
+- Record the decision only where existing internal code can observe it safely,
+  or keep the first implementation as a pure function with unit tests.
 
-Initial threshold candidates:
+### Phase T9C: Recompact Maintenance Path
 
-- `max_delta_segments_before_recompact = 32`
-- `max_delta_bytes_before_recompact = 64 MiB`
-- `max_delta_fact_ratio_before_recompact = 0.25`
+Goal: implement internal/background recompact once T9B can identify when it is
+needed.
 
 Acceptance:
 
@@ -454,7 +522,8 @@ Run benchmark gates only when the relevant slice is ready:
 
 - T8B mini benchmark is complete.
 - T8C full `cargo bench --bench delta_accumulation_benchmark` is complete.
-- T9A threshold policy is the next storage gate.
+- T9A threshold policy is complete.
+- T9B private threshold metrics and decision tests are the next storage gate.
 
 Known verification caveat:
 
@@ -465,33 +534,34 @@ Known verification caveat:
 
 ## Next Slice Goal Spec
 
-Name: T9A segment/file-growth threshold policy.
+Name: T9B private threshold metrics and decision tests.
 
 Objective:
 
-- Define the internal thresholds and maintenance decision surface that keep
-  multi-segment delta growth out of Vetch's foreground work rhythm.
+- Implement the private metric and decision surface that tells Minigraf/Vetch
+  when delta growth needs background maintenance, without triggering recompact
+  inside foreground `checkpoint()`.
 
 Scope:
 
-- Design and documentation first; implementation should wait for the next slice
-  unless the policy requires a tiny private constant/test fixture.
+- Tests first, then private storage-module code.
 - No broad storage algorithm change.
 - No new dependency.
 - No public recompact API unless a Vetch scheduling contract is explicit.
-- No as-of query optimization in T9A; keep that in Q1.
+- No as-of query optimization in T9B; keep that in Q1.
+- No threshold-triggered recompact execution in T9B.
 
 Done:
 
-- Threshold inputs are documented: segment count, delta bytes/page growth,
-  delta/base ratio, and manifest/file growth pressure.
-- Hot-path threshold behavior is decided: continue, request/schedule background
-  maintenance, or perform internal recompact only outside foreground work.
-- Candidate default thresholds are justified from T8C numbers, especially:
-  `1K` segments is healthy, `10K` tiny segments is not.
-- Crash/recovery rules for threshold-triggered recompact are linked back to the
-  existing double-buffered manifest and full-rebuild recovery policy.
-- Next implementation slice T9B is specified with tests before code.
+- Unit tests cover no-manifest, healthy, soft-threshold, and hard-threshold
+  decisions.
+- `DeltaGrowthMetrics` is derived from the selected visible manifest and base
+  identity, not from unpublished trailing bytes.
+- `DeltaMaintenanceDecision` returns `ContinueDeltaAppend`,
+  `ScheduleBackgroundRecompact`, or `MaintenanceBackpressure`.
+- Existing checkpoint/reopen/crash tests stay green.
+- Roadmap records whether T9C should implement internal recompact next or
+  whether a Vetch scheduling contract is required first.
 
 Stop conditions:
 
@@ -499,5 +569,5 @@ Stop conditions:
   reject it.
 - If the policy cannot be expressed without a public API, write the Vetch
   scheduling contract first.
-- If thresholds alone cannot bound the 10K tiny-segment case, inspect manifest
-  payload serialization/checksum cost before implementing broader features.
+- If the private metrics cannot be computed from the current manifest/base
+  state, add a narrow internal metadata test before touching checkpoint policy.

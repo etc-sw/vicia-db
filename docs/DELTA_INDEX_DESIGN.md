@@ -2,7 +2,7 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: living design and test specification. T0-T8C guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, and T8C routes long-tail segment growth to T9 thresholds.
+Status: living design and test specification. T0-T9A guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, and T9A documents the threshold policy.
 
 Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution plan and gate sequence.
 
@@ -188,13 +188,20 @@ T8A implementation update:
 
 `Minigraf::checkpoint()` must not delete the WAL if replayed or newly written WAL entries remain and `save()` returns `Noop`. In normal operation `force_dirty()` prevents that path during WAL replay, but the guard is deliberate: WAL retire is allowed only when the storage layer reports a durable publish boundary, not merely `Ok(())`.
 
-Suggested thresholds for the first implementation:
+T9A threshold policy for the first implementation:
 
-- `max_delta_segments_before_recompact = 32`
-- `max_delta_bytes_before_recompact = 64 MiB`
-- `max_delta_fact_ratio_before_recompact = 0.25`
+| Metric | Soft threshold | Hard threshold |
+| --- | ---:| ---:|
+| Visible delta segments | `1,024` | `4,096` |
+| Visible delta page growth | `16,384` pages (`64 MiB`) | `65,536` pages (`256 MiB`) |
+| Delta/base page ratio | `0.10` | `0.25` |
+| Delta/base fact ratio | `0.10` | `0.25` |
 
-These are conservative defaults, not final performance tuning.
+Soft threshold returns `ScheduleBackgroundRecompact`; hard threshold returns
+`MaintenanceBackpressure`. Neither decision may run a foreground full rebuild
+inside normal `checkpoint()`. The fact-ratio threshold is a secondary broad
+import signal; T8C shows tiny receipt cadence must be bounded primarily by
+segment count and page/file growth.
 
 ## Recompact Semantics
 
@@ -354,6 +361,8 @@ Current T8B result, recorded in `docs/BENCHMARKS.md`: multi-segment append passe
 
 Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is the right default path but needs T9 thresholds for unbounded tiny-segment growth. The 1M base plus 1 fact x 10K case drops from T7C's 1,051.300 ms flush p95 and 18.9 GB file growth to 99.818 ms p95 and 662,257,664 B growth, but that is still above the hot flush target. The batching rows show the dominant pressure is segment count and manifest/file growth rather than delta fact count alone: 10K delta facts in 1K segments have flush p95 36.821 ms, and 10K facts in 100 segments have flush p95 38.347 ms. Current reads stay sub-millisecond, reopen stays below the 250-500 ms gate, corrupt-latest fallback remains true, and as-of/replay remains Q1 read-path work.
 
+Current T9A policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B should implement this as pure/private metrics and decision tests before any threshold-triggered recompact execution.
+
 ## Implementation Order
 
 1. Add `LayeredIndexReader` and in-memory delta entry fixtures.
@@ -370,8 +379,10 @@ Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is th
 12. Re-run T6/T7 benchmark gates and update `docs/BENCHMARKS.md`.
 13. Implement multi-segment manifest publish so small checkpoints append one new segment instead of rewriting all accumulated delta facts. Done in T8A.
 14. Run the T8B mini benchmark and T8C full accumulation matrix. Done; proceed to T9 thresholds.
-15. Add internal/background recompact thresholds for segment count, delta bytes, and long-term file growth. Required by T8C's 10K tiny-segment result.
-16. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
+15. Document internal/background recompact thresholds for segment count, delta bytes, and long-term file growth. Done in T9A.
+16. Implement private threshold metrics and decision tests. Next T9B.
+17. Add threshold-triggered internal/background recompact only after T9B proves the decision surface.
+18. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
 
 ## Open Questions
 
