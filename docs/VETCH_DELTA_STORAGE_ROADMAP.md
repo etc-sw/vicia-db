@@ -6,8 +6,9 @@ Status: overall execution plan as of 2026-06-06. T7C is measured, T8A
 multi-segment manifest publish is implemented on this branch, T8B mini benchmark
 has passed, T8C full matrix is measured, T9A threshold policy is documented,
 T9B private threshold metrics pass, T9C-A adds a private explicit recompact
-primitive, T9C-B makes recompact publish copy-on-write, and T9C-C adds a private
-idle/background maintenance caller. Automatic/background scheduling remains a
+primitive, T9C-B makes recompact publish copy-on-write, T9C-C adds a private
+idle/background maintenance caller, and Q1-A adds a dedicated agent-brief
+read-path benchmark harness. Automatic/background scheduling remains a
 caller-policy decision and is not wired into foreground `checkpoint()`. This
 document is the single high-level plan for the Vetch-driven Minigraf
 delta-storage line. The detailed storage format and test specification remain in
@@ -180,7 +181,8 @@ Vetch should use Minigraf with this cadence:
 | T9C-A | Done | Private explicit recompact primitive. | Manual/internal recompact preserves visible semantics when it completes successfully and is guarded against pending writes. |
 | T9C-B | Done | Crash-safe recompact publish gate. | Recompact writes a copy-on-write base after the current image and publishes it through page 0 with a protected base-start pointer. |
 | T9C-C | Done | Background/idle scheduling policy gate. | Threshold-triggered maintenance has a private idle/background caller and remains out of foreground checkpoint. |
-| Q1 | Planned separate lane | Agent-brief receipt/as-of read-path improvement. | Just-written receipt can be read cheaply on a 1M base. |
+| Q1-A | Done | Agent-brief read-path benchmark/spec gate. | Current, as-of, prepared as-of, and export/replay surfaces are measured separately. |
+| Q1-B | Planned separate lane | Agent-brief read strategy decision. | Choose pushdown, recent fact-log reader, or a small prepared helper from Q1-A evidence. |
 | Q2 | Planned cleanup lane | Streaming/allocation cleanup after correctness shape stabilizes. | Export/checkpoint/recompact memory improves without semantic drift. |
 
 ## Gate Protocol
@@ -598,6 +600,9 @@ Run benchmark gates only when the relevant slice is ready:
   `run_idle_delta_maintenance()` caller that executes recompact only for
   scheduled/backpressure decisions, noops for healthy deltas, and preserves the
   pending-facts guard.
+- Q1-A agent-brief read-path benchmark/spec is complete. It adds
+  `benches/agent_brief_read_path_benchmark.rs` and separates current point,
+  as-of point, prepared as-of, and export/recent-filter timing.
 
 Known verification caveat:
 
@@ -644,3 +649,58 @@ Stop conditions:
   scheduling contract first.
 - If crash-safe recompact requires changing where base fact pages start, add a
   file-format design note and migration test before implementation.
+
+## Completed Slice: Q1-A Agent-Brief Read-Path Benchmark Gate
+
+Name: Q1-A agent-brief read-path benchmark/spec gate.
+
+Objective:
+
+- Fix the Vetch agent-brief read surfaces before optimizing them: current point
+  query, as-of point query, prepared as-of point query, and full export plus
+  recent tx filter.
+
+Scope:
+
+- Add a dedicated benchmark harness only; do not optimize query execution in
+  Q1-A.
+- Keep the 1M base assumption.
+- Keep receipt-like writes as `Value::Ref` facts.
+- Keep public API unchanged.
+- Include a smoke mode for quick local verification.
+
+Done:
+
+- Done: `cargo bench --bench agent_brief_read_path_benchmark` builds a 1M base
+  and measures the Q1 read surfaces.
+- Done: `MINIGRAF_AGENT_BRIEF_BENCH_MODE=smoke cargo bench --bench
+  agent_brief_read_path_benchmark` runs a 10K-base smoke matrix.
+- Done: smoke evidence shows prepared as-of is not meaningfully faster than
+  formatted as-of, so parse overhead is not the primary blocker.
+- Done: Q1-B should choose between as-of selective pushdown, a recent fact-log
+  reader, or a small prepared helper based on full 1M data.
+
+## Next Slice Goal Spec
+
+Name: Q1-B agent-brief read strategy decision.
+
+Objective:
+
+- Use Q1-A evidence to pick the smallest implementation that makes just-written
+  receipt reads cheap on a 1M base.
+
+Candidate paths:
+
+- As-of selective pushdown: let entity/attribute-bound `:as-of` queries use the
+  committed index reader before temporal filtering.
+- Recent fact-log reader: provide an internal tx-window reader so agent briefs
+  do not call full `export_fact_log()` for fresh receipts.
+- Prepared helper: add a small reusable brief-oriented query path only if
+  prepared execution is enough after pushdown/recent-reader evidence.
+
+Stop conditions:
+
+- Do not add a public API until the measured bottleneck requires it.
+- Do not weaken current full-history ledger semantics.
+- Do not optimize broad unbound as-of scans in Q1-B; the agent-brief surface is
+  receipt/entity scoped.

@@ -1,6 +1,6 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Vetch T9C-C private idle recompact maintenance caller (June 2026), 1114 tests ✅
+**Last Updated**: Vetch Q1-A agent-brief read-path benchmark harness (June 2026), 1114 tests ✅
 
 ## Test Summary
 
@@ -40,6 +40,7 @@
 - ✅ 1 delta index segment test (integration, Vetch delta storage — segment codec gate)
 - ✅ 1 delta manifest recovery test (integration, Vetch delta storage — manifest recovery gate)
 - ✅ 1 header extension gate test (integration, Vetch delta storage — v10 extension module gate)
+- ✅ Agent-brief read-path benchmark harness (bench, Vetch Q1-A — current/as-of/prepared/export receipt-read surfaces; not counted as a test)
 - ✅ 5 index corruption tests (integration, Wave 3 #216 — checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)

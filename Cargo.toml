@@ -80,6 +80,10 @@ harness = false
 name = "delta_accumulation_benchmark"
 harness = false
 
+[[bench]]
+name = "agent_brief_read_path_benchmark"
+harness = false
+
 [features]
 default = []
 wasm = []

@@ -355,6 +355,28 @@ The batching rows separate fact count from segment count. Both 10x1K and 100x100
 
 T8C verdict: keep multi-segment publish as the default delta checkpoint path for now, but add T9 segment/file-growth thresholds before treating this as production-ready for unbounded per-receipt checkpoint cadence. The next storage slice should be T9A threshold and maintenance policy: bound segment count and manifest/file growth through idle/background recompact, while keeping foreground Vetch work on pending-sized checkpoints. Do not add a broad storage engine, sidecar index, or query API change for this result.
 
+### Q1-A: Agent-Brief Read-Path Benchmark Gate
+
+Run: 2026-06-06, `MINIGRAF_AGENT_BRIEF_BENCH_MODE=smoke cargo bench --bench agent_brief_read_path_benchmark`.
+
+Fixture: `benches/agent_brief_read_path_benchmark.rs` builds a checkpointed base, appends receipt-like `Value::Ref` facts through the delta checkpoint path, then measures four Vetch agent-brief read surfaces at probe points:
+
+- current point query: latest receipt by entity and `:bench/ref`
+- formatted as-of point query: same entity with `:as-of <tx_count>` and `:valid-at :any-valid-time`
+- prepared as-of point query: same shape through `PreparedQuery`
+- export/replay proxy: `export_fact_log()` followed by filtering records from the latest tx
+
+Smoke base file: 3,977,216 bytes / 971 pages. The smoke mode uses a 10K base so the harness can be verified quickly; full Q1-A should be run with `cargo bench --bench agent_brief_read_path_benchmark` for the 1M base.
+
+| Mode | Scenario | Base facts | Facts/checkpoint | Checkpoints | Delta facts | Probes | Current p95 | As-of p95 | Prepared as-of p95 | Export recent filter p95 | File growth |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| smoke | smoke_single_receipt | 10K | 1 | 1 | 1 | 1 | 0.041 ms | 7.940 ms | 7.849 ms | 2.070 ms | 8,192 B |
+| smoke | smoke_receipt_stream_10 | 10K | 1 | 10 | 10 | 5 | 0.038 ms | 9.549 ms | 9.336 ms | 2.234 ms | 81,920 B |
+
+Q1-A observation: prepared as-of is not materially faster than formatted as-of in the smoke run, so parser/string formatting overhead is not the main blocker. The current point query remains cheap, while `:as-of` point lookup is already hundreds of times slower on a 10K base. Full export plus recent filtering is also O(total facts), but it is faster than current as-of at 10K because it avoids Datalog matching work after materialization.
+
+Q1-A verdict: proceed to Q1-B read strategy selection. The likely first implementation should make entity/attribute-bound `:as-of` queries use selective index fetch before temporal filtering, or provide an internal recent tx-window fact-log reader for agent briefs. Do not change checkpoint/recompact policy for this blocker.
+
 ---
 
 ## Concurrency (In-Memory)
