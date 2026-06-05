@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
 use crate::storage::delta_segment::DeltaSegmentHeader;
+use crate::storage::header_extension::{
+    HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
+};
+use crate::storage::{FileHeader, PAGE_SIZE, StorageBackend};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -241,6 +245,34 @@ pub(crate) enum ManifestSelection {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistedManifestRecoveryReason {
+    CorruptManifestSlot,
+    NoValidManifest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PersistedManifestSelection {
+    NoDeltaManifest,
+    Use {
+        slot: HeaderManifestSlotName,
+        manifest: DeltaManifest,
+    },
+    RecoveryRequired {
+        reason: PersistedManifestRecoveryReason,
+    },
+}
+
+impl PersistedManifestSelection {
+    pub(crate) fn manifest(&self) -> Option<&DeltaManifest> {
+        match self {
+            PersistedManifestSelection::Use { manifest, .. } => Some(manifest),
+            PersistedManifestSelection::NoDeltaManifest
+            | PersistedManifestSelection::RecoveryRequired { .. } => None,
+        }
+    }
+}
+
 impl ManifestSelection {
     pub(crate) fn manifest(&self) -> Option<&DeltaManifest> {
         match self {
@@ -278,6 +310,150 @@ pub(crate) fn select_manifest_candidate(
             reason: ManifestRecoveryReason::NoValidManifest,
         },
     }
+}
+
+pub(crate) fn write_manifest_pages<B: StorageBackend>(
+    backend: &mut B,
+    page_start: u64,
+    manifest: &DeltaManifest,
+) -> Result<HeaderManifestSlot> {
+    if page_start == 0 {
+        bail!("Delta manifest payload must not start on page 0");
+    }
+    let bytes = manifest.encode()?;
+    let page_count = bytes.len().div_ceil(PAGE_SIZE);
+    let page_count_u64 = u64::try_from(page_count)
+        .map_err(|_| anyhow::anyhow!("Delta manifest page count exceeds u64"))?;
+
+    for page_index in 0..page_count {
+        let byte_start = page_index
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| anyhow::anyhow!("Delta manifest byte offset overflow"))?;
+        let byte_end = byte_start.saturating_add(PAGE_SIZE).min(bytes.len());
+        let mut page = vec![0u8; PAGE_SIZE];
+        page.get_mut(..byte_end.saturating_sub(byte_start))
+            .ok_or_else(|| anyhow::anyhow!("Delta manifest page slice out of bounds"))?
+            .copy_from_slice(
+                bytes
+                    .get(byte_start..byte_end)
+                    .ok_or_else(|| anyhow::anyhow!("Delta manifest bytes out of bounds"))?,
+            );
+        let page_offset = u64::try_from(page_index)
+            .map_err(|_| anyhow::anyhow!("Delta manifest page index exceeds u64"))?;
+        let page_id = page_start
+            .checked_add(page_offset)
+            .ok_or_else(|| anyhow::anyhow!("Delta manifest page id overflow"))?;
+        backend.write_page(page_id, &page)?;
+    }
+
+    HeaderManifestSlot::new(
+        manifest.generation(),
+        page_start,
+        page_count_u64,
+        u64::try_from(bytes.len())
+            .map_err(|_| anyhow::anyhow!("Delta manifest length exceeds u64"))?,
+        crc32fast::hash(&bytes),
+    )
+}
+
+pub(crate) fn load_persisted_manifest_selection<B: StorageBackend>(
+    backend: &B,
+    header: &FileHeader,
+    page0: &[u8],
+) -> Result<PersistedManifestSelection> {
+    let Some(extension) = HeaderExtension::read_from_page0(header.version, page0)? else {
+        return Ok(PersistedManifestSelection::NoDeltaManifest);
+    };
+
+    let primary = extension.primary();
+    let secondary = extension.secondary();
+    let has_invalid_slot = (!primary.is_empty() && !primary.is_selectable())
+        || (!secondary.is_empty() && !secondary.is_selectable());
+
+    let mut candidates = Vec::new();
+    if primary.is_selectable() {
+        candidates.push((HeaderManifestSlotName::Primary, primary));
+    }
+    if secondary.is_selectable() {
+        candidates.push((HeaderManifestSlotName::Secondary, secondary));
+    }
+
+    if candidates.is_empty() {
+        if has_invalid_slot {
+            return Ok(PersistedManifestSelection::RecoveryRequired {
+                reason: PersistedManifestRecoveryReason::CorruptManifestSlot,
+            });
+        }
+        return Ok(PersistedManifestSelection::NoDeltaManifest);
+    }
+
+    candidates.sort_by(|a, b| b.1.generation().cmp(&a.1.generation()));
+    for (slot, descriptor) in candidates {
+        if let Ok(manifest) = read_manifest_from_descriptor(backend, header, descriptor) {
+            return Ok(PersistedManifestSelection::Use { slot, manifest });
+        }
+    }
+
+    Ok(PersistedManifestSelection::RecoveryRequired {
+        reason: PersistedManifestRecoveryReason::NoValidManifest,
+    })
+}
+
+pub(crate) fn read_manifest_from_descriptor<B: StorageBackend>(
+    backend: &B,
+    header: &FileHeader,
+    descriptor: HeaderManifestSlot,
+) -> Result<DeltaManifest> {
+    validate_manifest_descriptor_bounds(header, descriptor)?;
+
+    let manifest_len = usize::try_from(descriptor.manifest_len())
+        .map_err(|_| anyhow::anyhow!("Delta manifest payload length exceeds usize"))?;
+    let page_count = usize::try_from(descriptor.manifest_page_count())
+        .map_err(|_| anyhow::anyhow!("Delta manifest payload page count exceeds usize"))?;
+    let capacity = page_count
+        .checked_mul(PAGE_SIZE)
+        .ok_or_else(|| anyhow::anyhow!("Delta manifest payload capacity overflow"))?;
+    if manifest_len > capacity {
+        bail!("Delta manifest payload length exceeds descriptor pages");
+    }
+
+    let mut bytes = Vec::with_capacity(capacity);
+    for offset in 0..descriptor.manifest_page_count() {
+        let page_id = descriptor
+            .manifest_page_start()
+            .checked_add(offset)
+            .ok_or_else(|| anyhow::anyhow!("Delta manifest page id overflow"))?;
+        let page = backend.read_page(page_id)?;
+        if page.len() != PAGE_SIZE {
+            bail!("Delta manifest page has invalid size");
+        }
+        bytes.extend_from_slice(&page);
+    }
+    bytes.truncate(manifest_len);
+
+    if crc32fast::hash(&bytes) != descriptor.manifest_checksum() {
+        bail!("Delta manifest payload checksum mismatch");
+    }
+
+    let manifest = DeltaManifest::decode(&bytes)?;
+    if manifest.generation() != descriptor.generation() {
+        bail!("Delta manifest generation does not match header descriptor");
+    }
+    Ok(manifest)
+}
+
+fn validate_manifest_descriptor_bounds(
+    header: &FileHeader,
+    descriptor: HeaderManifestSlot,
+) -> Result<()> {
+    let end = descriptor
+        .manifest_page_start()
+        .checked_add(descriptor.manifest_page_count())
+        .ok_or_else(|| anyhow::anyhow!("Delta manifest payload page range overflow"))?;
+    if end > header.page_count {
+        bail!("Delta manifest payload page range out of bounds");
+    }
+    Ok(())
 }
 
 fn decode_candidate(
@@ -334,10 +510,18 @@ fn read_u64_le(bytes: &[u8], offset: usize, label: &str) -> Result<u64> {
 mod tests {
     use super::{
         DeltaManifest, DeltaManifestSegment, ManifestRecoveryReason, ManifestSelection,
-        ManifestSlot, select_manifest_candidate,
+        ManifestSlot, PersistedManifestRecoveryReason, PersistedManifestSelection,
+        load_persisted_manifest_selection, read_manifest_from_descriptor,
+        select_manifest_candidate, write_manifest_pages,
     };
     use crate::graph::types::{Fact, VALID_TIME_FOREVER, Value};
+    use crate::storage::backend::MemoryBackend;
     use crate::storage::delta_segment::DeltaSegment;
+    use crate::storage::header_extension::{
+        HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
+        build_header_page_with_extension,
+    };
+    use crate::storage::{FileHeader, StorageBackend};
     use uuid::Uuid;
 
     fn fact(entity: Uuid, attribute: &str, value: Value, tx_count: u64) -> Fact {
@@ -385,6 +569,20 @@ mod tests {
         bytes
     }
 
+    fn empty_manifest(generation: u64) -> DeltaManifest {
+        DeltaManifest::from_parts(generation, 0, 0, Vec::new())
+            .expect("empty manifest should be valid")
+    }
+
+    fn header_with_extension(extension: HeaderExtension, page_count: u64) -> (FileHeader, Vec<u8>) {
+        let mut header = FileHeader::new();
+        header.page_count = page_count;
+        header.header_checksum = crate::storage::persistent_facts::compute_header_checksum(&header);
+        let page0 = build_header_page_with_extension(header, extension)
+            .expect("header page with extension should build");
+        (header, page0)
+    }
+
     #[test]
     fn manifest_candidate_encode_decode_round_trips() {
         let segment = segment(3);
@@ -405,6 +603,152 @@ mod tests {
             segment.header().high_tx_count,
             "high tx_count must round-trip"
         );
+    }
+
+    #[test]
+    fn manifest_pages_write_read_round_trips_descriptor_checksum() {
+        let manifest = empty_manifest(7);
+        let mut backend = MemoryBackend::new();
+        let descriptor =
+            write_manifest_pages(&mut backend, 1, &manifest).expect("manifest pages should write");
+        let (header, _) = header_with_extension(
+            HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
+            1 + descriptor.manifest_page_count(),
+        );
+        let loaded = read_manifest_from_descriptor(&backend, &header, descriptor)
+            .expect("manifest should read from descriptor pages");
+
+        assert_eq!(descriptor.generation(), 7);
+        assert_eq!(loaded.generation(), 7);
+        assert_eq!(
+            descriptor.manifest_checksum(),
+            crc32fast::hash(&manifest.encode().expect("manifest should encode"))
+        );
+    }
+
+    #[test]
+    fn persisted_selection_loads_selected_manifest_from_page0() {
+        let manifest = empty_manifest(3);
+        let mut backend = MemoryBackend::new();
+        let descriptor =
+            write_manifest_pages(&mut backend, 1, &manifest).expect("manifest pages should write");
+        let (header, page0) = header_with_extension(
+            HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
+            1 + descriptor.manifest_page_count(),
+        );
+        let selection = load_persisted_manifest_selection(&backend, &header, &page0)
+            .expect("manifest selection should load");
+
+        assert!(matches!(
+            selection,
+            PersistedManifestSelection::Use {
+                slot: HeaderManifestSlotName::Primary,
+                ..
+            }
+        ));
+        assert_eq!(
+            selection
+                .manifest()
+                .expect("manifest should be selected")
+                .generation(),
+            3
+        );
+    }
+
+    #[test]
+    fn persisted_selection_falls_back_from_corrupt_newer_payload_to_valid_older() {
+        let older = empty_manifest(1);
+        let newer = empty_manifest(2);
+        let mut backend = MemoryBackend::new();
+        let older_descriptor =
+            write_manifest_pages(&mut backend, 1, &older).expect("older manifest should write");
+        let newer_start = 1 + older_descriptor.manifest_page_count();
+        let newer_descriptor = write_manifest_pages(&mut backend, newer_start, &newer)
+            .expect("newer manifest should write");
+
+        let mut newer_page = backend
+            .read_page(newer_descriptor.manifest_page_start())
+            .expect("newer manifest page should read");
+        newer_page[12] ^= 0x55;
+        backend
+            .write_page(newer_descriptor.manifest_page_start(), &newer_page)
+            .expect("corrupt newer manifest page should write");
+
+        let page_count =
+            newer_descriptor.manifest_page_start() + newer_descriptor.manifest_page_count();
+        let (header, page0) = header_with_extension(
+            HeaderExtension::new(older_descriptor, newer_descriptor),
+            page_count,
+        );
+        let selection = load_persisted_manifest_selection(&backend, &header, &page0)
+            .expect("manifest selection should load");
+
+        assert!(matches!(
+            selection,
+            PersistedManifestSelection::Use {
+                slot: HeaderManifestSlotName::Primary,
+                ..
+            }
+        ));
+        assert_eq!(
+            selection
+                .manifest()
+                .expect("older manifest should be selected")
+                .generation(),
+            1
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_manifest_descriptor_requires_recovery() {
+        let manifest = empty_manifest(4);
+        let encoded = manifest.encode().expect("manifest should encode");
+        let descriptor =
+            HeaderManifestSlot::new(4, 99, 1, encoded.len() as u64, crc32fast::hash(&encoded))
+                .expect("descriptor should build");
+        let (header, page0) = header_with_extension(
+            HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
+            2,
+        );
+        let selection = load_persisted_manifest_selection(&MemoryBackend::new(), &header, &page0)
+            .expect("selection should resolve to recovery");
+
+        assert!(matches!(
+            selection,
+            PersistedManifestSelection::RecoveryRequired {
+                reason: PersistedManifestRecoveryReason::NoValidManifest
+            }
+        ));
+    }
+
+    #[test]
+    fn both_invalid_header_manifest_slots_require_recovery() {
+        let manifest = empty_manifest(5);
+        let encoded = manifest.encode().expect("manifest should encode");
+        let primary =
+            HeaderManifestSlot::new(5, 1, 1, encoded.len() as u64, crc32fast::hash(&encoded))
+                .expect("primary descriptor should build");
+        let secondary =
+            HeaderManifestSlot::new(4, 2, 1, encoded.len() as u64, crc32fast::hash(&encoded))
+                .expect("secondary descriptor should build");
+        let (header, mut page0) =
+            header_with_extension(HeaderExtension::new(primary, secondary), 3);
+        let primary_checksum_offset = crate::storage::header_extension::HEADER_EXTENSION_OFFSET
+            + HeaderExtension::PREFIX_LEN
+            + 36;
+        let secondary_checksum_offset = primary_checksum_offset + HeaderManifestSlot::LEN;
+        page0[primary_checksum_offset] ^= 0xAA;
+        page0[secondary_checksum_offset] ^= 0x55;
+
+        let selection = load_persisted_manifest_selection(&MemoryBackend::new(), &header, &page0)
+            .expect("selection should resolve to recovery");
+
+        assert!(matches!(
+            selection,
+            PersistedManifestSelection::RecoveryRequired {
+                reason: PersistedManifestRecoveryReason::CorruptManifestSlot
+            }
+        ));
     }
 
     #[test]

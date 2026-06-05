@@ -103,7 +103,7 @@ impl HeaderManifestSlot {
         }
     }
 
-    fn is_selectable(self) -> bool {
+    pub(crate) fn is_selectable(self) -> bool {
         !self.is_empty()
             && self.checksum_valid()
             && self.generation > 0
@@ -116,7 +116,7 @@ impl HeaderManifestSlot {
                 .is_some()
     }
 
-    fn is_empty(self) -> bool {
+    pub(crate) fn is_empty(self) -> bool {
         self.generation == 0
             && self.manifest_page_start == 0
             && self.manifest_page_count == 0
@@ -366,6 +366,22 @@ pub(crate) fn build_header_page(header: FileHeader) -> Result<Vec<u8>> {
     Ok(page)
 }
 
+pub(crate) fn build_header_page_with_extension(
+    header: FileHeader,
+    extension: HeaderExtension,
+) -> Result<Vec<u8>> {
+    if header.version != HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        bail!("Header extension requires v10 file format");
+    }
+    let mut page = header.to_bytes();
+    if page.len() > PAGE_SIZE {
+        bail!("Header bytes exceed page size");
+    }
+    page.resize(PAGE_SIZE, 0);
+    extension.write_to_page0(&mut page)?;
+    Ok(page)
+}
+
 fn read_u32_le(bytes: &[u8], offset: usize, label: &str) -> Result<u32> {
     let end = offset
         .checked_add(4)
@@ -396,7 +412,8 @@ mod tests {
         HEADER_EXTENSION_FILE_FORMAT_VERSION, HEADER_EXTENSION_LEN, HEADER_EXTENSION_OFFSET,
         HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
         HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection, build_header_page,
-        select_header_manifest_slot, select_header_manifest_slot_from_page0,
+        build_header_page_with_extension, select_header_manifest_slot,
+        select_header_manifest_slot_from_page0,
     };
     use crate::storage::{FORMAT_VERSION, FileHeader, PAGE_SIZE};
 
@@ -492,6 +509,23 @@ mod tests {
             result.is_err(),
             "v10 page must include a non-empty header extension"
         );
+    }
+
+    #[test]
+    fn explicit_header_page_builder_writes_provided_extension() {
+        let header = FileHeader::new();
+        let descriptor = slot(12, 345);
+        let page = build_header_page_with_extension(
+            header,
+            HeaderExtension::new(descriptor, HeaderManifestSlot::empty()),
+        )
+        .expect("explicit extension page should build");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("extension should decode")
+            .expect("extension should be present");
+
+        assert_eq!(decoded.primary(), descriptor);
+        assert!(decoded.secondary().is_empty());
     }
 
     #[test]
