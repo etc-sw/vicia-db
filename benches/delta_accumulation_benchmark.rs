@@ -12,8 +12,10 @@ const BASE_BATCH_SIZE: usize = 1_000;
 const PAGE_SIZE_BYTES: u64 = 4096;
 const DELTA_SEGMENT_MAGIC: &[u8] = b"MGDSG001";
 const CORRUPTION_SCAN_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+const SEGMENT_COUNT_SCAN_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_QUERY_PROBES_PER_SCENARIO: usize = 32;
-const SCENARIOS: &[AccumulationScenario] = &[
+const T8B_MINI_MODE: &str = "t8b-mini";
+const FULL_SCENARIOS: &[AccumulationScenario] = &[
     AccumulationScenario {
         facts_per_checkpoint: 1,
         checkpoints: 10,
@@ -43,6 +45,16 @@ const SCENARIOS: &[AccumulationScenario] = &[
         checkpoints: 100,
     },
 ];
+const T8B_MINI_SCENARIOS: &[AccumulationScenario] = &[
+    AccumulationScenario {
+        facts_per_checkpoint: 1,
+        checkpoints: 1_000,
+    },
+    AccumulationScenario {
+        facts_per_checkpoint: 10,
+        checkpoints: 100,
+    },
+];
 
 #[derive(Clone, Copy, Debug)]
 struct AccumulationScenario {
@@ -65,6 +77,7 @@ struct AccumulationMeasurement {
     base_pages: u64,
     final_pages: u64,
     actual_delta_facts: usize,
+    segment_count: usize,
     corrupt_latest_fallback: bool,
 }
 
@@ -76,6 +89,7 @@ struct DurationStats {
 }
 
 fn main() -> Result<()> {
+    let scenarios = selected_scenarios();
     let root = tempfile::tempdir()?;
     let base_path = root.path().join("base-1m.graph");
     build_checkpointed_base(&base_path)?;
@@ -83,11 +97,11 @@ fn main() -> Result<()> {
     let base_pages = file_page_count(&base_path)?;
 
     println!(
-        "facts_per_checkpoint,checkpoints,accumulated_delta_facts,query_probe_count,flush_p50_ms,flush_p95_ms,flush_max_ms,reopen_p50_ms,reopen_p95_ms,reopen_max_ms,current_query_p50_ms,current_query_p95_ms,current_query_max_ms,as_of_query_p50_ms,as_of_query_p95_ms,as_of_query_max_ms,base_file_bytes,final_file_bytes,file_growth_bytes,base_pages,final_pages,page_growth,actual_delta_facts,corrupt_latest_fallback"
+        "facts_per_checkpoint,checkpoints,accumulated_delta_facts,query_probe_count,flush_p50_ms,flush_p95_ms,flush_max_ms,reopen_p50_ms,reopen_p95_ms,reopen_max_ms,current_query_p50_ms,current_query_p95_ms,current_query_max_ms,as_of_query_p50_ms,as_of_query_p95_ms,as_of_query_max_ms,base_file_bytes,final_file_bytes,file_growth_bytes,base_pages,final_pages,page_growth,actual_delta_facts,segment_count,corrupt_latest_fallback"
     );
 
     let mut measurements = Vec::new();
-    for &scenario in SCENARIOS {
+    for &scenario in scenarios {
         let run_path = root.path().join(format!(
             "accum-{}x{}.graph",
             scenario.facts_per_checkpoint, scenario.checkpoints
@@ -98,8 +112,18 @@ fn main() -> Result<()> {
         measurements.push(measurement);
     }
 
-    assert_matrix_complete(&measurements)?;
+    assert_matrix_complete(&measurements, scenarios)?;
     Ok(())
+}
+
+fn selected_scenarios() -> &'static [AccumulationScenario] {
+    let arg_mode = std::env::args().nth(1);
+    let env_mode = std::env::var("MINIGRAF_DELTA_ACCUMULATION_MODE").ok();
+    if arg_mode.as_deref() == Some(T8B_MINI_MODE) || env_mode.as_deref() == Some(T8B_MINI_MODE) {
+        T8B_MINI_SCENARIOS
+    } else {
+        FULL_SCENARIOS
+    }
 }
 
 fn measure_accumulation(
@@ -172,6 +196,7 @@ fn measure_accumulation(
 
     let final_file_bytes = file_len(path)?;
     let final_pages = file_page_count(path)?;
+    let segment_count = count_delta_segments(path)?;
     let corrupt_latest_fallback = verify_corrupt_latest_segment_fallback(path, scenario)?;
 
     Ok(AccumulationMeasurement {
@@ -188,6 +213,7 @@ fn measure_accumulation(
         base_pages,
         final_pages,
         actual_delta_facts,
+        segment_count,
         corrupt_latest_fallback,
     })
 }
@@ -265,6 +291,38 @@ fn corrupt_last_delta_segment(path: &Path) -> Result<()> {
     file.write_all(&byte)?;
     file.sync_data()?;
     Ok(())
+}
+
+fn count_delta_segments(path: &Path) -> Result<usize> {
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = vec![0u8; SEGMENT_COUNT_SCAN_CHUNK_BYTES];
+    let mut carry = Vec::new();
+    let mut count = 0usize;
+
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+
+        let mut chunk = Vec::with_capacity(carry.len().saturating_add(read));
+        chunk.extend_from_slice(&carry);
+        chunk.extend_from_slice(&buffer[..read]);
+        count = count.saturating_add(
+            chunk
+                .windows(DELTA_SEGMENT_MAGIC.len())
+                .filter(|window| *window == DELTA_SEGMENT_MAGIC)
+                .count(),
+        );
+
+        let keep = DELTA_SEGMENT_MAGIC.len().saturating_sub(1).min(chunk.len());
+        carry.clear();
+        if keep > 0 {
+            carry.extend_from_slice(&chunk[chunk.len().saturating_sub(keep)..]);
+        }
+    }
+
+    Ok(count)
 }
 
 fn find_last_delta_segment_marker(file: &mut std::fs::File, file_len: u64) -> Result<u64> {
@@ -436,7 +494,7 @@ fn db_error(error: impl std::fmt::Display) -> anyhow::Error {
 
 fn print_measurement(measurement: &AccumulationMeasurement) {
     println!(
-        "{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{}",
         measurement.facts_per_checkpoint,
         measurement.checkpoints,
         measurement.accumulated_delta_facts,
@@ -464,6 +522,7 @@ fn print_measurement(measurement: &AccumulationMeasurement) {
             .final_pages
             .saturating_sub(measurement.base_pages),
         measurement.actual_delta_facts,
+        measurement.segment_count,
         measurement.corrupt_latest_fallback
     );
 }
@@ -472,11 +531,14 @@ fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-fn assert_matrix_complete(measurements: &[AccumulationMeasurement]) -> Result<()> {
-    if measurements.len() != SCENARIOS.len() {
+fn assert_matrix_complete(
+    measurements: &[AccumulationMeasurement],
+    scenarios: &[AccumulationScenario],
+) -> Result<()> {
+    if measurements.len() != scenarios.len() {
         bail!("accumulation benchmark did not cover every scenario");
     }
-    for scenario in SCENARIOS {
+    for scenario in scenarios {
         let found = measurements.iter().any(|measurement| {
             measurement.facts_per_checkpoint == scenario.facts_per_checkpoint
                 && measurement.checkpoints == scenario.checkpoints

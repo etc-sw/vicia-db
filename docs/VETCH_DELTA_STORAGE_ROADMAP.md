@@ -3,11 +3,11 @@
 Branch: `vetch/minigraf-refactor-plan`
 
 Status: overall execution plan as of 2026-06-05. T7C is measured, T8A
-multi-segment manifest publish is implemented on this branch, and T8B is the
-next benchmark gate. This document is the single high-level plan for the
-Vetch-driven Minigraf delta-storage line. The detailed storage format and test
-specification remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence
-remains in `docs/BENCHMARKS.md`.
+multi-segment manifest publish is implemented on this branch, T8B mini benchmark
+has passed, and T8C is the next benchmark gate. This document is the single
+high-level plan for the Vetch-driven Minigraf delta-storage line. The detailed
+storage format and test specification remain in `docs/DELTA_INDEX_DESIGN.md`;
+benchmark evidence remains in `docs/BENCHMARKS.md`.
 
 ## Scope
 
@@ -34,13 +34,13 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/REFACTORING_AND_ALGORITHM_PLAN.md` | Original R0-R6 cleanup, benchmark, and gate plan. Records Gate 1 and Gate 2 decisions. |
 | `docs/DELTA_INDEX_REFERENCE_SURVEY.md` | Reference DB survey. Extracts portable invariants from GrafeoDB, Fjall, and redb without adopting them as dependencies. |
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
-| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, and T7C. |
+| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, and T8B. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
 
 ## Decision Summary
 
 Minigraf should continue the v10 in-file delta-index direction and move next to
-multi-segment manifest publish.
+the full T8C accumulation matrix.
 
 T7C showed that the current single-segment replacement path is not viable for
 Vetch's long-running receipt cadence:
@@ -55,9 +55,20 @@ Vetch's long-running receipt cadence:
 - As-of/replay receipt reads remain around seconds and are a separate
   agent-brief read-path blocker.
 
-The next implementation should therefore stop rewriting accumulated delta facts
-on every checkpoint. Small checkpoints should append one new delta segment and
-publish a manifest that lists all visible segments.
+T8A now stops rewriting accumulated delta facts on every checkpoint. T8B
+confirms the mini gate:
+
+- 1M base + 1 fact x 1K: flush p95 `11.679 ms`, max `15.874 ms`,
+  reopen p95 `6.290 ms`, file growth `12,234,752 B`, segment count `1,000`.
+- 1M base + 10 facts x 100: flush p95 `6.882 ms`, max `7.233 ms`,
+  reopen p95 `2.644 ms`, file growth `1,228,800 B`, segment count `100`.
+- Corrupt latest segment fallback remains `true`.
+- Immediate current-query reads remain sub-millisecond.
+- As-of/replay receipt reads remain around `1.45 s` p95 and are still a
+  separate Q1 agent-brief read-path blocker.
+
+The next step is therefore T8C full matrix measurement, not an immediate
+manifest-cost fix or recompact threshold.
 
 ## Evidence Trail
 
@@ -77,6 +88,7 @@ the result of progressively narrower gates:
 | T7B | Double-buffered manifest slots became the real publish boundary; second rotated delta flush was `2.852 ms`. | Crash-safe slot publish works for replacement single-segment deltas. |
 | T7C | Accumulated single-segment replacement failed: 1K one-fact checkpoints p95 `102.385 ms`; 10K p95 `1,051.300 ms`; file growth `18.9 GB`. | Replace single-segment replacement with multi-segment append before tuning. |
 | T8A | Visible-delta checkpoint now appends one pending-only segment and publishes an expanded manifest list. Integration covers multi-segment Ref edges, retractions, export order, and corrupt-segment fallback. | Run T8B mini benchmark before broader tuning or recompact thresholds. |
+| T8B | Multi-segment mini gate passed: 1K one-fact checkpoints p95 `11.679 ms`, max `15.874 ms`, reopen p95 `6.290 ms`; 10x100 p95 `6.882 ms`; fallback remains true. | Continue to T8C full accumulation matrix. |
 
 ## Philosophy Fit
 
@@ -141,8 +153,8 @@ Vetch should use Minigraf with this cadence:
 | T7B | Done | Use double-buffered manifest slots as publish boundary. | Corrupt newer slot can fall back to previous valid slot. |
 | T7C | Done | Measure accumulated single-segment replacement cadence. | Single-segment replacement fails; multi-segment append is required. |
 | T8A | Done | Append a new delta segment per checkpoint and publish a multi-segment manifest. | Integration and corrupt-segment fallback tests pass. |
-| T8B | Planned | Mini benchmark gate after T8A. | Flush/reopen/file growth meet near-term Vetch targets. |
-| T8C | Planned | Full accumulated benchmark matrix. | Decide whether multi-segment is sufficient or needs immediate thresholds. |
+| T8B | Done | Mini benchmark gate after T8A. | Flush/reopen/file growth meet near-term Vetch targets. |
+| T8C | Planned next | Full accumulated benchmark matrix. | Decide whether multi-segment is sufficient or needs immediate thresholds. |
 | T9 | Planned | Recompact thresholds and maintenance path. | Long-term segment/file growth is bounded outside hot path. |
 | Q1 | Planned separate lane | Agent-brief receipt/as-of read-path improvement. | Just-written receipt can be read cheaply on a 1M base. |
 | Q2 | Planned cleanup lane | Streaming/allocation cleanup after correctness shape stabilizes. | Export/checkpoint/recompact memory improves without semantic drift. |
@@ -154,7 +166,7 @@ Each gate has one owner decision:
 | Gate | Decide | Continue if | Reassess if |
 | --- | --- | --- | --- |
 | T8A correctness | Can multi-segment manifest preserve exact visible semantics? | Base + multiple deltas, retractions, `Value::Ref`, export, reopen, and corruption tests pass. | Reader merge collapses history identity or corrupt middle segment can silently drop facts. |
-| T8B mini benchmark | Is the new algorithm likely enough? | 1K one-fact accumulated delta flush p95 <= `50 ms`, max near <= `200 ms`, reopen <= `250-500 ms`. | Flush still scales with accumulated facts or manifest rewrite dominates. |
+| T8B mini benchmark | Is the new algorithm likely enough? | Passed: 1K one-fact accumulated delta flush p95 `11.679 ms`, max `15.874 ms`, reopen p95 `6.290 ms`. | Flush still scales with accumulated facts or manifest rewrite dominates. |
 | T8C full matrix | Is multi-segment publish the default path? | Flush remains pending-sized across 10/100/1K/10K accumulation scenarios. | Reopen/query/file growth worsens with segment count. |
 | T9 threshold gate | Are internal thresholds enough? | Recompact bounds segment/file growth without entering Vetch foreground work. | Thresholds fire too often, or recompact publish weakens crash guarantees. |
 | Q1 read gate | Is the next-agent brief cheap enough? | Receipt/as-of reads avoid whole-base scans for Vetch-shaped reads. | Query optimization risks Datalog semantics or requires broad public API churn. |
@@ -228,6 +240,13 @@ Decision after T8B:
 | Flush passes, reopen/file growth grows with segment count | Add recompact threshold policy before full matrix. |
 | Flush still misses at 100-1K accumulated facts | Inspect manifest rewrite/checksum cost before adding more features. |
 | Current query regresses | Fix reader merge path before proceeding. |
+
+T8B result: the target passed. The 1M base + 1 fact x 1K scenario measured
+flush p95 `11.679 ms`, max `15.874 ms`, reopen p95 `6.290 ms`, file growth
+`12,234,752 B`, segment count `1,000`, and corrupt fallback `true`. The
+1M base + 10 facts x 100 scenario measured flush p95 `6.882 ms`, reopen p95
+`2.644 ms`, file growth `1,228,800 B`, segment count `100`, and corrupt
+fallback `true`. Proceed to T8C.
 
 ### Phase T8C: Full Accumulation Matrix Re-run
 
@@ -404,8 +423,9 @@ Run for storage publish/recovery slices:
 
 Run benchmark gates only when the relevant slice is ready:
 
-- T8B mini benchmark before full accumulation matrix.
-- T8C full `cargo bench --bench delta_accumulation_benchmark` after T8B passes.
+- T8B mini benchmark is complete.
+- T8C full `cargo bench --bench delta_accumulation_benchmark` is the next
+  benchmark gate.
 
 Known verification caveat:
 
@@ -416,35 +436,40 @@ Known verification caveat:
 
 ## Next Slice Goal Spec
 
-Name: T8B mini benchmark gate.
+Name: T8C full accumulation matrix.
 
 Objective:
 
-- Prove the T8A multi-segment append path fixes the T7C accumulated-receipt
-  failure before running the full T8C matrix or adding recompact thresholds.
+- Re-run the full T7C accumulated-receipt matrix against the T8A multi-segment
+  append path and decide whether T9 thresholds are needed immediately.
 
 Scope:
 
-- Benchmark and reporting only unless the mini gate exposes a narrow correctness
+- Benchmark and reporting only unless the full matrix exposes a narrow correctness
   regression.
 - No public API change.
 - No new dependency.
-- No recompact threshold implementation in T8B.
-- No as-of query optimization in T8B; measure it and route to Q1 if still slow.
+- No recompact threshold implementation in T8C.
+- No as-of query optimization in T8C; measure it and route to Q1 if still slow.
 
 Done:
 
-- 1M base + 1 fact checkpoint x 1K measured for flush, reopen, current query,
-  as-of/replay query, file/page growth, segment count, and delta fact count.
-- 1M base + 10 facts checkpoint x 100 measured with the same fields.
-- Corrupt latest segment fallback still passes after the benchmark fixture.
+- 1M base + 1 fact checkpoint x 10 / 100 / 1K / 10K measured for flush,
+  reopen, current query, as-of/replay query, file/page growth, segment count,
+  and delta fact count.
+- 1M base + 10 facts checkpoint x 100 / 1K measured with the same fields.
+- 1M base + 100 facts checkpoint x 100 measured with the same fields.
+- Corrupt latest segment fallback still passes for every benchmark scenario.
 - Results are recorded in `docs/BENCHMARKS.md`.
-- Decision recorded: proceed to T8C, add manifest-cost fix, or add T9 threshold
-  work before the full matrix.
+- Decision recorded: keep multi-segment as-is, add a narrow manifest-cost fix,
+  or proceed directly to T9 threshold work.
 
 Stop conditions:
 
-- If flush still scales with accumulated delta facts at 100-1K facts, inspect
+- If flush scales with accumulated delta facts at 1K-10K facts, inspect
   manifest serialization/checksum cost before adding broader features.
 - If reopen grows outside the 250-500 ms target, route to T9 threshold design.
-- If current-query latency regresses, fix reader merge before T8C.
+- If current-query latency regresses, fix reader merge before T9.
+- If file/page growth becomes unacceptable while hot flush stays healthy, keep
+  T8C complete and make T9 thresholds the next slice instead of changing the
+  checkpoint algorithm inside T8C.

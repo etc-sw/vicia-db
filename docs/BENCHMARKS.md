@@ -312,6 +312,25 @@ Reopen remains acceptable for the measured matrix (p95 <= 29.157 ms), and immedi
 
 T7C verdict: proceed to a multi-segment manifest design before treating this as a production Vetch storage rhythm. Keep durable append immediate, allow receipt/slice checkpoint batching, schedule recompact only in idle/background/maintenance windows, and forbid foreground full rebuild for normal Vetch work.
 
+### T8B: Multi-Segment Mini Gate
+
+Run: 2026-06-05, `MINIGRAF_DELTA_ACCUMULATION_MODE=t8b-mini cargo bench --bench delta_accumulation_benchmark`.
+
+Fixture update: the same `benches/delta_accumulation_benchmark.rs` harness now supports a `t8b-mini` mode that runs the two T8B gate scenarios before the full T8C matrix. The CSV output now includes `segment_count`, computed by scanning visible delta segment payload markers before the corrupt-latest fallback check.
+
+Base file: 407,179,264 bytes / 99,409 pages. `actual_delta_facts` is computed from `export_fact_log()` after each scenario. `corrupt_latest_fallback` corrupts the latest visible delta segment and verifies reopen falls back to the previous valid manifest slot.
+
+| Facts/checkpoint | Checkpoints | Delta facts | Probes | Flush p50 | Flush p95 | Flush max | Reopen p50 | Reopen p95 | Reopen max | Current query p50 | Current query p95 | Current query max | As-of query p50 | As-of query p95 | As-of query max | File growth | Page growth | Actual delta facts | Segment count | Corrupt fallback |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 1K | 1K | 32 | 7.692 ms | 11.679 ms | 15.874 ms | 3.245 ms | 6.290 ms | 6.386 ms | 0.059 ms | 0.067 ms | 0.068 ms | 1,409.446 ms | 1,449.337 ms | 1,464.959 ms | 12,234,752 B | 2,987 | 1,000 | 1,000 | true |
+| 10 | 100 | 1K | 32 | 5.713 ms | 6.882 ms | 7.233 ms | 1.326 ms | 2.644 ms | 2.707 ms | 0.055 ms | 0.083 ms | 0.092 ms | 1,411.079 ms | 1,454.465 ms | 1,464.000 ms | 1,228,800 B | 300 | 1,000 | 100 | true |
+
+T8B observation: multi-segment append fixes the measured T7C failure for the 1K accumulated-delta gate. The one-fact cadence drops from T7C's 102.385 ms flush p95 to 11.679 ms, and max drops from 117.191 ms to 15.874 ms. Reopen stays far under the 250-500 ms gate, immediate current-query reads remain sub-millisecond, and corrupt-latest fallback still works.
+
+The remaining issue is unchanged from T7C: as-of/replay receipt reads still take about 1.45 s p95 on the 1M base. That is not a T8 storage-publish blocker; it remains a separate Q1 read-path lane for Vetch agent briefs.
+
+T8B verdict: proceed to T8C full accumulation matrix. Do not add a manifest-cost fix or recompact threshold before T8C; keep T9 as the follow-up only if the full matrix shows long-term segment/file growth pressure.
+
 ---
 
 ## Concurrency (In-Memory)
