@@ -76,6 +76,10 @@ wasm-bindgen-test = "0.3"
 name = "minigraf_bench"
 harness = false
 
+[[bench]]
+name = "delta_accumulation_benchmark"
+harness = false
+
 [features]
 default = []
 wasm = []

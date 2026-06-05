@@ -2,7 +2,7 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: living design and test specification. T0-T5A guardrails are partially implemented on this branch; T5B records the checkpoint outcome and recovery policy before multi-segment work.
+Status: living design and test specification. T0-T7C guardrails are implemented on this branch; T7C records the accumulated-receipt benchmark gate before multi-segment manifest work.
 
 ## Decision
 
@@ -142,7 +142,7 @@ Behavior:
 - Candidate deduplication must use full-history identity, not just E/A/V.
 - The reader may return a `Vec<FactRef>` initially because the current trait returns vectors. A later streaming trait can be designed only after correctness is locked.
 
-The first reader implementation proved merge semantics against the existing index key types and test fixtures. The current branch now writes v10 files with a single visible delta segment and falls back to full rebuild when a delta already exists.
+The first reader implementation proved merge semantics against the existing index key types and test fixtures. The current branch now writes v10 files with a single visible delta segment and can publish a replacement single-segment delta through the inactive manifest slot when a visible delta already exists.
 
 ## Flush Semantics
 
@@ -156,6 +156,15 @@ Initial policy:
 - Keep public `checkpoint()` as the API name.
 - Internally prefer delta flush when the existing file is v10-capable and the delta segment count/bytes are below thresholds.
 - Fall back to full rebuild if manifest validation fails, if there are too many segments, or if a format upgrade is required.
+
+T7C policy update for Vetch:
+
+- Durable append/receipt stays immediate through the WAL path.
+- Segment checkpoint/flush may be batched by receipt or slice, but it must not rewrite all accumulated delta facts on every checkpoint.
+- Recompact should be idle/background/scheduled maintenance.
+- Full rebuild is import/maintenance only and must not be a foreground path in normal Vetch work.
+- The next storage slice should replace single-segment replacement with a multi-segment manifest. Internal/background recompact thresholds still matter, but they do not remove the need for append-only segment publish.
+- Agent-brief read latency must be measured separately from publish latency. T7C shows immediate current queries stay sub-millisecond, while as-of/replay queries over a 1M base stay around seconds and need a separate read/query-path improvement.
 
 ### Checkpoint Outcome And WAL Retire Policy
 
@@ -327,6 +336,8 @@ Current T7A result, recorded in `docs/BENCHMARKS.md`: v10 single-segment delta p
 
 Current T7B result, recorded in `docs/BENCHMARKS.md`: v10 now uses both manifest slots as the real publish boundary. A second small write over a visible delta publishes a replacement single-segment delta through the inactive slot instead of forcing an interactive full rebuild. The 1M base plus one pending fact gate remains pending-sized at 3.336 ms for first delta flush and 0.088 ms for reopen; the second rotated delta flush is 2.852 ms.
 
+Current T7C result, recorded in `docs/BENCHMARKS.md`: single-segment replacement fails the accumulated Vetch receipt gate. With a 1M base and 1 fact per checkpoint, 1K accumulated delta facts have flush p95 102.385 ms, above the 50 ms target. At 10K accumulated delta facts, flush p95 is 1,051.300 ms and file growth is 18.9 GB. Batching reduces file growth but not the hot flush problem: 10 facts x 1K checkpoints and 100 facts x 100 checkpoints both end near 1 second p95 at 10K accumulated delta facts. Reopen remains under 30 ms p95 and immediate current-query reads remain sub-millisecond, but as-of/replay queries remain about 1.75-2.72 s p95 and must be treated as a separate agent-brief read-path blocker.
+
 ## Implementation Order
 
 1. Add `LayeredIndexReader` and in-memory delta entry fixtures.
@@ -341,6 +352,9 @@ Current T7B result, recorded in `docs/BENCHMARKS.md`: v10 now uses both manifest
 10. Scope selected-delta checksum validation to base identity plus delta bytes.
 11. Use double-buffered manifest slots as the publish boundary for replacement single-segment deltas.
 12. Re-run T6/T7 benchmark gates and update `docs/BENCHMARKS.md`.
+13. Implement multi-segment manifest publish so small checkpoints append one new segment instead of rewriting all accumulated delta facts.
+14. Add internal/background recompact thresholds for segment count, delta bytes, and long-term file growth.
+15. Add a separate read-path gate for Vetch agent briefs, especially as-of/replay query latency after receipt writes.
 
 ## Open Questions
 
@@ -348,3 +362,4 @@ Current T7B result, recorded in `docs/BENCHMARKS.md`: v10 now uses both manifest
 - Should `export_fact_log()` read through the same base-plus-delta manifest, or should it keep a dedicated fact-log stream path?
 - Is a sync-data mode enough for delta segment publish on all supported platforms, or should v10 use full sync for the first release?
 - Should `recompact()` be public immediately, or stay internal until Vetch has a real scheduling caller?
+- Which query executor path should make as-of receipt reads cheap enough for Vetch agent briefs: tighter index pushdown, a fact-log replay reader, or a prepared current/as-of receipt API?

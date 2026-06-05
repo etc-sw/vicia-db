@@ -288,6 +288,30 @@ Code change: v10 header extension slots are now the real publish boundary. Check
 
 T7B observation: T7A's 1M+1 small-write gate did not regress. It improved from 5.266 ms / 0.114 ms to 3.336 ms / 0.088 ms in this run. The second write over an already visible delta is also pending-sized at 2.852 ms for 1M+1, because it publishes through the inactive manifest slot instead of rebuilding the base graph.
 
+### T7C: Accumulated Delta Receipt Cadence
+
+Run: 2026-06-05, `cargo bench --bench delta_accumulation_benchmark`.
+
+Fixture: `benches/delta_accumulation_benchmark.rs` builds a checkpointed 1M-fact base, copies it per scenario, disables auto-checkpoint, then appends receipt-like `Value::Ref` facts and explicitly checkpoints after each receipt batch. It measures flush latency for every checkpoint and samples reopen/current/as-of query latency at up to 32 evenly spaced probe points per scenario. The query probes intentionally model Vetch's "write receipt, then read it into the next agent brief" rhythm.
+
+Base file: 407,179,264 bytes / 99,409 pages. `actual_delta_facts` is computed from `export_fact_log()` after each scenario. `corrupt_latest_fallback` corrupts the latest visible delta segment and verifies reopen falls back to the previous valid manifest slot.
+
+| Facts/checkpoint | Checkpoints | Delta facts | Probes | Flush p50 | Flush p95 | Flush max | Reopen p50 | Reopen p95 | Reopen max | Current query p50 | Current query p95 | Current query max | As-of query p50 | As-of query p95 | As-of query max | File growth | Page growth | Actual delta facts | Corrupt fallback |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 10 | 10 | 10 | 3.310 ms | 3.882 ms | 3.882 ms | 0.087 ms | 0.159 ms | 0.159 ms | 0.073 ms | 0.148 ms | 0.148 ms | 2,149.602 ms | 2,349.469 ms | 2,349.469 ms | 86,016 B | 21 | 10 | true |
+| 1 | 100 | 100 | 32 | 7.645 ms | 12.737 ms | 13.685 ms | 0.200 ms | 0.348 ms | 0.429 ms | 0.067 ms | 0.111 ms | 0.125 ms | 1,954.557 ms | 2,176.345 ms | 2,257.758 ms | 2,560,000 B | 625 | 100 | true |
+| 1 | 1K | 1K | 32 | 53.280 ms | 102.385 ms | 117.191 ms | 1.185 ms | 2.947 ms | 3.475 ms | 0.080 ms | 0.124 ms | 0.129 ms | 1,940.586 ms | 2,313.958 ms | 2,369.837 ms | 193,953,792 B | 47,352 | 1,000 | true |
+| 1 | 10K | 10K | 32 | 580.898 ms | 1,051.300 ms | 1,559.688 ms | 16.829 ms | 26.618 ms | 36.794 ms | 0.239 ms | 0.843 ms | 0.881 ms | 2,187.777 ms | 2,724.895 ms | 3,006.894 ms | 18,910,830,592 B | 4,616,902 | 10,000 | true |
+| 10 | 100 | 1K | 32 | 52.522 ms | 97.086 ms | 107.716 ms | 1.247 ms | 2.239 ms | 2.543 ms | 0.071 ms | 0.097 ms | 0.120 ms | 1,661.411 ms | 1,754.994 ms | 1,780.161 ms | 19,558,400 B | 4,775 | 1,000 | true |
+| 10 | 1K | 10K | 32 | 518.268 ms | 1,010.723 ms | 1,174.454 ms | 13.825 ms | 27.198 ms | 27.213 ms | 0.130 ms | 0.199 ms | 0.199 ms | 1,735.617 ms | 2,418.004 ms | 2,470.194 ms | 1,878,642,688 B | 458,653 | 10,000 | true |
+| 100 | 100 | 10K | 32 | 613.283 ms | 1,017.925 ms | 1,231.897 ms | 12.504 ms | 29.157 ms | 31.001 ms | 0.132 ms | 0.221 ms | 0.224 ms | 1,865.914 ms | 2,015.893 ms | 2,439.979 ms | 189,546,496 B | 46,276 | 10,000 | true |
+
+T7C observation: the current single-segment replacement path is not viable as the long-running Vetch receipt cadence. The 1M base plus one fact repeated to 1K accumulated delta facts already misses the proposed single-segment gate: hot flush p95 is 102.385 ms, above the 50 ms target. At 10K accumulated delta facts, flush p95 is roughly one second and file growth reaches 18.9 GB for the one-fact checkpoint cadence. Batching reduces file growth sharply, but not hot flush p95: both 10x1K and 100x100 end near 1 second p95 at 10K accumulated delta facts.
+
+Reopen remains acceptable for the measured matrix (p95 <= 29.157 ms), and immediate current-query latency after writes remains sub-millisecond even at 10K accumulated delta facts. The separate blocker is as-of/replay query latency: every scenario spends about 1.75-2.72 s p95 to read the just-written receipt through the as-of path. That is not a delta publish failure; it is a read/query path problem that matters for Vetch agent briefs.
+
+T7C verdict: proceed to a multi-segment manifest design before treating this as a production Vetch storage rhythm. Keep durable append immediate, allow receipt/slice checkpoint batching, schedule recompact only in idle/background/maintenance windows, and forbid foreground full rebuild for normal Vetch work.
+
 ---
 
 ## Concurrency (In-Memory)
