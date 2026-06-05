@@ -1731,6 +1731,20 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
     }
 
+    /// Run scheduled delta maintenance from an idle/background caller.
+    ///
+    /// This is intentionally not called from `save()`/foreground checkpoint.
+    /// The caller must first make pending writes durable; this method preserves
+    /// the same pending-facts guard as explicit recompact.
+    #[allow(dead_code)]
+    pub(crate) fn run_idle_delta_maintenance(&mut self) -> Result<CheckpointOutcome> {
+        match self.delta_maintenance_decision() {
+            DeltaMaintenanceDecision::ContinueDeltaAppend => Ok(CheckpointOutcome::Noop),
+            DeltaMaintenanceDecision::ScheduleBackgroundRecompact
+            | DeltaMaintenanceDecision::MaintenanceBackpressure => self.recompact_visible_delta(),
+        }
+    }
+
     /// Mark storage as dirty (needs saving)
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
@@ -3142,6 +3156,94 @@ mod tests {
             storage.delta_maintenance_decision(),
             DeltaMaintenanceDecision::ScheduleBackgroundRecompact
         );
+        Ok(())
+    }
+
+    fn install_threshold_manifest(
+        storage: &mut PersistentFactStorage<MemoryBackend>,
+        segment_count: u64,
+    ) -> Result<()> {
+        let base_page_count = 1_000_000;
+        let mut segments = Vec::new();
+        let mut page_start = base_page_count;
+        for index in 0..segment_count {
+            let tx_count = index.saturating_add(1);
+            segments.push(DeltaManifestSegment::fixture(
+                page_start, 1, tx_count, 1, tx_count, tx_count,
+            ));
+            page_start = page_start.saturating_add(1);
+        }
+        let manifest =
+            DeltaManifest::new(1, DeltaBaseIdentity::fixture(base_page_count, 0), segments)?;
+        storage.delta_manifest_selection = PersistedManifestSelection::Use {
+            slot: HeaderManifestSlotName::Primary,
+            manifest,
+        };
+        Ok(())
+    }
+
+    #[test]
+    fn test_idle_delta_maintenance_noops_for_healthy_delta() -> Result<()> {
+        let mut storage = storage_with_visible_ref_delta()?;
+
+        assert_eq!(
+            storage.run_idle_delta_maintenance()?,
+            CheckpointOutcome::Noop
+        );
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_idle_delta_maintenance_recompacts_scheduled_delta() -> Result<()> {
+        let mut storage = storage_with_visible_ref_delta()?;
+        let before = fact_projection(storage.storage())?;
+        install_threshold_manifest(&mut storage, 1_024)?;
+
+        assert_eq!(
+            storage.delta_maintenance_decision(),
+            DeltaMaintenanceDecision::ScheduleBackgroundRecompact
+        );
+        assert_eq!(
+            storage.run_idle_delta_maintenance()?,
+            CheckpointOutcome::FullRebuildFromVisibleDelta
+        );
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::NoDeltaManifest
+        ));
+        assert_eq!(
+            before,
+            fact_projection(storage.storage())?,
+            "idle maintenance must preserve visible fact identity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_idle_delta_maintenance_rejects_pending_facts() -> Result<()> {
+        let mut storage = storage_with_visible_ref_delta()?;
+        install_threshold_manifest(&mut storage, 1_024)?;
+        let pending = Fact::with_valid_time(
+            Uuid::from_u128(0x5678),
+            ":pending/name".to_string(),
+            Value::String("pending".to_string()),
+            400,
+            4,
+            400,
+            VALID_TIME_FOREVER,
+        );
+        storage.storage().load_fact(pending)?;
+
+        let result = storage.run_idle_delta_maintenance();
+        assert!(result.is_err(), "pending facts must block idle maintenance");
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
         Ok(())
     }
 

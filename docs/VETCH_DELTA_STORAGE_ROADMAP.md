@@ -6,12 +6,12 @@ Status: overall execution plan as of 2026-06-06. T7C is measured, T8A
 multi-segment manifest publish is implemented on this branch, T8B mini benchmark
 has passed, T8C full matrix is measured, T9A threshold policy is documented,
 T9B private threshold metrics pass, T9C-A adds a private explicit recompact
-primitive, and T9C-B makes recompact publish copy-on-write. Automatic/background
-scheduling is still a caller-policy decision and is not wired into foreground
-`checkpoint()`. This document is the single high-level plan for the Vetch-driven
-Minigraf delta-storage line. The detailed storage format and test specification
-remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
-`docs/BENCHMARKS.md`.
+primitive, T9C-B makes recompact publish copy-on-write, and T9C-C adds a private
+idle/background maintenance caller. Automatic/background scheduling remains a
+caller-policy decision and is not wired into foreground `checkpoint()`. This
+document is the single high-level plan for the Vetch-driven Minigraf
+delta-storage line. The detailed storage format and test specification remain in
+`docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in `docs/BENCHMARKS.md`.
 
 ## Scope
 
@@ -179,7 +179,7 @@ Vetch should use Minigraf with this cadence:
 | T9B | Done | Private threshold metrics and decision tests. | The storage layer can classify visible delta growth without doing foreground full rebuild. |
 | T9C-A | Done | Private explicit recompact primitive. | Manual/internal recompact preserves visible semantics when it completes successfully and is guarded against pending writes. |
 | T9C-B | Done | Crash-safe recompact publish gate. | Recompact writes a copy-on-write base after the current image and publishes it through page 0 with a protected base-start pointer. |
-| T9C-C | Planned | Background/idle scheduling policy gate. | Decide whether threshold-triggered maintenance should stay explicit or get an internal non-foreground caller. |
+| T9C-C | Done | Background/idle scheduling policy gate. | Threshold-triggered maintenance has a private idle/background caller and remains out of foreground checkpoint. |
 | Q1 | Planned separate lane | Agent-brief receipt/as-of read-path improvement. | Just-written receipt can be read cheaply on a 1M base. |
 | Q2 | Planned cleanup lane | Streaming/allocation cleanup after correctness shape stabilizes. | Export/checkpoint/recompact memory improves without semantic drift. |
 
@@ -594,8 +594,10 @@ Run benchmark gates only when the relevant slice is ready:
 - T9B private threshold metrics and decision tests are complete.
 - T9C-A private explicit recompact primitive is complete.
 - T9C-B crash-safe recompact publish is complete.
-- T9C-C background/idle scheduling policy is the next storage gate if Vetch
-  wants automatic maintenance rather than explicit maintenance calls.
+- T9C-C background/idle scheduling policy is complete. It adds a private
+  `run_idle_delta_maintenance()` caller that executes recompact only for
+  scheduled/backpressure decisions, noops for healthy deltas, and preserves the
+  pending-facts guard.
 
 Known verification caveat:
 
@@ -604,15 +606,14 @@ Known verification caveat:
   the storage implementation gate unless the all-target lint cleanup lane is
   explicitly active.
 
-## Next Slice Goal Spec
+## Completed Slice: T9C-C Background Recompact Scheduling Policy Gate
 
 Name: T9C-C background recompact scheduling policy gate.
 
 Objective:
 
-- Decide whether the private threshold decision surface should trigger an
-  internal/background recompact caller, remain explicit for Vetch to schedule,
-  or expose a tiny maintenance API after Vetch defines the scheduling contract.
+- Give the private threshold decision surface an internal/background caller
+  without adding a public API or running recompact in foreground checkpoint.
 
 Scope:
 
@@ -621,14 +622,19 @@ Scope:
 - No new dependency.
 - No public recompact API unless a Vetch scheduling contract is explicit.
 - No as-of query optimization in T9C-C; keep that in Q1.
-- No foreground `checkpoint()` recompact unless the policy proves it cannot run
-  in Vetch's interactive write path.
+- No foreground `checkpoint()` threshold-triggered recompact.
 
 Done:
 
-- Threshold-triggered internal scheduling either remains explicit, moves to a
-  clearly background-only caller, or is deferred behind a Vetch contract.
-- Existing checkpoint/reopen/crash tests stay green after the chosen policy.
+- Done: threshold-triggered maintenance moves to a clearly idle/background-only
+  private caller.
+- Done: healthy deltas return `Noop`.
+- Done: scheduled and backpressure decisions call the crash-safe copy-on-write
+  recompact primitive.
+- Done: pending facts still block maintenance, so Vetch must checkpoint receipt
+  writes before idle recompact.
+- Done: no public `recompact()` API and no new dependency.
+- Done: foreground checkpoint remains on the delta append path.
 
 Stop conditions:
 

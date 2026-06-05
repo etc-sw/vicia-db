@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Vetch T9C-B crash-safe recompact publish + base-start header extension (June 2026), 1111 tests ✅
+**Last Updated**: Vetch T9C-C private idle recompact maintenance caller (June 2026), 1114 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1111 ✅ (1103 passing, 8 ignored)
-- ✅ 738 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, and T9C-B recompact base-start publish guards)
+**Total Tests**: 1114 ✅ (1106 passing, 8 ignored)
+- ✅ 741 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, and T9C-C idle maintenance policy guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -742,6 +742,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ both invalid manifest slots error instead of silently dropping committed delta writes
 - ✅ full rebuild fallback after a visible delta preserves results and fact-log rows
 - ✅ recompact writes a copy-on-write base, records checksum-protected base fact start, and keeps unpublished candidate pages invisible before page 0 publish
+- ✅ private idle delta maintenance noops on healthy deltas, recompact scheduled/backpressure deltas, and rejects pending facts
 - ✅ FileBackend non-header page writes do not publish disk page 0; durable page-count changes require an explicit header write
 
 ### Delta Checkpoint Crash Recovery (`tests/delta_checkpoint_crash_recovery_test.rs`) - ✅ 5 tests
