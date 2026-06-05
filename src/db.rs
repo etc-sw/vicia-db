@@ -647,7 +647,12 @@ impl Minigraf {
                 // no write path was exercised. Without it `save()` would no-op and
                 // the replayed facts would never reach the main file.
                 pfs.force_dirty();
-                pfs.save()?;
+                let checkpoint_outcome = pfs.save()?;
+                if *wal_entry_count > 0 && !checkpoint_outcome.permits_wal_retire() {
+                    anyhow::bail!(
+                        "Checkpoint produced no durable publish while WAL entries remain"
+                    );
+                }
 
                 // Derive WAL path and delete the sidecar.
                 let wal_path = Self::wal_path_for(db_path);

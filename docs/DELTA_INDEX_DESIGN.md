@@ -2,7 +2,7 @@
 
 Branch: `vetch/minigraf-refactor-plan`
 
-Status: design and test specification. No implementation is included in this slice.
+Status: living design and test specification. T0-T5A guardrails are partially implemented on this branch; T5B records the checkpoint outcome and recovery policy before multi-segment work.
 
 ## Decision
 
@@ -26,16 +26,19 @@ The design target is:
 
 ## Current Storage Boundary
 
-The current v9 file has page 0 with four committed index roots and checksums. `PersistentFactStorage::save()`:
+The current v10 file has page 0 with the legacy 84-byte header plus the delta manifest extension area. The base header still carries four committed index roots and checksums. `PersistentFactStorage::save()` can currently take three internal paths:
+
+1. No-op when there is no dirty state.
+2. Single-segment delta publish when a clean v10 base has pending facts and no visible delta manifest.
+3. Full rebuild from either base-plus-pending facts or the current visible base-plus-delta view.
+
+Every durable path still follows the same discipline:
 
 1. Reads the current header.
-2. Streams old B+tree entries before index pages are overwritten.
-3. Appends pending fact pages.
-4. Builds new EAVT, AEVT, AVET, and VAET B+trees from committed plus pending entries.
-5. Syncs fact and index pages.
-6. Writes page 0 as the commit point.
-7. Wires `CommittedFactReader` and `CommittedIndexReader`.
-8. Clears pending facts and deletes the WAL after checkpoint.
+2. Writes and syncs fact/index/manifest pages before publication.
+3. Writes page 0 as the commit point.
+4. Wires `CommittedFactReader` and `CommittedIndexReader`.
+5. Clears pending facts and allows WAL retire only after the durable publish is known.
 
 This design preserves that discipline. It changes what a checkpoint/flush writes, not the fact identity model.
 
@@ -138,7 +141,7 @@ Behavior:
 - Candidate deduplication must use full-history identity, not just E/A/V.
 - The reader may return a `Vec<FactRef>` initially because the current trait returns vectors. A later streaming trait can be designed only after correctness is locked.
 
-The first implementation should not write v10 files. It should prove merge semantics against the existing index key types and test fixtures.
+The first reader implementation proved merge semantics against the existing index key types and test fixtures. The current branch now writes v10 files with a single visible delta segment and falls back to full rebuild when a delta already exists.
 
 ## Flush Semantics
 
@@ -152,6 +155,19 @@ Initial policy:
 - Keep public `checkpoint()` as the API name.
 - Internally prefer delta flush when the existing file is v10-capable and the delta segment count/bytes are below thresholds.
 - Fall back to full rebuild if manifest validation fails, if there are too many segments, or if a format upgrade is required.
+
+### Checkpoint Outcome And WAL Retire Policy
+
+`PersistentFactStorage::save()` reports an internal `CheckpointOutcome`:
+
+| Outcome | Durable publish evidence | WAL retire allowed |
+| --- | --- | --- |
+| `Noop` | No page 0 publish happened. | No |
+| `FullRebuild` | Base fact pages, indexes, checksum, and page 0 were synced. | Yes |
+| `FullRebuildFromVisibleDelta` | The visible base-plus-delta view was folded into a fresh base and page 0 was synced. | Yes |
+| `DeltaSegment` | Delta segment pages, manifest pages, v10 header extension, and page 0 were synced. | Yes |
+
+`Minigraf::checkpoint()` must not delete the WAL if replayed or newly written WAL entries remain and `save()` returns `Noop`. In normal operation `force_dirty()` prevents that path during WAL replay, but the guard is deliberate: WAL retire is allowed only when the storage layer reports a durable publish boundary, not merely `Ok(())`.
 
 Suggested thresholds for the first implementation:
 
@@ -188,6 +204,17 @@ This keeps the current full-rebuild implementation as the safety net.
 | Header primary slot flipped but new manifest corrupt | Fall back to a secondary valid manifest if it covers the durable view; otherwise replay WAL or report corruption. |
 | Recompact pages written but header not published | Previous base plus manifest remains visible. |
 | Recompact header published but delta retire interrupted | New base is visible; old delta pages are garbage but ignored by manifest. |
+
+State selection summary:
+
+| Disk state on reopen | Expected behavior |
+| --- | --- |
+| Extra unpublished bytes after page 0 | Ignore them; they are outside the selected base or manifest. |
+| Selected manifest slot is valid | Load base plus selected manifest segments. |
+| Selected manifest slot is corrupt but alternate slot is valid | Fall back to the alternate valid slot. |
+| Selected manifest references truncated or out-of-bounds pages | Reject that manifest; use alternate valid slot or WAL repair/error policy. |
+| No valid manifest and WAL covers newer txs | Replay WAL and force a durable checkpoint. |
+| No valid manifest and WAL was already retired past base | Report corruption rather than silently dropping delta-covered writes. |
 
 ## Test Spec
 
@@ -260,7 +287,7 @@ Cases:
 
 ### T5: Crash Simulation
 
-New test module: `tests/delta_checkpoint_crash_test.rs`.
+New test module: `tests/delta_checkpoint_crash_recovery_test.rs`.
 
 Cases:
 
@@ -271,6 +298,14 @@ Cases:
 - interrupt delta retire after recompact header publish
 
 Use deterministic file mutation helpers. Do not use debug formatting of `Result`, `Fact`, `Value`, or `Uuid` in assertion messages.
+
+T5B adds the recovery-policy surface:
+
+- clean save returns `CheckpointOutcome::Noop`
+- first base checkpoint returns `CheckpointOutcome::FullRebuild`
+- small append on a clean base returns `CheckpointOutcome::DeltaSegment`
+- pending facts on a visible delta return `CheckpointOutcome::FullRebuildFromVisibleDelta`
+- `checkpoint()` treats `Noop` as insufficient evidence for deleting a non-empty WAL
 
 ### T6: Benchmark Gate
 

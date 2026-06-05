@@ -119,6 +119,20 @@ struct LayeredFactLoaderImpl {
     delta_facts: BTreeMap<FactRef, Fact>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckpointOutcome {
+    Noop,
+    FullRebuild,
+    FullRebuildFromVisibleDelta,
+    DeltaSegment,
+}
+
+impl CheckpointOutcome {
+    pub(crate) fn permits_wal_retire(self) -> bool {
+        !matches!(self, Self::Noop)
+    }
+}
+
 impl LayeredFactLoaderImpl {
     fn new(base: Arc<dyn CommittedFactReader>, segments: &[DeltaSegment]) -> Self {
         let mut delta_facts = BTreeMap::new();
@@ -374,7 +388,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         Ok(segment)
     }
 
-    fn save_full_rebuild_from_visible_facts(&mut self) -> Result<()> {
+    fn save_full_rebuild_from_visible_facts(&mut self) -> Result<CheckpointOutcome> {
         let all_facts = self.storage.get_all_facts()?;
         let (fact_pages, fact_refs) = pack_facts(&all_facts, 1)?;
         let num_fact_pages = u64::try_from(fact_pages.len())
@@ -458,7 +472,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.dirty = false;
         self.wire_committed_readers(&header, Vec::new())?;
         self.storage.post_checkpoint_clear();
-        Ok(())
+        Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
     }
 
     /// Load all facts from the backend into memory.
@@ -1092,15 +1106,18 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
     }
 
-    fn try_save_single_segment_delta(&mut self, pending_facts: &[Fact]) -> Result<bool> {
+    fn try_save_single_segment_delta(
+        &mut self,
+        pending_facts: &[Fact],
+    ) -> Result<Option<CheckpointOutcome>> {
         if pending_facts.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         if !matches!(
             self.delta_manifest_selection,
             PersistedManifestSelection::NoDeltaManifest
         ) {
-            return Ok(false);
+            return Ok(None);
         }
 
         let mut backend = self
@@ -1109,7 +1126,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
         let curr_header = match backend.read_page(0) {
             Ok(bytes) => FileHeader::from_bytes(&bytes)?,
-            Err(_) if backend.is_new() => return Ok(false),
+            Err(_) if backend.is_new() => return Ok(None),
             Err(e) => anyhow::bail!("Failed to read header from existing file: {}", e),
         };
         if curr_header.version != crate::storage::FORMAT_VERSION
@@ -1119,7 +1136,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             || curr_header.avet_root_page == 0
             || curr_header.vaet_root_page == 0
         {
-            return Ok(false);
+            return Ok(None);
         }
 
         let segment_page_start = curr_header.page_count;
@@ -1181,19 +1198,19 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.dirty = false;
         self.wire_committed_readers(&header, vec![segment])?;
         self.storage.post_checkpoint_clear();
-        Ok(true)
+        Ok(Some(CheckpointOutcome::DeltaSegment))
     }
 
     /// Save all facts from memory to the backend using packed pages and v6 on-disk B+tree indexes.
-    pub fn save(&mut self) -> Result<()> {
+    pub fn save(&mut self) -> Result<CheckpointOutcome> {
         if !self.dirty {
-            return Ok(());
+            return Ok(CheckpointOutcome::Noop);
         }
 
         // ── Step A: read current header + stream old B+tree entries BEFORE overwriting ──
         let pending_facts = self.storage.get_pending_facts();
-        if matches!(self.try_save_single_segment_delta(&pending_facts), Ok(true)) {
-            return Ok(());
+        if let Ok(Some(outcome)) = self.try_save_single_segment_delta(&pending_facts) {
+            return Ok(outcome);
         }
         if matches!(
             self.delta_manifest_selection,
@@ -1378,7 +1395,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         // Clear pending — all data now on disk
         self.storage.post_checkpoint_clear();
 
-        Ok(())
+        Ok(CheckpointOutcome::FullRebuild)
     }
 
     /// Get a reference to the underlying fact storage
@@ -2593,6 +2610,82 @@ mod tests {
             facts.len(),
             1,
             "committed fact must be visible after reopen"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_outcome_variants_cover_delta_and_fallback_paths() {
+        let backend = MemoryBackend::new();
+        let mut storage = PersistentFactStorage::new(backend, 256).unwrap();
+
+        let clean_outcome = storage.save().unwrap();
+        assert_eq!(
+            clean_outcome,
+            CheckpointOutcome::Noop,
+            "clean save should publish nothing"
+        );
+        assert!(
+            !clean_outcome.permits_wal_retire(),
+            "no-op save must not prove WAL durability"
+        );
+
+        storage
+            .storage()
+            .transact(
+                vec![(
+                    Uuid::new_v4(),
+                    ":base/name".to_string(),
+                    Value::String("base".to_string()),
+                )],
+                None,
+            )
+            .unwrap();
+        storage.mark_dirty();
+        let base_outcome = storage.save().unwrap();
+        assert_eq!(
+            base_outcome,
+            CheckpointOutcome::FullRebuild,
+            "first checkpoint should build a base view"
+        );
+        assert!(
+            base_outcome.permits_wal_retire(),
+            "full rebuild should prove WAL durability"
+        );
+
+        storage
+            .storage()
+            .transact(
+                vec![(
+                    Uuid::new_v4(),
+                    ":delta/name".to_string(),
+                    Value::String("delta".to_string()),
+                )],
+                None,
+            )
+            .unwrap();
+        storage.mark_dirty();
+        assert_eq!(
+            storage.save().unwrap(),
+            CheckpointOutcome::DeltaSegment,
+            "small append on a base view should publish a delta segment"
+        );
+
+        storage
+            .storage()
+            .transact(
+                vec![(
+                    Uuid::new_v4(),
+                    ":after-delta/name".to_string(),
+                    Value::String("after".to_string()),
+                )],
+                None,
+            )
+            .unwrap();
+        storage.mark_dirty();
+        assert_eq!(
+            storage.save().unwrap(),
+            CheckpointOutcome::FullRebuildFromVisibleDelta,
+            "pending facts on a visible delta should fold into a full rebuild"
         );
     }
 
