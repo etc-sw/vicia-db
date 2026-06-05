@@ -12,6 +12,7 @@ pub mod cache;
 pub(crate) mod delta_index;
 pub(crate) mod delta_manifest;
 pub(crate) mod delta_segment;
+pub(crate) mod header_extension;
 pub mod index;
 pub mod packed_pages;
 pub mod persistent_facts;
