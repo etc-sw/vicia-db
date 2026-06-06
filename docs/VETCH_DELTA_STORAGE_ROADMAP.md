@@ -11,7 +11,8 @@ idle/background maintenance caller, and Q1-A adds a dedicated agent-brief
 read-path benchmark harness. Q1-B resolves the entity/attribute-bound as-of
 agent-brief point-read blocker with selective index pushdown. Q2-A removes the
 intermediate committed `Vec<Fact>` allocation from `export_fact_log()` without
-changing its public `Vec<FactRecord>` API. Automatic/background scheduling
+changing its public `Vec<FactRecord>` API. S1 has rechecked the Q1-B/Q2-A
+surface before Q2-B. Automatic/background scheduling
 remains a caller-policy decision and is not wired into foreground `checkpoint()`.
 This document is the single high-level plan for the Vetch-driven Minigraf
 delta-storage line. The detailed storage format and test specification remain
@@ -43,13 +44,17 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/REFACTORING_AND_ALGORITHM_PLAN.md` | Original R0-R6 cleanup, benchmark, and gate plan. Records Gate 1 and Gate 2 decisions. |
 | `docs/DELTA_INDEX_REFERENCE_SURVEY.md` | Reference DB survey. Extracts portable invariants from GrafeoDB, Fjall, and redb without adopting them as dependencies. |
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
-| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, and Q1-B. |
+| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, and Q2-A. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
 
 ## Decision Summary
 
-Minigraf should continue the v10 in-file delta-index direction and move next to
-T9A threshold and maintenance policy.
+Minigraf should keep the v10 in-file delta-index direction. T9 threshold and
+recompact policy, Q1-B agent-brief as-of pushdown, and Q2-A export allocation
+cleanup are complete. After S1, the next implementation slice can be Q2-B as a
+cleanup spike only: reduce recompact/checkpoint/export memory shape where the
+current locking model allows it, without changing public API, ledger identity,
+or foreground checkpoint policy.
 
 T7C showed that the current single-segment replacement path is not viable for
 Vetch's long-running receipt cadence:
@@ -122,6 +127,11 @@ the result of progressively narrower gates:
 | T8A | Visible-delta checkpoint now appends one pending-only segment and publishes an expanded manifest list. Integration covers multi-segment Ref edges, retractions, export order, and corrupt-segment fallback. | Run T8B mini benchmark before broader tuning or recompact thresholds. |
 | T8B | Multi-segment mini gate passed: 1K one-fact checkpoints p95 `11.679 ms`, max `15.874 ms`, reopen p95 `6.290 ms`; 10x100 p95 `6.882 ms`; fallback remains true. | Continue to T8C full accumulation matrix. |
 | T8C | Full matrix passed for the default path but exposed the long-tail limit: 1x10K p95 `99.818 ms` and file growth `662,257,664 B`; 10K facts batched into 1K/100 segments stay under `50 ms` p95. | Keep multi-segment publish; add T9A segment/file-growth thresholds. |
+| T9 | Threshold decisions, explicit private recompact, copy-on-write publish, and idle/background maintenance caller are implemented. | Keep foreground checkpoint on delta append; Vetch schedules idle maintenance. |
+| Q1-A | Full 1M agent-brief benchmark split current, formatted as-of, prepared as-of, and export/replay paths. | Optimize as-of point reads first; do not add a public receipt API yet. |
+| Q1-B | Entity/attribute-bound as-of p95 dropped from `1,257.698-1,499.003 ms` to `0.017-0.043 ms` on the 1M matrix. | Treat the receipt-scoped Datalog read blocker as fixed for Vetch-shaped point reads. |
+| Q2-A | `export_fact_log()` streams committed facts into `FactRecord`s instead of first collecting committed `Vec<Fact>`. | Keep export as full-log audit API; defer narrower recent-log reads until Vetch proves that path is hot. |
+| S1 | Q1-B/Q2-A review and stability checks passed; all-target clippy still fails on pre-existing test-lint debt. | Proceed to Q2-B only as a bounded cleanup spike. |
 
 ## Philosophy Fit
 
@@ -196,6 +206,7 @@ Vetch should use Minigraf with this cadence:
 | Q1-A | Done | Agent-brief read-path benchmark/spec gate. | Current, as-of, prepared as-of, and export/replay surfaces are measured separately. |
 | Q1-B | Done | Agent-brief read strategy decision. | Entity/attribute-bound as-of selective pushdown fixes the receipt-scoped point-read blocker without public API changes. |
 | Q2-A | Done | Export fact-log allocation cleanup. | `export_fact_log()` uses a streaming committed fact visitor and avoids an intermediate `Vec<Fact>`. |
+| S1 | Done | Stability/code-quality review before Q2-B. | Q1-B/Q2-A surfaces pass targeted tests, full tests, fmt, lib clippy, and diff whitespace checks. |
 | Q2-B | Planned cleanup lane | Continue streaming/allocation cleanup after correctness shape stabilizes. | Recompact/checkpoint/export memory improves without semantic drift. |
 
 ## Gate Protocol
@@ -209,6 +220,7 @@ Each gate has one owner decision:
 | T8C full matrix | Is multi-segment publish the default path? | Default path accepted; 1K segment p95 is `12.318 ms`, and batched 10K facts stay under `50 ms`. | 10K tiny segments reach p95 `99.818 ms` and file growth `662,257,664 B`. |
 | T9 threshold gate | Are internal thresholds enough? | Recompact bounds segment/file growth without entering Vetch foreground work. | Thresholds fire too often, or recompact publish weakens crash guarantees. |
 | Q1 read gate | Is the next-agent brief cheap enough? | Receipt/as-of reads avoid whole-base scans for Vetch-shaped reads. | Query optimization risks Datalog semantics or requires broad public API churn. |
+| S1 stability gate | Are Q1-B/Q2-A safe enough before Q2-B? | Review finds no semantic blocker and targeted recovery/export/query tests plus broad gates pass. | Visitor order, rule/as-of semantics, crash fallback, or ledger identity regress. |
 
 Do not skip gates by adding a broader storage engine, sidecar index, vector
 stack, or public API. If a gate fails, fix the narrow failing invariant first.
@@ -751,6 +763,42 @@ Evidence:
 - Full 1M export/replay p95 remains latency-neutral in broad terms:
   `197.300-245.555 ms` after Q2-A versus `199.950-234.806 ms` after Q1-B.
 - Q2-A is therefore a memory-shape cleanup, not a query-latency fix.
+
+## Completed Gate: S1 Stability And Code-Quality Review
+
+Name: S1 Q1-B/Q2-A stability and code-quality gate.
+
+Objective:
+
+- Recheck the merged Q1-B/Q2-A surface before Q2-B touches recompact/checkpoint
+  streaming internals.
+
+Done:
+
+- Reviewed selective `:as-of` pushdown for rule, `not`, `not-join`, `or`, and
+  `or-join` surfaces.
+- Reviewed committed fact visitor ordering and export semantics.
+- Confirmed Q2-B remains a cleanup spike, not a public API or checkpoint
+  algorithm change.
+
+Evidence:
+
+- Passed: `cargo test as_of_ --lib`.
+- Passed: `cargo test --test fact_log_export_test`.
+- Passed: `cargo test --test delta_checkpoint_integration_test`.
+- Passed: `cargo test --test delta_checkpoint_crash_recovery_test`.
+- Passed: `cargo test --test retraction_test`.
+- Passed: `cargo test --test not_join_test`.
+- Passed: `cargo test --test disjunction_test`.
+- Passed: `cargo test --test production_patterns_test`.
+- Passed: `cargo test test_for_each_fact_streams_committed_without_stream_all --lib`.
+- Passed: `cargo fmt -- --check`.
+- Passed: `cargo test`.
+- Passed: `cargo clippy --lib -- -D warnings`.
+- Passed: `git diff --check HEAD~1..HEAD`.
+- Audit-only: `cargo clippy --all-targets -- -D warnings` still fails on
+  pre-existing test-lint debt such as `unwrap/expect/panic/indexing` in tests
+  and a pre-existing test-helper `type_complexity` lint.
 
 ## Next Slice Goal Spec
 
