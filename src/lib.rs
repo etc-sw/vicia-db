@@ -90,6 +90,11 @@ pub mod browser;
 #[cfg(not(target_arch = "wasm32"))]
 pub use db::OpenOptionsWithPath;
 pub use db::{Minigraf, OpenOptions, WriteTransaction};
+/// Vicia DB compatibility name for the primary embedded database handle.
+///
+/// This is intentionally a type alias during the Vicia DB transition: existing
+/// `Minigraf` code and new `ViciaDb` code use the same API and file format.
+pub type ViciaDb = Minigraf;
 pub use repl::Repl;
 
 // EAV value types — users construct and match on these

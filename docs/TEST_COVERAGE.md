@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Vetch Q1-A agent-brief read-path benchmark harness (June 2026), 1114 tests ✅
+**Last Updated**: Vicia DB V2 Rust API compatibility alias (June 2026), 1119 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1114 ✅ (1106 passing, 8 ignored)
-- ✅ 741 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, and T9C-C idle maintenance policy guards)
+**Total Tests**: 1119 ✅ (1111 passing, 8 ignored)
+- ✅ 744 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, and T9C-C idle maintenance policy guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -47,9 +47,10 @@
 - ✅ 10 XTDB compat tests (integration, Wave 3 #221 — Apache 2.0 semantic ports of XTDB concepts)
 - ✅ 9 Datomic compat tests (integration, Wave 3 #221 — independently written semantic ports of Datomic concepts)
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
+- ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 993 tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
+**Status**: ✅ **All 1111 non-ignored tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -958,6 +959,7 @@ cargo test --test index_corruption_test    # index corruption (5)
 cargo test --test property_test            # property-based (3)
 cargo test --test xtdb_compat_test         # XTDB compat (10)
 cargo test --test datomic_compat_test      # Datomic compat (9)
+cargo test --test vicia_api_alias_test     # Vicia DB API alias compatibility (2)
 cargo test --test smoke_test -- --include-ignored  # long-haul smoke (1, nightly)
 
 # Run with output

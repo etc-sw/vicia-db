@@ -1,20 +1,23 @@
 # Vicia DB Rename Plan
 
-Status: V0 rename plan and V1 docs/metadata preparation are complete. No
-package, public API, file format, or repository rename has been performed.
+Status: V0 rename plan, V1 docs/metadata preparation, and V2 Rust API
+compatibility alias are complete. No package, file format, or language-binding
+rename has been performed.
 
 Date: 2026-06-06
 
-Branch: `vicia/rename-plan`
+Branch: `vicia/api-alias` for the V2 update. The initial plan landed on
+`vicia/rename-plan`.
 
 ## Recommendation
 
 Adopt **Vicia DB** as the Vetch-oriented name for this Minigraf line, but do it
 as a staged successor/fork rename rather than a broad in-place rewrite.
 
-The first implementation step after this document should be a docs/metadata
-slice. Public Rust API and language-binding renames should happen only after the
-compatibility policy is explicit.
+The first implementation steps are now complete: docs/metadata introduced the
+Vicia DB transition, and the Rust API exposes `ViciaDb` as a compatibility alias
+for `Minigraf`. Package and language-binding renames should happen only after a
+separate publish decision.
 
 ## Name Rationale
 
@@ -60,9 +63,9 @@ storage, sidecar indexes, or a client/server layer to the core database. Those
 remain Vetch-side projections until a benchmark-backed proposal proves they
 belong in the core.
 
-## Compatibility Policy To Decide
+## Compatibility Policy Result
 
-The next planning gate must choose one of these options before code rename work:
+V2 chose the lowest-risk option before any package or binding rename work:
 
 | Option | Shape | Tradeoff |
 | --- | --- | --- |
@@ -70,9 +73,10 @@ The next planning gate must choose one of these options before code rename work:
 | Type rename with alias | Rename primary type to `ViciaDb`, keep `type Minigraf = ViciaDb` for one compatibility window. | Clearer new identity, more doc and example churn. |
 | Hard rename | Remove `Minigraf` public type. | Cleanest brand, highest compatibility risk. Not recommended yet. |
 
-Recommendation: **type rename with alias**, but only after docs/metadata are
-settled. For the first code slice, prefer alias-first if there is any uncertainty
-about downstream users or bindings.
+Current result: **alias-first** is implemented. `ViciaDb` is a public type alias
+for `Minigraf`, preserving the existing API, package name, and file format. A
+future type rename with `Minigraf` as an alias remains possible, but should wait
+for a deliberate break-window or publish decision.
 
 ## Rename Surfaces
 
@@ -82,7 +86,7 @@ The rename touches more than `Cargo.toml`.
 | --- | --- | --- |
 | `Cargo.toml` | Decide package/repository/documentation URLs. | Rename package only when publish path is ready. |
 | README | Introduce Vicia DB as successor/fork. | Replace examples after API policy is chosen. |
-| Rust API | None in docs-only slice. | Add `ViciaDb` alias/wrapper before removing `Minigraf`. |
+| Rust API | Add `ViciaDb` alias (done in V2). | Consider primary type rename only after a publish or break-window decision. |
 | Docs | Add rename plan and update roadmap references. | Replace user-facing Minigraf naming where appropriate. |
 | Tests/benches | None initially. | Rename imports after crate/package decision. |
 | Language bindings | Defer. | Treat as separate releases with compatibility notes. |
@@ -223,6 +227,13 @@ Verification:
 - `cargo clippy --lib -- -D warnings`
 - `cargo fmt -- --check`
 
+Result:
+
+- Done: `ViciaDb` is exported as a public type alias for `Minigraf`.
+- Done: tests prove in-memory usage through `ViciaDb`, legacy `Minigraf`
+  interoperability, file-backed checkpoint, and reopen through `Minigraf`.
+- Done: no package rename, file-format change, or binding rename.
+
 ### V3: Package/Repository Publish Decision
 
 Goal:
@@ -259,8 +270,8 @@ Gate:
 
 ## Open Questions
 
-- Should `ViciaDb` be a type alias, a newtype wrapper, or the renamed struct
-  with `Minigraf` as an alias?
+- Should a future release promote `ViciaDb` to the primary struct with
+  `Minigraf` as a compatibility alias?
 - Should `minigraf` remain as a compatibility crate that re-exports `vicia_db`?
 - Should Vicia DB remain Vetch-internal until the Q2 cleanup lane completes?
 - Which organization/repository should own the successor package?
@@ -268,5 +279,6 @@ Gate:
 
 ## Current Recommendation
 
-Proceed to V1 only after this plan is reviewed. Keep Q2-B storage cleanup and
-Vicia rename work on separate branches.
+Proceed to V3 only when a real package/repository publish decision is needed.
+Keep Q2-B storage cleanup and any future Vicia package/binding rename work on
+separate branches.

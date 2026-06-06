@@ -16,9 +16,9 @@ A tiny, self-contained graph database with **Datalog queries** and **bi-temporal
 ## Vicia DB Transition
 
 This repository is preparing **Vicia DB** as the Vetch-oriented successor name
-for this Minigraf line. The current Rust package, public API, examples, and
-language bindings remain `minigraf` / `Minigraf` until a compatibility alias
-policy is implemented and tested.
+for this Minigraf line. The current Rust package and language bindings remain
+`minigraf`; Rust code may now use the `ViciaDb` compatibility alias while
+existing `Minigraf` code continues to work unchanged.
 
 See [docs/VICIA_DB_RENAME_PLAN.md](docs/VICIA_DB_RENAME_PLAN.md) for the staged
 rename plan, compatibility policy, and attribution checklist.
@@ -88,6 +88,9 @@ tx.commit()?;
 // Time travel — query as of past transaction counter
 db.execute("(query [:find ?age :as-of 1 :where [:alice :person/age ?age]])")?;
 
+// Vicia-facing Rust code can use the compatibility alias for the same handle
+let _vicia = minigraf::ViciaDb::in_memory()?;
+
 // Recursive rule — transitive reachability
 db.execute(r#"(rule [(reachable ?a ?b) [?a :friend ?b]])
               (rule [(reachable ?a ?b) [?a :friend ?m] (reachable ?m ?b)])"#)?;
@@ -101,7 +104,7 @@ let r2 = pq.execute(&[("tx", BindValue::TxCount(2)), ("entity", BindValue::Entit
 
 ```bash
 cargo run          # interactive Datalog REPL
-cargo test         # run 995 tests
+cargo test         # run 1111 passing tests
 cargo run < demos/demo_recursive.txt   # recursive rules demo
 ```
 
