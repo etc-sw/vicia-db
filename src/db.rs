@@ -604,13 +604,12 @@ impl Minigraf {
     ///
     /// Returns an error if the underlying fact reader fails.
     pub fn export_fact_log(&self) -> Result<Vec<FactRecord>> {
-        Ok(self
-            .inner
-            .fact_storage
-            .get_all_facts()?
-            .into_iter()
-            .map(FactRecord::from_fact)
-            .collect())
+        let mut records = Vec::new();
+        self.inner.fact_storage.for_each_fact(|fact| {
+            records.push(FactRecord::from_fact(fact));
+            Ok(())
+        })?;
+        Ok(records)
     }
 
     /// Internal checkpoint logic (operates on an already-held write-lock guard).

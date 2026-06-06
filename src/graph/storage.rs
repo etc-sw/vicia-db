@@ -398,6 +398,22 @@ impl FactStorage {
         Ok(all)
     }
 
+    /// Visit all facts in deterministic storage order without materializing a
+    /// full intermediate `Vec<Fact>` for committed records.
+    pub(crate) fn for_each_fact(&self, mut visit: impl FnMut(Fact) -> Result<()>) -> Result<()> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
+        if let Some(loader) = &d.committed {
+            loader.for_each_fact(&mut visit)?;
+        }
+        for fact in d.facts.iter().cloned() {
+            visit(fact)?;
+        }
+        Ok(())
+    }
+
     /// Return all facts visible as of the given transaction point.
     ///
     /// * `AsOf::Counter(n)` — include facts whose `tx_count <= n`
@@ -1634,6 +1650,85 @@ mod tests {
             valid_at.len(),
             1,
             "get_facts_valid_at should include committed facts"
+        );
+    }
+
+    #[test]
+    fn test_for_each_fact_streams_committed_without_stream_all() {
+        use crate::storage::CommittedFactReader;
+        use crate::storage::index::FactRef;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        struct StreamingOnlyLoader {
+            facts: Vec<Fact>,
+        }
+        impl CommittedFactReader for StreamingOnlyLoader {
+            fn resolve(&self, fr: FactRef) -> anyhow::Result<Fact> {
+                self.facts
+                    .get(fr.slot_index as usize)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("slot not found"))
+            }
+
+            fn stream_all(&self) -> anyhow::Result<Vec<Fact>> {
+                anyhow::bail!("stream_all should not be called by for_each_fact")
+            }
+
+            fn for_each_fact(
+                &self,
+                visit: &mut dyn FnMut(Fact) -> anyhow::Result<()>,
+            ) -> anyhow::Result<()> {
+                for fact in self.facts.iter().cloned() {
+                    visit(fact)?;
+                }
+                Ok(())
+            }
+
+            fn committed_page_count(&self) -> u64 {
+                1
+            }
+        }
+
+        let committed = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":committed".to_string(),
+            Value::Integer(1),
+            1000,
+            1,
+            1000,
+            VALID_TIME_FOREVER,
+        );
+        let pending = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":pending".to_string(),
+            Value::Integer(2),
+            2000,
+            2,
+            2000,
+            VALID_TIME_FOREVER,
+        );
+
+        let storage = FactStorage::new();
+        storage.set_committed_reader(Arc::new(StreamingOnlyLoader {
+            facts: vec![committed],
+        }));
+        storage
+            .load_fact(pending)
+            .expect("pending fact should load");
+
+        let mut attributes = Vec::new();
+        storage
+            .for_each_fact(|fact| {
+                attributes.push(fact.attribute);
+                Ok(())
+            })
+            .expect("streaming fact visit should succeed");
+
+        assert_eq!(
+            attributes,
+            vec![":committed".to_string(), ":pending".to_string()],
+            "streaming visitor must preserve committed-then-pending order"
         );
     }
 

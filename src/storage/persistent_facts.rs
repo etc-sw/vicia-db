@@ -112,6 +112,19 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
         crate::storage::packed_pages::read_all_from_pages(&*backend, first_fact_page, n)
     }
 
+    fn for_each_fact(
+        &self,
+        visit: &mut dyn FnMut(crate::graph::types::Fact) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let n = self.committed_fact_pages.load(Ordering::SeqCst);
+        let first_fact_page = self.committed_fact_page_start.load(Ordering::SeqCst);
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        crate::storage::packed_pages::for_each_from_pages(&*backend, first_fact_page, n, visit)
+    }
+
     fn committed_page_count(&self) -> u64 {
         self.committed_fact_pages.load(Ordering::SeqCst)
     }
@@ -168,6 +181,17 @@ impl CommittedFactReader for LayeredFactLoaderImpl {
         let mut facts = self.base.stream_all()?;
         facts.extend(self.delta_facts.values().cloned());
         Ok(facts)
+    }
+
+    fn for_each_fact(
+        &self,
+        visit: &mut dyn FnMut(Fact) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.base.for_each_fact(visit)?;
+        for fact in self.delta_facts.values().cloned() {
+            visit(fact)?;
+        }
+        Ok(())
     }
 
     fn committed_page_count(&self) -> u64 {

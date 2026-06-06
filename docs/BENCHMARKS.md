@@ -366,7 +366,7 @@ Fixture: `benches/agent_brief_read_path_benchmark.rs` builds a checkpointed base
 - prepared as-of point query: same shape through `PreparedQuery`
 - export/replay proxy: `export_fact_log()` followed by filtering records from the latest tx
 
-Smoke base file: 3,977,216 bytes / 971 pages. The smoke mode uses a 10K base so the harness can be verified quickly; full Q1-A should be run with `cargo bench --bench agent_brief_read_path_benchmark` for the 1M base.
+Smoke base file: 3,977,216 bytes / 971 pages. The smoke mode uses a 10K base so the harness can be verified quickly.
 
 | Mode | Scenario | Base facts | Facts/checkpoint | Checkpoints | Delta facts | Probes | Current p95 | As-of p95 | Prepared as-of p95 | Export recent filter p95 | File growth |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -375,7 +375,45 @@ Smoke base file: 3,977,216 bytes / 971 pages. The smoke mode uses a 10K base so 
 
 Q1-A observation: prepared as-of is not materially faster than formatted as-of in the smoke run, so parser/string formatting overhead is not the main blocker. The current point query remains cheap, while `:as-of` point lookup is already hundreds of times slower on a 10K base. Full export plus recent filtering is also O(total facts), but it is faster than current as-of at 10K because it avoids Datalog matching work after materialization.
 
-Q1-A verdict: proceed to Q1-B read strategy selection. The likely first implementation should make entity/attribute-bound `:as-of` queries use selective index fetch before temporal filtering, or provide an internal recent tx-window fact-log reader for agent briefs. Do not change checkpoint/recompact policy for this blocker.
+Full Q1-A pre-Q1-B run: 2026-06-06, `cargo bench --bench agent_brief_read_path_benchmark`.
+
+| Mode | Scenario | Base facts | Facts/checkpoint | Checkpoints | Delta facts | Probes | Current p95 | As-of p95 | Prepared as-of p95 | Export recent filter p95 | File growth |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| full | single_receipt | 1M | 1 | 1 | 1 | 1 | 0.105 ms | 1,257.698 ms | 1,260.495 ms | 179.836 ms | 8,192 B |
+| full | receipt_stream_100 | 1M | 1 | 100 | 100 | 32 | 0.060 ms | 1,499.003 ms | 1,462.962 ms | 192.015 ms | 819,200 B |
+| full | batched_receipts_1000 | 1M | 10 | 100 | 1,000 | 32 | 0.070 ms | 1,456.026 ms | 1,623.022 ms | 221.938 ms | 1,228,800 B |
+
+Full Q1-A verdict: proceed with Q1-B as-of selective pushdown first. Prepared execution is not materially faster than formatted as-of on the 1M run, so a prepared helper would not solve the blocker. Export plus recent filtering is still a full-log path and remains around 180-220 ms p95, but it is not the immediate blocker for entity-scoped receipt reads.
+
+### Q1-B: Agent-Brief As-Of Selective Pushdown
+
+Run: 2026-06-06, `cargo bench --bench agent_brief_read_path_benchmark`.
+
+Change: entity/attribute-bound `:as-of` queries now try the existing selective committed-index fetch before transaction-time filtering. Queries that use rules stay on the full fact base. No public API, file-format, checkpoint, or recompact policy changed.
+
+| Mode | Scenario | Base facts | Facts/checkpoint | Checkpoints | Delta facts | Probes | Current p95 | As-of p95 | Prepared as-of p95 | Export recent filter p95 | File growth |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| full | single_receipt | 1M | 1 | 1 | 1 | 1 | 0.046 ms | 0.017 ms | 0.013 ms | 199.950 ms | 8,192 B |
+| full | receipt_stream_100 | 1M | 1 | 100 | 100 | 32 | 0.062 ms | 0.037 ms | 0.026 ms | 230.992 ms | 819,200 B |
+| full | batched_receipts_1000 | 1M | 10 | 100 | 1,000 | 32 | 0.060 ms | 0.043 ms | 0.026 ms | 234.806 ms | 1,228,800 B |
+
+Smoke after Q1-B: the 10K smoke matrix drops formatted as-of p95 from `7.940-9.549 ms` to `0.017-0.026 ms`, and prepared as-of p95 from `7.849-9.336 ms` to `0.013-0.022 ms`.
+
+Q1-B verdict: the Vetch "just-written receipt -> next agent brief" point-read blocker is fixed for entity/attribute-bound Datalog as-of queries on a 1M base. A recent fact-log reader is still a possible future optimization if Vetch's agent brief path needs export/replay-style reads, but it is no longer needed to make receipt-scoped as-of Datalog reads cheap.
+
+### Q2-A: Export Fact-Log Allocation Cleanup
+
+Run: 2026-06-06, `cargo bench --bench agent_brief_read_path_benchmark`.
+
+Change: `export_fact_log()` now uses an internal streaming fact visitor over committed base facts plus visible delta facts, then builds the public `Vec<FactRecord>` directly. This removes the previous intermediate `Vec<Fact>` allocation for file-backed committed records. The public API still returns `Vec<FactRecord>`, so full export/replay remains O(total facts).
+
+| Mode | Scenario | Base facts | Facts/checkpoint | Checkpoints | Delta facts | Probes | Current p95 | As-of p95 | Prepared as-of p95 | Export recent filter p95 | File growth |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| full | single_receipt | 1M | 1 | 1 | 1 | 1 | 0.055 ms | 0.019 ms | 0.014 ms | 197.300 ms | 8,192 B |
+| full | receipt_stream_100 | 1M | 1 | 100 | 100 | 32 | 0.073 ms | 0.029 ms | 0.022 ms | 245.555 ms | 819,200 B |
+| full | batched_receipts_1000 | 1M | 10 | 100 | 1,000 | 32 | 0.076 ms | 0.029 ms | 0.023 ms | 218.708 ms | 1,228,800 B |
+
+Q2-A observation: export/replay latency remains in the same broad range as Q1-B (`~197-246 ms` p95 versus `~200-235 ms` p95 before this cleanup), because the public operation still exports the full log and then filters recent records in the benchmark. The meaningful improvement is memory shape: export no longer materializes committed facts as `Vec<Fact>` before converting them to `Vec<FactRecord>`. A narrower recent fact-log reader should remain deferred until Vetch proves export/replay, not Datalog as-of, is still hot in real agent-brief construction.
 
 ---
 

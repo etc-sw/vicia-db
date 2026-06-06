@@ -1,8 +1,8 @@
 # Delta Index Design and Test Spec
 
-Branch: `vetch/minigraf-refactor-plan`
+Branch: `vetch/q1b-agent-brief-read-strategy`
 
-Status: living design and test specification. T0-T9C-C guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, T9A documents the threshold policy, T9B implements private threshold decisions, T9C-A adds a private explicit recompact primitive, T9C-B makes recompact publish copy-on-write, T9C-C adds a private idle/background maintenance caller, and Q1-A adds an agent-brief read-path benchmark gate.
+Status: living design and test specification. T0-T9C-C guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, T9A documents the threshold policy, T9B implements private threshold decisions, T9C-A adds a private explicit recompact primitive, T9C-B makes recompact publish copy-on-write, T9C-C adds a private idle/background maintenance caller, Q1-A adds an agent-brief read-path benchmark gate, Q1-B fixes entity/attribute-bound as-of agent-brief point reads with selective index pushdown, and Q2-A removes the intermediate committed fact allocation from fact-log export.
 
 Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution plan and gate sequence.
 
@@ -377,7 +377,7 @@ Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is th
 
 Current T9A/T9B/T9C policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B implements the pure/private metrics and decision tests. T9C-A adds an explicit private recompact primitive, T9C-B gives that primitive a copy-on-write publish path, and T9C-C adds `run_idle_delta_maintenance()` as the private idle/background caller. Threshold-triggered execution is still not wired into foreground `checkpoint()` and no public `recompact()` API exists; Vetch must schedule the idle caller after pending receipt writes are durably checkpointed.
 
-Current Q1-A result, recorded in `docs/BENCHMARKS.md`: `benches/agent_brief_read_path_benchmark.rs` now isolates the Vetch agent-brief read surfaces. The harness measures current point query, formatted as-of point query, prepared as-of point query, and full export plus recent tx filtering after receipt-like `Value::Ref` writes. Smoke evidence on a 10K base shows current point reads stay near 0.03 ms, while formatted and prepared as-of point reads are both roughly 8-10 ms; parse overhead is therefore not the primary blocker. Full 1M data should decide Q1-B, but the likely first implementation target is as-of selective pushdown or a recent tx-window fact-log reader, not another checkpoint/recompact change.
+Current Q1-A/Q1-B/Q2-A result, recorded in `docs/BENCHMARKS.md`: `benches/agent_brief_read_path_benchmark.rs` isolates the Vetch agent-brief read surfaces. Full 1M Q1-A evidence showed current point reads stayed sub-millisecond, while formatted and prepared as-of point reads were both about 1.26-1.62 s p95; parser overhead was not the blocker. Q1-B therefore chose as-of selective pushdown rather than a prepared helper or a new public receipt API. Entity/attribute-bound `:as-of` queries now use the existing selective committed-index fetch before temporal filtering, while rule-using queries stay on the full fact base. On the same 1M matrix, formatted as-of p95 drops to 0.017-0.043 ms and prepared as-of p95 drops to 0.013-0.026 ms. Q2-A then changes `export_fact_log()` to stream committed base facts through an internal visitor before constructing the public `Vec<FactRecord>`, removing an intermediate `Vec<Fact>` allocation. Export/replay latency remains O(total facts), so a narrower recent fact-log reader stays deferred until Vetch proves that full-log filtering is still hot in real agent-brief construction.
 
 ## Implementation Order
 
@@ -401,12 +401,11 @@ Current Q1-A result, recorded in `docs/BENCHMARKS.md`: `benches/agent_brief_read
 18. Add crash-safe recompact publish before any threshold-triggered internal/background scheduling. Done in T9C-B with a v10 `base_fact_page_start` extension field and copy-on-write base publish.
 19. Add a private idle/background maintenance caller that runs recompact only for scheduled/backpressure decisions and keeps foreground checkpoint on the delta append path. Done in T9C-C.
 20. Add a separate read-path benchmark gate for Vetch agent briefs, especially current/as-of/prepared/export latency after receipt writes. Done in Q1-A.
-21. Use Q1-A evidence to choose the first read-path implementation. Candidate paths are entity/attribute-bound as-of pushdown, a recent tx-window fact-log reader, or a narrow prepared helper if measurements justify it.
+21. Use Q1-A evidence to choose the first read-path implementation. Done in Q1-B with entity/attribute-bound as-of selective pushdown; prepared helper was rejected by full 1M measurements, and recent fact-log replay remains deferred until Vetch proves that export/replay path is still hot.
+22. Add an internal streaming fact visitor and route `export_fact_log()` through it. Done in Q2-A; public export still returns `Vec<FactRecord>`, but committed facts no longer materialize as an intermediate `Vec<Fact>`.
 
 ## Open Questions
 
 - Should `CommittedIndexReader` grow a streaming range-scan trait before persistent delta lands, or should the first implementation keep `Vec<FactRef>` to reduce blast radius?
-- Should `export_fact_log()` read through the same base-plus-delta manifest, or should it keep a dedicated fact-log stream path?
 - Is a sync-data mode enough for delta segment publish on all supported platforms, or should v10 use full sync for the first release?
 - Should `recompact()` become public later, or stay internal until Vetch has a real scheduling caller?
-- Which Q1-B implementation should make as-of receipt reads cheap enough for Vetch agent briefs: tighter index pushdown, a fact-log replay reader, or a prepared current/as-of receipt API?

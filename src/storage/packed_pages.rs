@@ -226,6 +226,25 @@ pub fn read_all_from_pages(
     num_pages: u64,
 ) -> Result<Vec<Fact>> {
     let mut facts = Vec::new();
+    for_each_from_pages(backend, first_page_id, num_pages, &mut |fact| {
+        facts.push(fact);
+        Ok(())
+    })?;
+    Ok(facts)
+}
+
+/// Visit all facts from a contiguous range of packed fact pages without
+/// materializing a complete `Vec<Fact>` first.
+///
+/// `first_page_id` is the backend page ID of the first packed fact page.
+/// `num_pages` is the number of pages to read.
+/// Non-packed pages (e.g., index pages) are silently skipped.
+pub fn for_each_from_pages(
+    backend: &dyn StorageBackend,
+    first_page_id: u64,
+    num_pages: u64,
+    visit: &mut dyn FnMut(Fact) -> Result<()>,
+) -> Result<()> {
     for i in 0..num_pages {
         let page = backend.read_page(first_page_id.saturating_add(i))?;
         let page_type = page.first().copied().unwrap_or(0);
@@ -236,10 +255,10 @@ pub fn read_all_from_pages(
         let b3 = page.get(3).copied().unwrap_or(0);
         let record_count = u16::from_le_bytes([b2, b3]);
         for slot in 0..record_count {
-            facts.push(read_slot(&page, slot)?);
+            visit(read_slot(&page, slot)?)?;
         }
     }
-    Ok(facts)
+    Ok(())
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

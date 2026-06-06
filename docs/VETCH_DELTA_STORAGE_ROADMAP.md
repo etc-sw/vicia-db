@@ -1,6 +1,6 @@
 # Vetch Delta Storage Roadmap
 
-Branch: `vetch/minigraf-refactor-plan`
+Branch: `vetch/q1b-agent-brief-read-strategy`
 
 Status: overall execution plan as of 2026-06-06. T7C is measured, T8A
 multi-segment manifest publish is implemented on this branch, T8B mini benchmark
@@ -8,11 +8,15 @@ has passed, T8C full matrix is measured, T9A threshold policy is documented,
 T9B private threshold metrics pass, T9C-A adds a private explicit recompact
 primitive, T9C-B makes recompact publish copy-on-write, T9C-C adds a private
 idle/background maintenance caller, and Q1-A adds a dedicated agent-brief
-read-path benchmark harness. Automatic/background scheduling remains a
-caller-policy decision and is not wired into foreground `checkpoint()`. This
-document is the single high-level plan for the Vetch-driven Minigraf
-delta-storage line. The detailed storage format and test specification remain in
-`docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in `docs/BENCHMARKS.md`.
+read-path benchmark harness. Q1-B resolves the entity/attribute-bound as-of
+agent-brief point-read blocker with selective index pushdown. Q2-A removes the
+intermediate committed `Vec<Fact>` allocation from `export_fact_log()` without
+changing its public `Vec<FactRecord>` API. Automatic/background scheduling
+remains a caller-policy decision and is not wired into foreground `checkpoint()`.
+This document is the single high-level plan for the Vetch-driven Minigraf
+delta-storage line. The detailed storage format and test specification remain
+in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
+`docs/BENCHMARKS.md`.
 
 ## Scope
 
@@ -39,7 +43,7 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/REFACTORING_AND_ALGORITHM_PLAN.md` | Original R0-R6 cleanup, benchmark, and gate plan. Records Gate 1 and Gate 2 decisions. |
 | `docs/DELTA_INDEX_REFERENCE_SURVEY.md` | Reference DB survey. Extracts portable invariants from GrafeoDB, Fjall, and redb without adopting them as dependencies. |
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
-| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, and T8C. |
+| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, and Q1-B. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
 
 ## Decision Summary
@@ -83,12 +87,20 @@ T8C then confirms the real boundary:
   10x1K p95 `36.821 ms`, 100x100 p95 `38.347 ms`.
 - Corrupt latest segment fallback remains `true` across the matrix.
 - Immediate current-query reads remain sub-millisecond.
-- As-of/replay receipt reads remain around seconds and are still a separate Q1
-  agent-brief read-path blocker.
+- As-of/replay receipt reads remained around seconds before Q1-B and were
+  tracked as a separate agent-brief read-path blocker.
 
-The next step is therefore not another checkpoint algorithm change. It is T9A:
-bound segment count and long-term file/manifest growth through an internal
-threshold and idle/background recompact policy.
+T9 then bounded long-term segment/file growth with private threshold decisions,
+copy-on-write recompact, and an idle maintenance caller outside foreground
+`checkpoint()`. Q1-B then fixed the Vetch receipt-scoped as-of point-read path:
+on a 1M base, formatted as-of p95 drops from `1,257.698-1,499.003 ms` to
+`0.017-0.043 ms`, and prepared as-of p95 drops from `1,260.495-1,623.022 ms` to
+`0.013-0.026 ms`.
+
+The next step is therefore not another checkpoint algorithm change and not a new
+public receipt API. It is Q2 streaming/allocation cleanup, especially export and
+maintenance memory behavior, while Vetch validates whether any export/replay
+agent-brief path still needs a narrower fact-log reader.
 
 ## Evidence Trail
 
@@ -182,8 +194,9 @@ Vetch should use Minigraf with this cadence:
 | T9C-B | Done | Crash-safe recompact publish gate. | Recompact writes a copy-on-write base after the current image and publishes it through page 0 with a protected base-start pointer. |
 | T9C-C | Done | Background/idle scheduling policy gate. | Threshold-triggered maintenance has a private idle/background caller and remains out of foreground checkpoint. |
 | Q1-A | Done | Agent-brief read-path benchmark/spec gate. | Current, as-of, prepared as-of, and export/replay surfaces are measured separately. |
-| Q1-B | Planned separate lane | Agent-brief read strategy decision. | Choose pushdown, recent fact-log reader, or a small prepared helper from Q1-A evidence. |
-| Q2 | Planned cleanup lane | Streaming/allocation cleanup after correctness shape stabilizes. | Export/checkpoint/recompact memory improves without semantic drift. |
+| Q1-B | Done | Agent-brief read strategy decision. | Entity/attribute-bound as-of selective pushdown fixes the receipt-scoped point-read blocker without public API changes. |
+| Q2-A | Done | Export fact-log allocation cleanup. | `export_fact_log()` uses a streaming committed fact visitor and avoids an intermediate `Vec<Fact>`. |
+| Q2-B | Planned cleanup lane | Continue streaming/allocation cleanup after correctness shape stabilizes. | Recompact/checkpoint/export memory improves without semantic drift. |
 
 ## Gate Protocol
 
@@ -500,10 +513,11 @@ Candidates:
 
 Acceptance:
 
-- Just-written receipt as-of read on a 1M base should not scan the whole base.
-- Query semantics remain Datalog-first; no alternate query language.
-- The public API remains minimal unless Vetch usage proves a small helper is
-  worth the surface area.
+- Done: just-written receipt as-of reads on a 1M base no longer scan the whole
+  base when the query is entity/attribute-bound.
+- Done: query semantics remain Datalog-first; no alternate query language was
+  added.
+- Done: the public API remains unchanged.
 
 ### Phase Q2: Streaming and Allocation Cleanup
 
@@ -512,7 +526,8 @@ paths after the correctness-critical storage shape is stable.
 
 Candidate work:
 
-- Streaming fact-log export over base + deltas.
+- Done in Q2-A: streaming fact-log export over committed base + visible deltas
+  before constructing the public `Vec<FactRecord>`.
 - Streaming recompact input instead of materializing all facts where possible.
 - Optional streaming range-scan trait only after current `Vec<FactRef>` behavior
   is fully locked.
@@ -680,27 +695,84 @@ Done:
 - Done: Q1-B should choose between as-of selective pushdown, a recent fact-log
   reader, or a small prepared helper based on full 1M data.
 
-## Next Slice Goal Spec
+## Completed Slice: Q1-B Agent-Brief Read Strategy
 
 Name: Q1-B agent-brief read strategy decision.
 
 Objective:
 
-- Use Q1-A evidence to pick the smallest implementation that makes just-written
-  receipt reads cheap on a 1M base.
+- Use Q1-A evidence to pick and implement the smallest change that makes
+  just-written receipt reads cheap on a 1M base.
+
+Chosen path:
+
+- Done: entity/attribute-bound `:as-of` queries use the existing selective
+  committed-index fetch before temporal filtering.
+- Done: rule-using queries remain on the full fact base.
+- Done: no public API, file-format, checkpoint, or recompact policy changed.
+- Rejected: prepared helper first, because the full 1M Q1-A run showed prepared
+  as-of was not materially faster than formatted as-of.
+- Deferred: recent fact-log reader, because Q1-B fixed receipt-scoped Datalog
+  as-of reads; export/replay can be revisited only if Vetch's brief path still
+  needs it.
+
+Evidence:
+
+- Full 1M `single_receipt` as-of p95: `1,257.698 ms` -> `0.017 ms`.
+- Full 1M `receipt_stream_100` as-of p95: `1,499.003 ms` -> `0.037 ms`.
+- Full 1M `batched_receipts_1000` as-of p95: `1,456.026 ms` -> `0.043 ms`.
+- Regression tests fail if entity-bound or attribute-bound as-of queries call a
+  committed full scan.
+
+## Completed Slice: Q2-A Export Fact-Log Allocation Cleanup
+
+Name: Q2-A export fact-log allocation cleanup.
+
+Objective:
+
+- Remove the intermediate committed `Vec<Fact>` allocation from
+  `export_fact_log()` while preserving the existing public `Vec<FactRecord>`
+  API and deterministic base-then-delta ordering.
+
+Done:
+
+- Done: `CommittedFactReader` has an object-safe `for_each_fact` visitor with a
+  default `stream_all()` fallback.
+- Done: file-backed committed readers stream packed pages through the visitor.
+- Done: layered base+delta readers stream base facts first and visible delta
+  facts after them.
+- Done: `Minigraf::export_fact_log()` builds `FactRecord`s directly from the
+  visitor.
+- Done: regression coverage fails if the streaming visitor falls back to
+  `stream_all()` for the dedicated streaming-only fixture.
+
+Evidence:
+
+- Full 1M export/replay p95 remains latency-neutral in broad terms:
+  `197.300-245.555 ms` after Q2-A versus `199.950-234.806 ms` after Q1-B.
+- Q2-A is therefore a memory-shape cleanup, not a query-latency fix.
+
+## Next Slice Goal Spec
+
+Name: Q2-B recompact input streaming spike.
+
+Objective:
+
+- Determine whether private recompact can stream visible facts into candidate
+  pages and index entries without first materializing `self.storage.get_all_facts()`.
 
 Candidate paths:
 
-- As-of selective pushdown: let entity/attribute-bound `:as-of` queries use the
-  committed index reader before temporal filtering.
-- Recent fact-log reader: provide an internal tx-window reader so agent briefs
-  do not call full `export_fact_log()` for fresh receipts.
-- Prepared helper: add a small reusable brief-oriented query path only if
-  prepared execution is enough after pushdown/recent-reader evidence.
+- Keep a pure behavior fixture: recompact before/after full-history projection
+  must stay identical, including `Value::Ref` assertions/retractions.
+- Prototype a private writer that builds fact pages and index entries from a
+  visitor rather than an all-facts vector.
+- Stop early if the backend locking model forces a larger read/write cursor
+  redesign; document that as the Q2-B result instead of widening scope.
 
 Stop conditions:
 
-- Do not add a public API until the measured bottleneck requires it.
-- Do not weaken current full-history ledger semantics.
-- Do not optimize broad unbound as-of scans in Q1-B; the agent-brief surface is
-  receipt/entity scoped.
+- Do not change public API.
+- Do not change ledger identity, retraction semantics, or base/delta/recompact
+  visibility.
+- Do not introduce new dependencies for this cleanup lane.

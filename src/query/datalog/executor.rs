@@ -336,7 +336,19 @@ impl DatalogExecutor {
                 crate::graph::storage::filter_facts_as_of(facts.iter().cloned().collect(), as_of)
             }
             (Some(facts), None) => facts.iter().cloned().collect(),
-            (None, Some(as_of)) => self.storage.get_facts_as_of(as_of)?,
+            (None, Some(as_of)) => {
+                // Selective fetch is only safe when no rule invocations are present —
+                // rules require the full fact base to evaluate correctly.
+                if !query.uses_rules() {
+                    let patterns = collect_all_patterns(&query.where_clauses);
+                    match self.selective_fact_fetch(&patterns, 4) {
+                        Some(facts) => crate::graph::storage::filter_facts_as_of(facts, as_of),
+                        None => self.storage.get_facts_as_of(as_of)?,
+                    }
+                } else {
+                    self.storage.get_facts_as_of(as_of)?
+                }
+            }
             (None, None) => {
                 // Selective fetch is only safe when no rule invocations are present —
                 // rules require the full fact base to evaluate correctly.
@@ -2384,8 +2396,115 @@ mod tests {
     use crate::query::datalog::parser::parse_datalog_command;
     use crate::query::datalog::rules::RuleRegistry;
     use crate::query::datalog::types::WhereClause;
+    use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, Indexes, VaetKey};
+    use crate::storage::{CommittedFactReader, CommittedIndexReader};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
     use uuid::Uuid;
+
+    struct NoFullScanFactReader {
+        facts: Vec<Fact>,
+        stream_calls: Arc<AtomicUsize>,
+    }
+
+    impl CommittedFactReader for NoFullScanFactReader {
+        fn resolve(&self, fr: FactRef) -> anyhow::Result<Fact> {
+            self.facts
+                .get(fr.slot_index as usize)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing committed fact"))
+        }
+
+        fn stream_all(&self) -> anyhow::Result<Vec<Fact>> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("committed full scan should not run")
+        }
+
+        fn committed_page_count(&self) -> u64 {
+            self.facts.len() as u64
+        }
+    }
+
+    struct InMemoryCommittedIndexReader {
+        indexes: Indexes,
+    }
+
+    fn range_refs<K: Ord + Clone>(
+        index: &std::collections::BTreeMap<K, FactRef>,
+        start: &K,
+        end: Option<&K>,
+    ) -> Vec<FactRef> {
+        match end {
+            Some(end) => index
+                .range(start.clone()..end.clone())
+                .map(|(_, fact_ref)| *fact_ref)
+                .collect(),
+            None => index
+                .range(start.clone()..)
+                .map(|(_, fact_ref)| *fact_ref)
+                .collect(),
+        }
+    }
+
+    impl CommittedIndexReader for InMemoryCommittedIndexReader {
+        fn range_scan_eavt(
+            &self,
+            start: &EavtKey,
+            end: Option<&EavtKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            Ok(range_refs(&self.indexes.eavt, start, end))
+        }
+
+        fn range_scan_aevt(
+            &self,
+            start: &AevtKey,
+            end: Option<&AevtKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            Ok(range_refs(&self.indexes.aevt, start, end))
+        }
+
+        fn range_scan_avet(
+            &self,
+            _: &AvetKey,
+            _: Option<&AvetKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            Ok(Vec::new())
+        }
+
+        fn range_scan_vaet(
+            &self,
+            _: &VaetKey,
+            _: Option<&VaetKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn storage_with_no_full_scan_committed_facts(
+        facts: Vec<Fact>,
+    ) -> (FactStorage, Arc<AtomicUsize>) {
+        let storage = FactStorage::new();
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        let mut indexes = Indexes::new();
+
+        for (index, fact) in facts.iter().enumerate() {
+            indexes.insert(
+                fact,
+                FactRef {
+                    page_id: index as u64 + 1,
+                    slot_index: index as u16,
+                },
+            );
+        }
+
+        storage.set_committed_reader(Arc::new(NoFullScanFactReader {
+            facts,
+            stream_calls: stream_calls.clone(),
+        }));
+        storage.set_committed_index_reader(Arc::new(InMemoryCommittedIndexReader { indexes }));
+
+        (storage, stream_calls)
+    }
 
     #[test]
     fn test_execute_transact() {
@@ -2930,6 +3049,86 @@ mod tests {
             _ => panic!("expected query results"),
         };
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn as_of_entity_bound_query_uses_committed_index_without_full_scan() {
+        let entity = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let fact = Fact::with_valid_time(
+            entity,
+            ":bench/ref".to_string(),
+            Value::Ref(target),
+            1000,
+            1,
+            0,
+            crate::graph::types::VALID_TIME_FOREVER,
+        );
+        let (storage, stream_calls) = storage_with_no_full_scan_committed_facts(vec![fact]);
+        let executor = DatalogExecutor::new(storage);
+        let command = parse_datalog_command(&format!(
+            r#"(query [:find ?v :as-of 1 :valid-at :any-valid-time :where [#uuid "{entity}" :bench/ref ?v]])"#
+        ))
+        .unwrap();
+
+        let result = executor.execute(command).unwrap();
+
+        if let QueryResult::QueryResults { results, .. } = result {
+            assert_eq!(results.len(), 1, "entity-bound as-of query should match");
+        } else {
+            panic!("expected QueryResults");
+        }
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "entity-bound as-of query should avoid committed full scan"
+        );
+    }
+
+    #[test]
+    fn as_of_attribute_bound_query_uses_committed_index_without_full_scan() {
+        let entity = Uuid::new_v4();
+        let other_entity = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let facts = vec![
+            Fact::with_valid_time(
+                entity,
+                ":bench/ref".to_string(),
+                Value::Ref(target),
+                1000,
+                1,
+                0,
+                crate::graph::types::VALID_TIME_FOREVER,
+            ),
+            Fact::with_valid_time(
+                other_entity,
+                ":bench/other".to_string(),
+                Value::String("ignore".to_string()),
+                1000,
+                1,
+                0,
+                crate::graph::types::VALID_TIME_FOREVER,
+            ),
+        ];
+        let (storage, stream_calls) = storage_with_no_full_scan_committed_facts(facts);
+        let executor = DatalogExecutor::new(storage);
+        let command = parse_datalog_command(
+            "(query [:find ?e :as-of 1 :valid-at :any-valid-time :where [?e :bench/ref ?v]])",
+        )
+        .unwrap();
+
+        let result = executor.execute(command).unwrap();
+
+        if let QueryResult::QueryResults { results, .. } = result {
+            assert_eq!(results.len(), 1, "attribute-bound as-of query should match");
+        } else {
+            panic!("expected QueryResults");
+        }
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "attribute-bound as-of query should avoid committed full scan"
+        );
     }
 
     #[test]

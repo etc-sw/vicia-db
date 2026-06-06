@@ -367,6 +367,17 @@ pub trait CommittedFactReader: Send + Sync {
     ) -> Result<crate::graph::types::Fact>;
     /// Stream all committed facts (for full scans, checksum verification, migration).
     fn stream_all(&self) -> Result<Vec<crate::graph::types::Fact>>;
+    /// Visit committed facts in deterministic storage order without requiring
+    /// callers to materialize an intermediate `Vec<Fact>`.
+    fn for_each_fact(
+        &self,
+        visit: &mut dyn FnMut(crate::graph::types::Fact) -> Result<()>,
+    ) -> Result<()> {
+        for fact in self.stream_all()? {
+            visit(fact)?;
+        }
+        Ok(())
+    }
     /// Number of committed fact pages (used for checksum + iteration bounds).
     #[allow(dead_code)]
     fn committed_page_count(&self) -> u64;
