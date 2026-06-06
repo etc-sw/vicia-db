@@ -1,7 +1,7 @@
 # Vicia DB Rename Plan
 
-Status: planning document only. No package, public API, file format, or
-repository rename has been performed in this slice.
+Status: V0 rename plan and V1 docs/metadata preparation are complete. No
+package, public API, file format, or repository rename has been performed.
 
 Date: 2026-06-06
 
@@ -94,8 +94,7 @@ The rename touches more than `Cargo.toml`.
 
 Before publishing a Vicia DB fork/package:
 
-- Add the actual `LICENSE-MIT` and `LICENSE-APACHE` files if they are still
-  missing from the checkout.
+- Keep the actual `LICENSE-MIT` and `LICENSE-APACHE` files in the checkout.
 - Preserve original copyright and license notices.
 - State that Vicia DB is derived from/forked from Minigraf.
 - Keep `MIT OR Apache-2.0` unless there is a deliberate legal reason to change.
@@ -154,6 +153,15 @@ route agents to `docs/BENCHMARKS.md`, `docs/DELTA_INDEX_DESIGN.md`, and
 `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for current evidence.
 
 ## Proposed Slice Plan
+
+### V1 Completion
+
+V1 introduces Vicia DB naming without changing code:
+
+- README transition note.
+- Storage roadmap link to this rename plan.
+- Delta design link to this rename plan.
+- License files confirmed present.
 
 ### V0: Rename Plan
 

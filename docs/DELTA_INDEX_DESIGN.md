@@ -4,7 +4,10 @@ Branch: `vetch/q1b-agent-brief-read-strategy`
 
 Status: living design and test specification. T0-T9C-C guardrails are implemented on this branch; T8A replaces accumulated single-segment replacement with multi-segment manifest append, T8B confirms the mini accumulation gate, T8C routes long-tail segment growth to T9 thresholds, T9A documents the threshold policy, T9B implements private threshold decisions, T9C-A adds a private explicit recompact primitive, T9C-B makes recompact publish copy-on-write, T9C-C adds a private idle/background maintenance caller, Q1-A adds an agent-brief read-path benchmark gate, Q1-B fixes entity/attribute-bound as-of agent-brief point reads with selective index pushdown, and Q2-A removes the intermediate committed fact allocation from fact-log export.
 
-Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution plan and gate sequence.
+Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution
+plan and gate sequence. Rename sequencing: see
+`docs/VICIA_DB_RENAME_PLAN.md`; Vicia DB naming must not change this storage
+format or compatibility policy by itself.
 
 ## Decision
 

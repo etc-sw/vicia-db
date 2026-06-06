@@ -14,10 +14,11 @@ intermediate committed `Vec<Fact>` allocation from `export_fact_log()` without
 changing its public `Vec<FactRecord>` API. S1 has rechecked the Q1-B/Q2-A
 surface before Q2-B. Automatic/background scheduling
 remains a caller-policy decision and is not wired into foreground `checkpoint()`.
-This document is the single high-level plan for the Vetch-driven Minigraf
-delta-storage line. The detailed storage format and test specification remain
-in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
-`docs/BENCHMARKS.md`.
+This document is the single high-level plan for the Vetch-driven Minigraf /
+Vicia DB delta-storage line. The detailed storage format and test specification
+remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
+`docs/BENCHMARKS.md`; rename sequencing remains in
+`docs/VICIA_DB_RENAME_PLAN.md`.
 
 ## Scope
 
@@ -46,6 +47,7 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
 | `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, and Q2-A. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
+| `docs/VICIA_DB_RENAME_PLAN.md` | Staged Vicia DB successor rename plan, compatibility policy, attribution checklist, and `vicia-db-decision-gate` skill shape. |
 
 ## Decision Summary
 

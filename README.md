@@ -13,6 +13,16 @@
 
 A tiny, self-contained graph database with **Datalog queries** and **bi-temporal time travel**. Think SQLite, but for connected data with full history.
 
+## Vicia DB Transition
+
+This repository is preparing **Vicia DB** as the Vetch-oriented successor name
+for this Minigraf line. The current Rust package, public API, examples, and
+language bindings remain `minigraf` / `Minigraf` until a compatibility alias
+policy is implemented and tested.
+
+See [docs/VICIA_DB_RENAME_PLAN.md](docs/VICIA_DB_RENAME_PLAN.md) for the staged
+rename plan, compatibility policy, and attribution checklist.
+
 ## Vision
 
 Minigraf is a **single-file embedded graph database** that lets you:
@@ -231,3 +241,7 @@ at your option.
 ### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
+Vicia DB successor work preserves the Minigraf lineage, original copyright
+notice, and dual-license terms unless a future legal review explicitly changes
+that policy.
