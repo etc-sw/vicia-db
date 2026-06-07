@@ -273,12 +273,13 @@ Gate:
 - Should a future release promote `ViciaDb` to the primary struct with
   `Minigraf` as a compatibility alias?
 - Should `minigraf` remain as a compatibility crate that re-exports `vicia_db`?
-- Should Vicia DB remain Vetch-internal until the Q2 cleanup lane completes?
+- Should Vicia DB remain Vetch-internal until Vetch validates the Q3-B
+  maintenance caller contract in a real daemon/application loop?
 - Which organization/repository should own the successor package?
 - Should the public file extension remain `.graph` indefinitely?
 
 ## Current Recommendation
 
 Proceed to V3 only when a real package/repository publish decision is needed.
-Keep Q2-B storage cleanup and any future Vicia package/binding rename work on
-separate branches.
+Keep Vetch maintenance-caller validation and any future Vicia package/binding
+rename work on separate branches.

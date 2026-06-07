@@ -20,12 +20,15 @@ Q3-A adds `Minigraf::run_idle_maintenance()` as the embedder scheduling surface:
 it checkpoints pending WAL-backed writes, then runs private delta maintenance
 under the same write lock, and reports a stable public outcome. Raw recompact is
 still private, automatic/background scheduling remains a caller-policy decision,
-and maintenance is not wired into foreground `checkpoint()`.
+and maintenance is not wired into foreground `checkpoint()`. Q3-B records the
+Vetch caller contract for when to invoke the hook, how to interpret outcomes,
+and how to retry visible maintenance errors.
 This document is the single high-level plan for the Vetch-driven Minigraf /
 Vicia DB delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
 `docs/BENCHMARKS.md`; rename sequencing remains in
-`docs/VICIA_DB_RENAME_PLAN.md`.
+`docs/VICIA_DB_RENAME_PLAN.md`; maintenance caller guidance remains in
+`docs/MAINTENANCE_API_CONTRACT.md`.
 
 ## Scope
 
@@ -52,6 +55,7 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/REFACTORING_AND_ALGORITHM_PLAN.md` | Original R0-R6 cleanup, benchmark, and gate plan. Records Gate 1 and Gate 2 decisions. |
 | `docs/DELTA_INDEX_REFERENCE_SURVEY.md` | Reference DB survey. Extracts portable invariants from GrafeoDB, Fjall, and redb without adopting them as dependencies. |
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
+| `docs/MAINTENANCE_API_CONTRACT.md` | Q3-B caller contract for `run_idle_maintenance()`: safe windows, outcome semantics, retry/error policy, and Vetch scheduling guidance. |
 | `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, Q2-A, and Q2-B. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
 | `docs/VICIA_DB_RENAME_PLAN.md` | Staged Vicia DB successor rename plan, compatibility policy, attribution checklist, and `vicia-db-decision-gate` skill shape. |
@@ -60,13 +64,15 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 
 Minigraf should keep the v10 in-file delta-index direction. T9 threshold and
 recompact policy, Q1-B agent-brief as-of pushdown, Q2-A export allocation
-cleanup, Q2-B private recompact input streaming, and Q3-A public idle
-maintenance are complete. Q2-B confirms the current locking model can stream
-visible facts into the recompact candidate without a cursor redesign, but it
-does not make recompact bounded-memory. Q3-A closes the embedder reachability
-gap without making maintenance automatic. The next storage decision should be
-based on Vetch's actual maintenance-caller experience or a deeper index/page
-streaming cleanup, not another hot-path checkpoint change.
+cleanup, Q2-B private recompact input streaming, Q3-A public idle maintenance,
+and Q3-B maintenance caller contract are complete. Q2-B confirms the current
+locking model can stream visible facts into the recompact candidate without a
+cursor redesign, but it does not make recompact bounded-memory. Q3-A closes the
+embedder reachability gap without making maintenance automatic. Q3-B keeps the
+next implementation decision outside the database core until Vetch has caller
+evidence. The next storage decision should be based on Vetch's actual
+maintenance-caller experience or a deeper index/page streaming cleanup, not
+another hot-path checkpoint change.
 
 T7C showed that the current single-segment replacement path is not viable for
 Vetch's long-running receipt cadence:
@@ -115,9 +121,10 @@ on a 1M base, formatted as-of p95 drops from `1,257.698-1,499.003 ms` to
 `0.013-0.026 ms`.
 
 The next step is therefore not another checkpoint algorithm change and not a new
-public receipt API. It is Q2 streaming/allocation cleanup, especially export and
-maintenance memory behavior, while Vetch validates whether any export/replay
-agent-brief path still needs a narrower fact-log reader.
+public receipt API. After Q3-B, Vetch should validate the maintenance caller
+contract in a real daemon or application loop. Only then should Minigraf/Vicia
+choose between deeper bounded-memory recompact work, file-space reclamation, or
+a narrower recent fact-log reader.
 
 ## Evidence Trail
 
@@ -144,6 +151,9 @@ the result of progressively narrower gates:
 | Q1-B | Entity/attribute-bound as-of p95 dropped from `1,257.698-1,499.003 ms` to `0.017-0.043 ms` on the 1M matrix. | Treat the receipt-scoped Datalog read blocker as fixed for Vetch-shaped point reads. |
 | Q2-A | `export_fact_log()` streams committed facts into `FactRecord`s instead of first collecting committed `Vec<Fact>`. | Keep export as full-log audit API; defer narrower recent-log reads until Vetch proves that path is hot. |
 | S1 | Q1-B/Q2-A review and stability checks passed; all-target clippy still fails on pre-existing test-lint debt. | Constrained Q2-B to a bounded cleanup spike. |
+| Q2-B | `write_recompact_candidate_from_visible_facts()` streams visible facts through `FactStorage::for_each_fact()` instead of materializing a committed `Vec<Fact>` first. | Recompact input has a better memory shape, but candidate pages and index-entry buffers remain O(total facts). |
+| Q3-A | Public `run_idle_maintenance()` exposes checkpoint/delta/advice outcome while keeping raw recompact private. | Vetch can schedule maintenance without owning storage internals. |
+| Q3-B | `docs/MAINTENANCE_API_CONTRACT.md` records caller windows, outcome semantics, error handling, and Vetch scheduling policy. | Vetch can validate maintenance adoption without another Vicia storage algorithm change. |
 
 ## Philosophy Fit
 
@@ -221,6 +231,7 @@ Vetch should use Minigraf with this cadence:
 | S1 | Done | Stability/code-quality review before Q2-B. | Q1-B/Q2-A surfaces pass targeted tests, full tests, fmt, lib clippy, and diff whitespace checks. |
 | Q2-B | Done | Private recompact input streaming cleanup. | Recompact candidate writing avoids an intermediate `Vec<Fact>` without semantic drift; index/page buffers remain O(total facts). |
 | Q3-A | Done | Public idle maintenance API contract. | `Minigraf::run_idle_maintenance()` exposes checkpoint/delta/advice outcome without exposing raw `CheckpointOutcome` or invoking recompact from `checkpoint()`. |
+| Q3-B | Done | Maintenance caller adoption contract. | Caller windows, outcome semantics, retry policy, and Vetch scheduling guidance are documented without adding another API or storage algorithm. |
 
 Adoption caveat:
 
@@ -228,6 +239,9 @@ Adoption caveat:
   `run_idle_maintenance()`. It is still explicit caller-driven maintenance:
   foreground `checkpoint()` never runs recompact, raw `recompact()` remains
   private, and Vetch must decide when to call the idle hook.
+- Q3-B records that decision boundary. Production adoption still needs
+  Vetch-side evidence that the hook is invoked outside capture/write foreground
+  paths and that `ReduceCheckpointCadence` changes batching/backoff policy.
 
 ## Gate Protocol
 
@@ -242,6 +256,7 @@ Each gate has one owner decision:
 | Q1 read gate | Is the next-agent brief cheap enough? | Receipt/as-of reads avoid whole-base scans for Vetch-shaped reads. | Query optimization risks Datalog semantics or requires broad public API churn. |
 | S1 stability gate | Are Q1-B/Q2-A safe enough before Q2-B? | Review finds no semantic blocker and targeted recovery/export/query tests plus broad gates pass. | Visitor order, rule/as-of semantics, crash fallback, or ledger identity regress. |
 | Q3 maintenance API gate | Can Vetch schedule storage maintenance without owning storage internals? | A single public call checkpoints pending writes, runs private delta maintenance, returns stable outcome/advice, and leaves foreground `checkpoint()` unchanged. | The public outcome leaks internal storage enums, phase-2 failure can imply data loss, or checkpoint starts doing hidden recompact work. |
+| Q3-B adoption gate | Is the caller contract explicit enough for Vetch implementation? | Safe call windows, outcome handling, retry/error policy, and forbidden foreground behavior are written down. | Vetch needs a stronger API, raw recompact, automatic scheduling, or file-space reclamation to use the hook safely. |
 
 Do not skip gates by adding a broader storage engine, sidecar index, vector
 stack, or public API. If a gate fails, fix the narrow failing invariant first.
@@ -525,7 +540,7 @@ Decision after T9:
 | Result | Decision |
 | --- | --- |
 | Hot flush stays cheap and thresholded recompact bounds growth | Keep recompact internal and let Vetch schedule it in background. |
-| Recompact is needed by Vetch callers but cannot be scheduled implicitly | Consider a small public maintenance API only after Vetch provides a concrete scheduling caller. |
+| Recompact is needed by Vetch callers but cannot be scheduled implicitly | Done in Q3-A/Q3-B: expose `run_idle_maintenance()` and record the caller contract; keep raw recompact private. |
 | File garbage becomes unacceptable | Design file-space reclamation as a separate phase; do not mix it into T9 correctness work. |
 
 ### Phase Q1: Agent-Brief Read Path
@@ -652,6 +667,9 @@ Run benchmark gates only when the relevant slice is ready:
   `Minigraf::run_idle_maintenance()` as the single embedder call for
   checkpoint-then-delta-maintenance, while keeping raw recompact private and
   foreground `checkpoint()` unchanged.
+- Q3-B maintenance caller contract is complete. It adds
+  `docs/MAINTENANCE_API_CONTRACT.md` and updates this roadmap so Vetch adoption
+  can proceed without another Vicia storage algorithm change.
 - Q1-A agent-brief read-path benchmark/spec is complete. It adds
   `benches/agent_brief_read_path_benchmark.rs` and separates current point,
   as-of point, prepared as-of, and export/recent-filter timing.
@@ -940,3 +958,40 @@ Stop conditions:
   lever and can own its failure mode.
 - Do not claim recompact is bounded-memory; Q2-B only removed one intermediate
   decoded fact buffer.
+
+## Completed Slice: Q3-B Maintenance Caller Contract
+
+Name: Q3-B maintenance caller adoption contract.
+
+Objective:
+
+- Make the Q3-A public hook actionable for Vetch without adding another storage
+  algorithm, background thread, or public raw recompact API.
+
+Done:
+
+- Done: added `docs/MAINTENANCE_API_CONTRACT.md`.
+- Done: documented safe caller windows: startup, agent slice boundary,
+  import/projection completion, shutdown best effort, and idle/background tick.
+- Done: documented forbidden caller behavior: no foreground capture blocking,
+  no correctness dependency on maintenance completion, no app-level WAL/page
+  repair after maintenance errors.
+- Done: documented outcome semantics for checkpoint, delta, and advice fields.
+- Done: documented phase-2 error semantics: a checkpoint can remain durable even
+  if later delta maintenance fails; callers should retry maintenance later.
+- Done: updated stale roadmap language that still treated a public maintenance
+  API as a future consideration.
+
+Stop conditions:
+
+- Do not implement Vetch/vetch-memoryd caller code in this repository.
+- Do not add automatic scheduling to Vicia DB core.
+- Do not add raw public `recompact()`.
+- Do not claim file-space reclamation or bounded-memory recompact is solved.
+
+Next gate:
+
+- Vetch should prove a real caller: invoke `run_idle_maintenance()` outside the
+  capture/write foreground path, record `ReduceCheckpointCadence`, change
+  batching/backoff policy, and retry visible maintenance errors from a later
+  idle tick.

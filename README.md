@@ -23,6 +23,9 @@ existing `Minigraf` code continues to work unchanged.
 See [docs/VICIA_DB_RENAME_PLAN.md](docs/VICIA_DB_RENAME_PLAN.md) for the staged
 rename plan, compatibility policy, and attribution checklist.
 
+See [docs/MAINTENANCE_API_CONTRACT.md](docs/MAINTENANCE_API_CONTRACT.md) for
+the `run_idle_maintenance()` caller contract.
+
 ## Vision
 
 Minigraf is a **single-file embedded graph database** that lets you:

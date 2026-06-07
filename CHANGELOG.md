@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Add `docs/ERROR_REFERENCE.md`: full inventory of user-facing errors (PRS/QRY/STG/WAL/API categories, 113 entries) with cause, resolution steps, and bad-input examples; docs-only reference codes PRS-001…API-009 (#192)
+- Add `docs/MAINTENANCE_API_CONTRACT.md`: Q3-B caller guidance for `run_idle_maintenance()` safe windows, outcome semantics, retry/error policy, and Vetch scheduling boundaries
 
 ### Bug fixes
 

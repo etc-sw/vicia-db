@@ -19,10 +19,12 @@ Q2-B does not make recompact bounded-memory; candidate fact pages and sorted
 index-entry buffers remain O(total facts). Q3-A exposes public
 `Minigraf::run_idle_maintenance()` as the embedder scheduling surface for
 checkpoint-then-delta-maintenance; raw recompact remains private and foreground
-`checkpoint()` remains append-only/no-hidden-recompact.
+`checkpoint()` remains append-only/no-hidden-recompact. Q3-B records the caller
+contract in `docs/MAINTENANCE_API_CONTRACT.md`.
 
 Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution
-plan and gate sequence. Rename sequencing: see
+plan and gate sequence. Maintenance caller guidance: see
+`docs/MAINTENANCE_API_CONTRACT.md`. Rename sequencing: see
 `docs/VICIA_DB_RENAME_PLAN.md`; Vicia DB naming must not change this storage
 format or compatibility policy by itself.
 
@@ -412,7 +414,7 @@ Current T8B result, recorded in `docs/BENCHMARKS.md`: multi-segment append passe
 
 Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is the right default path but needs T9 thresholds for unbounded tiny-segment growth. The 1M base plus 1 fact x 10K case drops from T7C's 1,051.300 ms flush p95 and 18.9 GB file growth to 99.818 ms p95 and 662,257,664 B growth, but that is still above the hot flush target. The batching rows show the dominant pressure is segment count and manifest/file growth rather than delta fact count alone: 10K delta facts in 1K segments have flush p95 36.821 ms, and 10K facts in 100 segments have flush p95 38.347 ms. Current reads stay sub-millisecond, reopen stays below the 250-500 ms gate, corrupt-latest fallback remains true, and as-of/replay remains Q1 read-path work.
 
-Current T9A/T9B/T9C/Q3-A policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B implements the pure/private metrics and decision tests. T9C-A adds an explicit private recompact primitive, T9C-B gives that primitive a copy-on-write publish path, T9C-C adds `run_idle_delta_maintenance()` as the private idle/background caller, and Q3-A exposes `Minigraf::run_idle_maintenance()` as the public embedder call. Threshold-triggered execution is still not wired into foreground `checkpoint()` and no public raw `recompact()` API exists; Vetch must schedule the public idle hook during its own safe maintenance windows before this can bound production growth.
+Current T9A/T9B/T9C/Q3-A/Q3-B policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B implements the pure/private metrics and decision tests. T9C-A adds an explicit private recompact primitive, T9C-B gives that primitive a copy-on-write publish path, T9C-C adds `run_idle_delta_maintenance()` as the private idle/background caller, Q3-A exposes `Minigraf::run_idle_maintenance()` as the public embedder call, and Q3-B documents caller windows/outcome/retry policy. Threshold-triggered execution is still not wired into foreground `checkpoint()` and no public raw `recompact()` API exists; Vetch must schedule the public idle hook during its own safe maintenance windows before this can bound production growth.
 
 Current Q1-A/Q1-B/Q2-A/Q2-B result, recorded in `docs/BENCHMARKS.md`: `benches/agent_brief_read_path_benchmark.rs` isolates the Vetch agent-brief read surfaces. Full 1M Q1-A evidence showed current point reads stayed sub-millisecond, while formatted and prepared as-of point reads were both about 1.26-1.62 s p95; parser overhead was not the blocker. Q1-B therefore chose as-of selective pushdown rather than a prepared helper or a new public receipt API. Entity/attribute-bound `:as-of` queries now use the existing selective committed-index fetch before temporal filtering, while rule-using queries stay on the full fact base. On the same 1M matrix, formatted as-of p95 drops to 0.017-0.043 ms and prepared as-of p95 drops to 0.013-0.026 ms. Q2-A then changes `export_fact_log()` to stream committed base facts through an internal visitor before constructing the public `Vec<FactRecord>`, removing an intermediate `Vec<Fact>` allocation. Export/replay latency remains O(total facts), so a narrower recent fact-log reader stays deferred until Vetch proves that full-log filtering is still hot in real agent-brief construction. Q2-B applies the same visitor shape to private recompact input: `write_recompact_candidate_from_visible_facts()` no longer calls `get_all_facts()`, but recompact still holds candidate fact pages and sorted index-entry buffers in memory and remains a private/background maintenance path.
 
@@ -451,6 +453,9 @@ Current Q1-A/Q1-B/Q2-A/Q2-B result, recorded in `docs/BENCHMARKS.md`: `benches/a
     Done in Q3-A: `Minigraf::run_idle_maintenance()` checkpoints pending writes
     and then invokes private delta maintenance under one write lock, returning a
     public non-exhaustive outcome/advice shape.
+25. Document the public idle maintenance caller contract. Done in Q3-B:
+    `docs/MAINTENANCE_API_CONTRACT.md` defines caller windows, outcome
+    semantics, retry behavior, and forbidden foreground capture blocking.
 
 ## Open Questions
 
