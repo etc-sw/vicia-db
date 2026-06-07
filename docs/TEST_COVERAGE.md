@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Q2-B recompact input streaming cleanup (June 2026), 1122 tests ✅
+**Last Updated**: Q3-A public idle maintenance API (June 2026), 1128 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1122 ✅ (1113 passing, 9 ignored)
-- ✅ 747 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, and Q2-B recompact input streaming guards)
+**Total Tests**: 1128 ✅ (1119 passing, 9 ignored)
+- ✅ 753 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, and Q3-A public idle maintenance API guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -50,7 +50,7 @@
 - ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 1111 non-ignored tests passing** (8 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke)
+**Status**: ✅ **All 1119 non-ignored tests passing** (9 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -413,7 +413,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 
 **Coverage**: ~97%
 
-### 4. Database API (`src/db.rs`) - ✅ Excellent (12 unit tests)
+### 4. Database API (`src/db.rs`) - ✅ Excellent (17+ unit tests)
 
 - ✅ In-memory transact and query round-trip
 - ✅ Explicit `WriteTransaction` commit and rollback
@@ -422,6 +422,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ File-backed open, transact, reopen (persistence)
 - ✅ WAL written before in-memory apply
 - ✅ Auto-checkpoint threshold fires, `checkpoint()` manual trigger
+- ✅ Public `run_idle_maintenance()` no-op/checkpoint/recompact/convergence/error guards
 - ✅ Concurrent `execute()` during active `WriteTransaction`
 
 **Coverage**: ~93%
@@ -746,7 +747,8 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ recompact writes a copy-on-write base, records checksum-protected base fact start, and keeps unpublished candidate pages invisible before page 0 publish
 - ✅ recompact streams visible facts into candidate pages without materializing an intermediate committed `Vec<Fact>`
 - ✅ recompact preserves fact-log storage order before/after/reopen, including `Value::Ref` assertions and scoped retractions
-- ✅ private idle delta maintenance noops on healthy deltas, recompact scheduled/backpressure deltas, and rejects pending facts
+- ✅ private idle delta maintenance noops on healthy deltas, recompact scheduled/backpressure deltas, rejects pending facts, and preserves the previous visible delta on fault-injected phase-2 failure
+- ✅ public `run_idle_maintenance()` checkpoints pending file writes, recompacts threshold deltas, converges on a second idle call, rejects same-thread active write transactions, and leaves foreground `checkpoint()` free of hidden recompact
 - ✅ FileBackend non-header page writes do not publish disk page 0; durable page-count changes require an explicit header write
 
 ### Delta Checkpoint Crash Recovery (`tests/delta_checkpoint_crash_recovery_test.rs`) - ✅ 5 tests
@@ -995,7 +997,7 @@ cargo test -- --nocapture
 - Window functions verified: cumulative aggregates, rank/row-number, partition-by, desc ordering, mixed aggregate+window (Phase 7.7a)
 - User-defined functions verified: custom aggregates, custom predicates, UDF as window function, name collision guards, runtime error handling, thread safety (Phase 7.7b)
 - Prepared statements verified: entity/value/as-of/valid-at slot positions, AnyValidTime, combined temporal+entity (agentic loop pattern), plan reuse, all error paths (Phase 7.8)
-- Public API surface verified via rustdoc doctests and integration tests: `Minigraf::open`, `execute`, `prepare`, `export_fact_log`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9 + Vetch ledger export)
+- Public API surface verified via rustdoc doctests and integration tests: `Minigraf::open`, `execute`, `prepare`, `export_fact_log`, `run_idle_maintenance`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9 + Vetch ledger export + Q3-A maintenance)
 - WAL fault injection verified: write-fail, flush-fail, read-fault, CRC corruption, checkpoint atomicity, concurrent write+checkpoint (Wave 3)
 - Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v9 migration)
 - Multi-value index regression verified: same entity+attribute batch values survive indexed public query paths, ref edge lookups, temporal replay, retraction, and checkpoint/reopen (#287)
@@ -1007,7 +1009,7 @@ cargo test -- --nocapture
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 1001 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint regressions (including browser WASM + WASI + cross-platform compat + fuzzing CI)
+- 1128 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and maintenance regressions (including browser WASM + WASI + cross-platform compat + fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

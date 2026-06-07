@@ -31,6 +31,9 @@ use crate::query::datalog::types::{AttributeSpec, DatalogCommand, Transaction};
 use crate::storage::backend::MemoryBackend;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::backend::file::FileBackend;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::storage::delta_growth::DeltaMaintenanceDecision;
+use crate::storage::persistent_facts::CheckpointOutcome;
 use crate::storage::persistent_facts::PersistentFactStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::wal::WalWriter;
@@ -55,6 +58,104 @@ fn set_write_tx_active(val: bool) {
 
 fn is_write_tx_active() -> bool {
     WRITE_TX_ACTIVE.with(|f| f.get())
+}
+
+// ─── Maintenance Outcome ─────────────────────────────────────────────────────
+
+/// Public summary of the checkpoint part of an idle maintenance call.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceCheckpointEffect {
+    /// No checkpoint publish was needed.
+    Noop,
+    /// The call published pending or replayed writes to the main database file.
+    Published,
+}
+
+impl MaintenanceCheckpointEffect {
+    fn from_checkpoint_outcome(outcome: CheckpointOutcome) -> Self {
+        match outcome {
+            CheckpointOutcome::Noop => Self::Noop,
+            CheckpointOutcome::FullRebuild
+            | CheckpointOutcome::FullRebuildFromVisibleDelta
+            | CheckpointOutcome::DeltaSegment => Self::Published,
+        }
+    }
+}
+
+/// Public summary of the delta-maintenance part of an idle maintenance call.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceDeltaEffect {
+    /// No delta maintenance was needed.
+    Noop,
+    /// Visible delta segments were folded into a fresh copy-on-write base.
+    Recompacted,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MaintenanceDeltaEffect {
+    fn from_checkpoint_outcome(outcome: CheckpointOutcome) -> Self {
+        match outcome {
+            CheckpointOutcome::FullRebuildFromVisibleDelta => Self::Recompacted,
+            CheckpointOutcome::Noop
+            | CheckpointOutcome::FullRebuild
+            | CheckpointOutcome::DeltaSegment => Self::Noop,
+        }
+    }
+}
+
+/// Public maintenance advice for the embedding application.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceAdvice {
+    /// No caller cadence change is recommended.
+    None,
+    /// The database crossed a hard delta-growth threshold before maintenance.
+    ///
+    /// The caller should reduce tiny checkpoint cadence, batch writes more
+    /// aggressively, or prioritize maintenance scheduling.
+    ReduceCheckpointCadence,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MaintenanceAdvice {
+    fn from_delta_decision(decision: DeltaMaintenanceDecision) -> Self {
+        match decision {
+            DeltaMaintenanceDecision::MaintenanceBackpressure => Self::ReduceCheckpointCadence,
+            DeltaMaintenanceDecision::ContinueDeltaAppend
+            | DeltaMaintenanceDecision::ScheduleBackgroundRecompact => Self::None,
+        }
+    }
+}
+
+/// Result of [`Minigraf::run_idle_maintenance`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintenanceOutcome {
+    /// Whether the call first published pending WAL-backed writes.
+    pub checkpoint: MaintenanceCheckpointEffect,
+    /// Whether the call folded visible delta segments into a fresh base.
+    pub delta: MaintenanceDeltaEffect,
+    /// Caller-facing cadence advice derived from the pre-maintenance delta state.
+    ///
+    /// `ReduceCheckpointCadence` can co-occur with `delta = Recompacted`: the
+    /// advice describes the state that triggered maintenance, not the state
+    /// left behind after a successful fold.
+    pub advice: MaintenanceAdvice,
+}
+
+impl MaintenanceOutcome {
+    fn new(
+        checkpoint: MaintenanceCheckpointEffect,
+        delta: MaintenanceDeltaEffect,
+        advice: MaintenanceAdvice,
+    ) -> Self {
+        Self {
+            checkpoint,
+            delta,
+            advice,
+        }
+    }
 }
 
 // ─── OpenOptions ─────────────────────────────────────────────────────────────
@@ -575,7 +676,61 @@ impl Minigraf {
         let mut ctx = self.inner.write_lock.lock().map_err(|_| {
             anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
         })?;
-        Self::do_checkpoint(&self.inner.fact_storage, &mut ctx)
+        Self::do_checkpoint(&self.inner.fact_storage, &mut ctx).map(|_| ())
+    }
+
+    /// Run idle/background maintenance for a file-backed database.
+    ///
+    /// This call is intended for embedding applications such as Vetch to invoke
+    /// between interactive work slices, at startup/shutdown boundaries, or
+    /// after imports. It first checkpoints any pending WAL-backed writes and
+    /// then applies the internal delta-maintenance policy while holding the
+    /// same write lock. It never runs automatically from foreground
+    /// [`checkpoint`](Self::checkpoint).
+    ///
+    /// If checkpointing succeeds and later delta maintenance fails, the
+    /// checkpoint remains durable and the retired WAL is not restored. That
+    /// failure indicates maintenance should be retried on a later idle tick; it
+    /// does not imply data loss.
+    ///
+    /// In-memory databases return a no-op outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a `WriteTransaction` is active on this thread, the
+    /// write lock is poisoned, checkpoint I/O fails, or delta maintenance fails.
+    pub fn run_idle_maintenance(&self) -> Result<MaintenanceOutcome> {
+        if is_write_tx_active() {
+            bail!(
+                "a WriteTransaction is already in progress on this thread; commit or roll it back before running idle maintenance"
+            );
+        }
+
+        let mut ctx = self.inner.write_lock.lock().map_err(|_| {
+            anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
+        })?;
+        let checkpoint_outcome = Self::do_checkpoint(&self.inner.fact_storage, &mut ctx)?;
+        let checkpoint_effect =
+            MaintenanceCheckpointEffect::from_checkpoint_outcome(checkpoint_outcome);
+
+        match &mut *ctx {
+            WriteContext::Memory => Ok(MaintenanceOutcome::new(
+                checkpoint_effect,
+                MaintenanceDeltaEffect::Noop,
+                MaintenanceAdvice::None,
+            )),
+            #[cfg(not(target_arch = "wasm32"))]
+            WriteContext::File { pfs, .. } => {
+                let decision = pfs.delta_maintenance_decision();
+                let advice = MaintenanceAdvice::from_delta_decision(decision);
+                let maintenance_outcome = pfs.run_idle_delta_maintenance()?;
+                Ok(MaintenanceOutcome::new(
+                    checkpoint_effect,
+                    MaintenanceDeltaEffect::from_checkpoint_outcome(maintenance_outcome),
+                    advice,
+                ))
+            }
+        }
     }
 
     /// Returns the current monotonic transaction counter.
@@ -613,10 +768,14 @@ impl Minigraf {
     }
 
     /// Internal checkpoint logic (operates on an already-held write-lock guard).
-    fn do_checkpoint(_fact_storage: &FactStorage, ctx: &mut WriteContext) -> Result<()> {
+    fn do_checkpoint(
+        _fact_storage: &FactStorage,
+        ctx: &mut WriteContext,
+    ) -> Result<CheckpointOutcome> {
         match ctx {
             WriteContext::Memory => {
                 // No-op for in-memory databases.
+                Ok(CheckpointOutcome::Noop)
             }
             #[cfg(not(target_arch = "wasm32"))]
             WriteContext::File {
@@ -639,7 +798,7 @@ impl Minigraf {
                 // and environments where the advisory lock can be bypassed (e.g.
                 // network filesystems, manual lock deletion).
                 if *wal_entry_count == 0 && !pfs.is_dirty() {
-                    return Ok(());
+                    return Ok(CheckpointOutcome::Noop);
                 }
                 // `force_dirty` is needed for the WAL-replay case: facts were loaded
                 // into memory during `replay_wal` but `pfs.dirty` was not set because
@@ -665,9 +824,9 @@ impl Minigraf {
 
                 // WAL writer will be recreated lazily on the next write.
                 *wal_entry_count = 0;
+                Ok(checkpoint_outcome)
             }
         }
-        Ok(())
     }
 
     /// Parse and plan a query once; bind slots (`$name`) are left unresolved.
@@ -1571,6 +1730,171 @@ mod tests {
         // Facts should still be present
         let facts = db.inner.fact_storage.get_asserted_facts().unwrap();
         assert_eq!(facts.len(), 1);
+    }
+
+    #[test]
+    fn test_idle_maintenance_in_memory_is_noop() {
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(r#"(transact [[:alice :person/name "Alice"]])"#)
+            .unwrap();
+
+        let outcome = db.run_idle_maintenance().unwrap();
+
+        assert_eq!(outcome.checkpoint, MaintenanceCheckpointEffect::Noop);
+        assert_eq!(outcome.delta, MaintenanceDeltaEffect::Noop);
+        assert_eq!(outcome.advice, MaintenanceAdvice::None);
+        let facts = db.inner.fact_storage.get_asserted_facts().unwrap();
+        assert_eq!(facts.len(), 1, "maintenance must preserve in-memory facts");
+    }
+
+    #[test]
+    fn test_idle_maintenance_flushes_pending_file_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("maintenance-flush.graph");
+        let db = Minigraf::open_with_options(
+            &path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.execute(r#"(transact [[:alice :person/name "Alice"]])"#)
+            .unwrap();
+
+        let outcome = db.run_idle_maintenance().unwrap();
+
+        assert_eq!(outcome.checkpoint, MaintenanceCheckpointEffect::Published);
+        assert_eq!(outcome.delta, MaintenanceDeltaEffect::Noop);
+        assert_eq!(outcome.advice, MaintenanceAdvice::None);
+        assert!(
+            !Minigraf::wal_path_for(&path).exists(),
+            "maintenance checkpoint must retire WAL after durable publish"
+        );
+        drop(db);
+
+        let reopened = Minigraf::open(&path).unwrap();
+        let records = reopened.export_fact_log().unwrap();
+        assert_eq!(records.len(), 1, "maintenance must persist pending write");
+    }
+
+    #[test]
+    fn test_idle_maintenance_checkpoints_then_recompacts_threshold_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("maintenance-recompact.graph");
+        let db = Minigraf::open_with_options(
+            &path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.execute(r#"(transact [[:base :bench/name "base"]])"#)
+            .unwrap();
+        db.checkpoint().unwrap();
+
+        for index in 0..1_023u64 {
+            let command = format!(r#"(transact [[:delta-{index} :bench/value {index}]])"#);
+            db.execute(&command).unwrap();
+            db.checkpoint().unwrap();
+        }
+        db.execute(r#"(transact [[:delta-pending :bench/value 1023]])"#)
+            .unwrap();
+
+        let outcome = db.run_idle_maintenance().unwrap();
+
+        assert_eq!(outcome.checkpoint, MaintenanceCheckpointEffect::Published);
+        assert_eq!(outcome.delta, MaintenanceDeltaEffect::Recompacted);
+        assert_eq!(outcome.advice, MaintenanceAdvice::ReduceCheckpointCadence);
+        assert!(
+            !Minigraf::wal_path_for(&path).exists(),
+            "maintenance must retire WAL before returning"
+        );
+        let records = db.export_fact_log().unwrap();
+        assert_eq!(
+            records.len(),
+            1_025,
+            "maintenance must preserve base, checkpointed deltas, and pending write"
+        );
+
+        let second = db.run_idle_maintenance().unwrap();
+        assert_eq!(second.checkpoint, MaintenanceCheckpointEffect::Noop);
+        assert_eq!(second.delta, MaintenanceDeltaEffect::Noop);
+        assert_eq!(second.advice, MaintenanceAdvice::None);
+        drop(db);
+
+        let reopened = Minigraf::open(&path).unwrap();
+        let reopened_records = reopened.export_fact_log().unwrap();
+        assert_eq!(
+            reopened_records.len(),
+            1_025,
+            "reopened maintenance result must preserve fact log"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_does_not_run_delta_maintenance_on_threshold_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint-no-recompact.graph");
+        let db = Minigraf::open_with_options(
+            &path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.execute(r#"(transact [[:base :bench/name "base"]])"#)
+            .unwrap();
+        db.checkpoint().unwrap();
+
+        for index in 0..1_023u64 {
+            let command = format!(r#"(transact [[:delta-{index} :bench/value {index}]])"#);
+            db.execute(&command).unwrap();
+            db.checkpoint().unwrap();
+        }
+        db.execute(r#"(transact [[:delta-pending :bench/value 1023]])"#)
+            .unwrap();
+
+        db.checkpoint().unwrap();
+
+        let decision = {
+            let ctx = db.inner.write_lock.lock().unwrap();
+            match &*ctx {
+                WriteContext::Memory => DeltaMaintenanceDecision::ContinueDeltaAppend,
+                #[cfg(not(target_arch = "wasm32"))]
+                WriteContext::File { pfs, .. } => pfs.delta_maintenance_decision(),
+            }
+        };
+        assert_eq!(
+            decision,
+            DeltaMaintenanceDecision::MaintenanceBackpressure,
+            "foreground checkpoint must leave threshold delta for idle maintenance"
+        );
+        let records = db.export_fact_log().unwrap();
+        assert_eq!(
+            records.len(),
+            1_025,
+            "checkpoint must preserve base and accumulated deltas"
+        );
+
+        let outcome = db.run_idle_maintenance().unwrap();
+        assert_eq!(outcome.checkpoint, MaintenanceCheckpointEffect::Noop);
+        assert_eq!(outcome.delta, MaintenanceDeltaEffect::Recompacted);
+    }
+
+    #[test]
+    fn test_idle_maintenance_rejects_same_thread_write_transaction() {
+        let db = Minigraf::in_memory().unwrap();
+        let _tx = db.begin_write().unwrap();
+
+        let result = db.run_idle_maintenance();
+
+        assert!(
+            result.is_err(),
+            "maintenance must not deadlock behind same-thread write transaction"
+        );
     }
 
     // ── file-backed: open_with_options custom threshold ───────────────────────

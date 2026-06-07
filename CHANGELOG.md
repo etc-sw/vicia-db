@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Add `Minigraf::run_idle_maintenance()` as an explicit embedder maintenance hook for file-backed databases
+  - Checkpoints pending WAL-backed writes first, then runs private delta maintenance under the same write lock
+  - Returns public `MaintenanceOutcome` with non-exhaustive checkpoint, delta, and advice enums instead of exposing internal `CheckpointOutcome`
+  - Keeps raw recompact private and keeps foreground `checkpoint()` free of hidden threshold-triggered recompact
+  - Added unit coverage for in-memory no-op, pending file-write checkpoint, threshold recompact, convergence, same-thread write transaction rejection, foreground checkpoint policy, and phase-2 failure visibility preservation
+
 ### Infrastructure
 
 - Split Python, Node.js, and browser WASM/WASI bindings into independent repos under `project-minigraf` org (#231)

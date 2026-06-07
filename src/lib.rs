@@ -89,7 +89,10 @@ pub mod browser;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use db::OpenOptionsWithPath;
-pub use db::{Minigraf, OpenOptions, WriteTransaction};
+pub use db::{
+    MaintenanceAdvice, MaintenanceCheckpointEffect, MaintenanceDeltaEffect, MaintenanceOutcome,
+    Minigraf, OpenOptions, WriteTransaction,
+};
 /// Vicia DB compatibility name for the primary embedded database handle.
 ///
 /// This is intentionally a type alias during the Vicia DB transition: existing

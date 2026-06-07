@@ -1734,7 +1734,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         &self.delta_manifest_selection
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn delta_maintenance_decision(&self) -> DeltaMaintenanceDecision {
         match &self.delta_manifest_selection {
             PersistedManifestSelection::Use { manifest, .. } => {
@@ -1750,10 +1750,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     /// Fold the selected visible delta into a fresh base through the existing
     /// full-rebuild path.
     ///
-    /// This is intentionally private and not called from `checkpoint()`.
-    /// Background scheduling still needs a crash-safe publish gate before this
-    /// can be used automatically.
-    #[allow(dead_code)]
+    /// This is intentionally private and not called from `checkpoint()`. The
+    /// public scheduling boundary is [`crate::Minigraf::run_idle_maintenance`],
+    /// which checkpoints pending writes before invoking this path.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn recompact_visible_delta(&mut self) -> Result<CheckpointOutcome> {
         if !self.storage.get_pending_facts().is_empty() {
             anyhow::bail!("Cannot recompact visible delta while pending facts are uncheckpointed");
@@ -1776,7 +1776,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     /// This is intentionally not called from `save()`/foreground checkpoint.
     /// The caller must first make pending writes durable; this method preserves
     /// the same pending-facts guard as explicit recompact.
-    #[allow(dead_code)]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn run_idle_delta_maintenance(&mut self) -> Result<CheckpointOutcome> {
         match self.delta_maintenance_decision() {
             DeltaMaintenanceDecision::ContinueDeltaAppend => Ok(CheckpointOutcome::Noop),
@@ -3023,13 +3023,15 @@ mod tests {
         (base_fact, edge_assert, target_fact, edge_retract)
     }
 
-    fn storage_with_visible_ref_delta() -> Result<PersistentFactStorage<MemoryBackend>> {
+    fn storage_with_visible_ref_delta_on<B: StorageBackend + 'static>(
+        backend: B,
+    ) -> Result<PersistentFactStorage<B>> {
         let source = Uuid::from_u128(0xabc);
         let target = Uuid::from_u128(0xdef);
         let (base_fact, edge_assert, target_fact, edge_retract) =
             test_ref_edge_facts(source, target);
 
-        let mut storage = PersistentFactStorage::new(MemoryBackend::new(), 256)?;
+        let mut storage = PersistentFactStorage::new(backend, 256)?;
         storage.storage().load_fact(base_fact)?;
         storage.storage().restore_tx_counter_from(1);
         storage.mark_dirty();
@@ -3046,6 +3048,10 @@ mod tests {
             PersistedManifestSelection::Use { .. }
         ));
         Ok(storage)
+    }
+
+    fn storage_with_visible_ref_delta() -> Result<PersistentFactStorage<MemoryBackend>> {
+        storage_with_visible_ref_delta_on(MemoryBackend::new())
     }
 
     #[test]
@@ -3234,8 +3240,8 @@ mod tests {
         Ok(())
     }
 
-    fn install_threshold_manifest(
-        storage: &mut PersistentFactStorage<MemoryBackend>,
+    fn install_threshold_manifest<B: StorageBackend>(
+        storage: &mut PersistentFactStorage<B>,
         segment_count: u64,
     ) -> Result<()> {
         let base_page_count = 1_000_000;
@@ -3319,6 +3325,48 @@ mod tests {
             storage.delta_manifest_selection(),
             PersistedManifestSelection::Use { .. }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_idle_delta_maintenance_failure_keeps_visible_delta() -> Result<()> {
+        let (backend, config) =
+            crate::storage::backend::fault_inject::FaultInjectingBackend::with_config(
+                MemoryBackend::new(),
+            );
+        let mut storage = storage_with_visible_ref_delta_on(backend)?;
+        let before = fact_projection(storage.storage())?;
+        install_threshold_manifest(&mut storage, 1_024)?;
+        config.lock().unwrap().fail_sync_after = Some(0);
+
+        let result = storage.run_idle_delta_maintenance();
+
+        assert!(
+            result.is_err(),
+            "maintenance must surface recompact publish failures"
+        );
+        assert!(matches!(
+            storage.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+        assert_eq!(
+            before,
+            fact_projection(storage.storage())?,
+            "failed maintenance must keep the previous visible graph"
+        );
+
+        config.lock().unwrap().fail_sync_after = None;
+        let backend = storage.into_backend()?;
+        let reopened = PersistentFactStorage::new(backend, 256)?;
+        assert!(matches!(
+            reopened.delta_manifest_selection(),
+            PersistedManifestSelection::Use { .. }
+        ));
+        assert_eq!(
+            before,
+            fact_projection(reopened.storage())?,
+            "reopened storage must ignore unpublished recompact pages"
+        );
         Ok(())
     }
 

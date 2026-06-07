@@ -85,6 +85,10 @@ let mut tx = db.begin_write()?;
 tx.execute(r#"(transact [[:alice :person/age 31]])"#)?;
 tx.commit()?;
 
+// Optional file-backed maintenance hook for idle/startup/shutdown windows.
+// It checkpoints pending writes, then runs private delta maintenance if needed.
+let _maintenance = db.run_idle_maintenance()?;
+
 // Time travel — query as of past transaction counter
 db.execute("(query [:find ?age :as-of 1 :where [:alice :person/age ?age]])")?;
 
@@ -104,7 +108,7 @@ let r2 = pq.execute(&[("tx", BindValue::TxCount(2)), ("entity", BindValue::Entit
 
 ```bash
 cargo run          # interactive Datalog REPL
-cargo test         # run 1111 passing tests
+cargo test         # run 1119 passing tests
 cargo run < demos/demo_recursive.txt   # recursive rules demo
 ```
 
