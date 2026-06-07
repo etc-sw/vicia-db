@@ -1,8 +1,11 @@
 # Delta Index Reference Survey
 
-Branch: `vetch/minigraf-refactor-plan`
+Historical branch: `vetch/minigraf-refactor-plan`
 
-Status: research artifact only. No storage algorithm or file-format change is proposed here.
+Status: research artifact only. No storage algorithm or file-format change is
+proposed here, and this is not the active implementation branch. Use
+`docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the current Vicia/Vetch delta-storage
+line.
 
 Reference snapshots:
 

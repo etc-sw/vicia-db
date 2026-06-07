@@ -1,9 +1,10 @@
 # Vetch Delta Storage Roadmap
 
-Branch: `vetch/q1b-agent-brief-read-strategy`
+Current line: merged on `main`. Use a fresh worktree and slice branch for new
+storage cleanup, rename, benchmark, or public API work.
 
-Status: overall execution plan as of 2026-06-06. T7C is measured, T8A
-multi-segment manifest publish is implemented on this branch, T8B mini benchmark
+Status: overall execution plan as of 2026-06-07. T7C is measured, T8A
+multi-segment manifest publish is implemented on the current line, T8B mini benchmark
 has passed, T8C full matrix is measured, T9A threshold policy is documented,
 T9B private threshold metrics pass, T9C-A adds a private explicit recompact
 primitive, T9C-B makes recompact publish copy-on-write, T9C-C adds a private
@@ -12,8 +13,11 @@ read-path benchmark harness. Q1-B resolves the entity/attribute-bound as-of
 agent-brief point-read blocker with selective index pushdown. Q2-A removes the
 intermediate committed `Vec<Fact>` allocation from `export_fact_log()` without
 changing its public `Vec<FactRecord>` API. S1 has rechecked the Q1-B/Q2-A
-surface before Q2-B. Automatic/background scheduling
-remains a caller-policy decision and is not wired into foreground `checkpoint()`.
+surface before Q2-B. A follow-up review confirmed that Q2-B must keep crash
+coverage on any new streaming recompact writer and that T9C-C maintenance is
+still private/internal, not an embedder scheduling surface. Automatic/background
+scheduling remains a caller-policy decision and is not wired into foreground
+`checkpoint()`.
 This document is the single high-level plan for the Vetch-driven Minigraf /
 Vicia DB delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
@@ -180,7 +184,7 @@ Vetch should use Minigraf with this cadence:
 | --- | --- | --- |
 | Durable graph/ledger facts | Persist EAV facts, bi-temporal metadata, full-history rows, and `Value::Ref` edges. | Decide what receipts, imports, projections, and local activity records become facts. |
 | Small write durability | WAL append immediately; delta checkpoint pending-sized when checkpointed. | Batch checkpoint calls by receipt/slice when safe for the agent workflow. |
-| Compaction | Provide internal/full-rebuild fallback and later recompact thresholds. | Schedule recompact during idle/background/maintenance windows. |
+| Compaction | Provide internal/full-rebuild fallback and private recompact thresholds; no public maintenance surface yet. | Schedule recompact during idle/background/maintenance windows once a concrete Vetch caller contract exists. |
 | Multimodal payloads | Store pointers, hashes, metadata, relations, and authority graph edges. | Own blob/object stores, OCR/transcript/chunk payloads, embedding stores, and rebuildable search projections. |
 | Retrieval/search | Keep Datalog and graph facts correct; optimize receipt/as-of paths only when measured. | Compose graph, vector, text, and object projections for agent briefs. |
 
@@ -210,6 +214,15 @@ Vetch should use Minigraf with this cadence:
 | Q2-A | Done | Export fact-log allocation cleanup. | `export_fact_log()` uses a streaming committed fact visitor and avoids an intermediate `Vec<Fact>`. |
 | S1 | Done | Stability/code-quality review before Q2-B. | Q1-B/Q2-A surfaces pass targeted tests, full tests, fmt, lib clippy, and diff whitespace checks. |
 | Q2-B | Planned cleanup lane | Continue streaming/allocation cleanup after correctness shape stabilizes. | Recompact/checkpoint/export memory improves without semantic drift. |
+
+Adoption caveat:
+
+- T9C-C added `run_idle_delta_maintenance()` only as a private/internal caller.
+  It is not reachable through `Minigraf`/`ViciaDb` public API, and it is not
+  invoked by foreground `checkpoint()`. Vetch production adoption still needs a
+  separate scheduling contract plus a small public or documented maintenance
+  entry point before segment/file-growth thresholds can actually bound a running
+  embedder.
 
 ## Gate Protocol
 
@@ -817,8 +830,28 @@ Candidate paths:
   must stay identical, including `Value::Ref` assertions/retractions.
 - Prototype a private writer that builds fact pages and index entries from a
   visitor rather than an all-facts vector.
+- Keep the writer path under the existing copy-on-write publish discipline:
+  candidate pages and indexes first, page 0 publish last.
 - Stop early if the backend locking model forces a larger read/write cursor
   redesign; document that as the Q2-B result instead of widening scope.
+
+Acceptance:
+
+- Full-history rows are byte/order stable before and after recompact, including
+  `entity`, `attribute`, encoded `value`, `valid_from`, `valid_to`, `tx_count`,
+  `tx_id`, and `asserted`.
+- Coverage includes `Value::Ref`, asserted and retracted rows, valid-time-scoped
+  retractions, and base-plus-delta visibility.
+- `export_fact_log()` output is identical before and after recompact.
+- Any new streaming recompact writer is exercised by the T9C-B crash boundary:
+  crash before page-0 publish keeps the previous base plus manifest visible;
+  crash after publish makes the new base visible.
+- Pending-facts guard coverage stays green on the streaming path, so recompact
+  input remains committed visible base plus deltas only.
+- A monotonic `tx_count`/storage-order canary protects the shared
+  `for_each_fact()` ordering contract used by export and recompact.
+- Q2-B records peak-memory proxy and wall-time evidence for a 1M-base
+  recompact, or explicitly stops as a locking/cursor redesign finding.
 
 Stop conditions:
 
@@ -826,3 +859,6 @@ Stop conditions:
 - Do not change ledger identity, retraction semantics, or base/delta/recompact
   visibility.
 - Do not introduce new dependencies for this cleanup lane.
+- Do not call recompact from foreground `checkpoint()`.
+- Do not claim Vetch production readiness until the private maintenance caller
+  has an explicit embedder scheduling contract.

@@ -1,10 +1,12 @@
 # Minigraf Refactoring and Algorithm Improvement Plan
 
-Branch: `vetch/minigraf-refactor-plan`
+Historical branch: `vetch/minigraf-refactor-plan`
 
-Worktree: `.worktrees/vetch-minigraf-refactor-plan`
+Historical worktree: `.worktrees/vetch-minigraf-refactor-plan`
 
-Status: planning artifact only. No code changes are included in this branch yet.
+Status: planning artifact only. This is not the active implementation branch.
+Use `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the current Vicia/Vetch
+delta-storage line.
 
 ## Philosophy Fit
 

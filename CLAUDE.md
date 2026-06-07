@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Minigraf is a tiny, portable **bi-temporal graph database with Datalog queries** written in Rust. Designed as the embedded graph memory layer for AI agents, mobile apps, and the browser — built on the SQLite philosophy: embedded, single-file, reliable, with time travel.
 
-See `ROADMAP.md` for the current phase, full plan, and publish gate. See `CHANGELOG.md` for per-phase implementation history.
+See `ROADMAP.md` for upstream Minigraf phase history and publish gates. See
+`docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the active local Vicia/Vetch
+delta-storage line, and `CHANGELOG.md` for per-phase implementation history.
 
 ## Core Philosophy - CRITICAL
 
@@ -173,13 +175,33 @@ See `docs/TEST_COVERAGE.md` for the full per-file breakdown.
 
 **Testing conventions** — see the Testing Conventions section below before writing any tests.
 
-## Key Files for the Next Phase
+## Key Files for Current Vicia Work
 
-Phase 8 is complete — v1.0.0 released. Wave 3 Reliability is complete. #231 Repo Split is complete — Python, Node, WASM, Java, Android, Swift, and C bindings are all in separate repos under the project-minigraf org. Wave 8 Documentation is complete (#190, #191, #192). Wave 5 (Query Profiler) is next.
+The active local line is Vicia/Vetch delta-storage cleanup, not upstream
+Minigraf Wave 5. Keep rename, storage cleanup, benchmark, and public API work
+on separate worktrees and branches.
 
-Wave 5 relevant areas (see `ROADMAP.md` for full spec):
-- `src/query/datalog/` — query executor where profiling hooks will go (#185)
-- `docs/BENCHMARKS.md` — post-1.0 performance baseline updates
+Current next slice:
+
+- Q2-B recompact input streaming spike — reduce recompact/checkpoint/export
+  memory shape where the current locking model allows it, without changing
+  public API, ledger identity, file format, or foreground `checkpoint()` policy.
+
+Relevant areas:
+
+- `docs/VETCH_DELTA_STORAGE_ROADMAP.md` — high-level gate sequence, Q2-B
+  acceptance, and Vetch maintenance/adoption caveats.
+- `docs/DELTA_INDEX_DESIGN.md` — v10 storage format, publish/recovery rules,
+  and Q2-B implementation-order note.
+- `docs/BENCHMARKS.md` — numeric evidence for R2 through Q2-A.
+- `src/storage/persistent_facts.rs` — private recompact, copy-on-write publish,
+  delta maintenance decisions, and the current `get_all_facts()` materialization
+  point for Q2-B.
+- `src/graph/storage.rs` — `get_all_facts()` and `for_each_fact()` ordering
+  contract shared by export and any future streaming recompact path.
+- `tests/delta_checkpoint_crash_recovery_test.rs` and
+  `src/storage/persistent_facts.rs` unit tests — recovery and recompact
+  invariants that must exercise any new writer path.
 
 ## Testing Conventions
 
