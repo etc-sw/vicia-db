@@ -11,10 +11,12 @@ policy, T9B implements private threshold decisions, T9C-A adds a private
 explicit recompact primitive, T9C-B makes recompact publish copy-on-write,
 T9C-C adds a private idle/background maintenance caller, Q1-A adds an
 agent-brief read-path benchmark gate, Q1-B fixes entity/attribute-bound as-of
-agent-brief point reads with selective index pushdown, and Q2-A removes the
-intermediate committed fact allocation from fact-log export. Q2-B is the next
-cleanup lane and must keep any streaming recompact writer under the existing
-crash-publish and full-history identity contracts.
+agent-brief point reads with selective index pushdown, Q2-A removes the
+intermediate committed fact allocation from fact-log export, and Q2-B removes
+the intermediate `Vec<Fact>` allocation from private recompact input while
+preserving the existing crash-publish and full-history identity contracts.
+Q2-B does not make recompact bounded-memory; candidate fact pages and sorted
+index-entry buffers remain O(total facts).
 
 Roadmap: see `docs/VETCH_DELTA_STORAGE_ROADMAP.md` for the post-T7C execution
 plan and gate sequence. Rename sequencing: see
@@ -392,7 +394,7 @@ Current T8C result, recorded in `docs/BENCHMARKS.md`: multi-segment append is th
 
 Current T9A/T9B/T9C policy: keep multi-segment publish as the default delta checkpoint path, but classify visible delta growth with a private decision surface. Healthy growth returns `ContinueDeltaAppend`; soft threshold growth returns `ScheduleBackgroundRecompact`; hard threshold growth returns `MaintenanceBackpressure`. T9B implements the pure/private metrics and decision tests. T9C-A adds an explicit private recompact primitive, T9C-B gives that primitive a copy-on-write publish path, and T9C-C adds `run_idle_delta_maintenance()` as the private idle/background caller. Threshold-triggered execution is still not wired into foreground `checkpoint()` and no public `recompact()` API exists; Vetch must define and wire a concrete maintenance caller before this can be treated as production growth control.
 
-Current Q1-A/Q1-B/Q2-A result, recorded in `docs/BENCHMARKS.md`: `benches/agent_brief_read_path_benchmark.rs` isolates the Vetch agent-brief read surfaces. Full 1M Q1-A evidence showed current point reads stayed sub-millisecond, while formatted and prepared as-of point reads were both about 1.26-1.62 s p95; parser overhead was not the blocker. Q1-B therefore chose as-of selective pushdown rather than a prepared helper or a new public receipt API. Entity/attribute-bound `:as-of` queries now use the existing selective committed-index fetch before temporal filtering, while rule-using queries stay on the full fact base. On the same 1M matrix, formatted as-of p95 drops to 0.017-0.043 ms and prepared as-of p95 drops to 0.013-0.026 ms. Q2-A then changes `export_fact_log()` to stream committed base facts through an internal visitor before constructing the public `Vec<FactRecord>`, removing an intermediate `Vec<Fact>` allocation. Export/replay latency remains O(total facts), so a narrower recent fact-log reader stays deferred until Vetch proves that full-log filtering is still hot in real agent-brief construction.
+Current Q1-A/Q1-B/Q2-A/Q2-B result, recorded in `docs/BENCHMARKS.md`: `benches/agent_brief_read_path_benchmark.rs` isolates the Vetch agent-brief read surfaces. Full 1M Q1-A evidence showed current point reads stayed sub-millisecond, while formatted and prepared as-of point reads were both about 1.26-1.62 s p95; parser overhead was not the blocker. Q1-B therefore chose as-of selective pushdown rather than a prepared helper or a new public receipt API. Entity/attribute-bound `:as-of` queries now use the existing selective committed-index fetch before temporal filtering, while rule-using queries stay on the full fact base. On the same 1M matrix, formatted as-of p95 drops to 0.017-0.043 ms and prepared as-of p95 drops to 0.013-0.026 ms. Q2-A then changes `export_fact_log()` to stream committed base facts through an internal visitor before constructing the public `Vec<FactRecord>`, removing an intermediate `Vec<Fact>` allocation. Export/replay latency remains O(total facts), so a narrower recent fact-log reader stays deferred until Vetch proves that full-log filtering is still hot in real agent-brief construction. Q2-B applies the same visitor shape to private recompact input: `write_recompact_candidate_from_visible_facts()` no longer calls `get_all_facts()`, but recompact still holds candidate fact pages and sorted index-entry buffers in memory and remains a private/background maintenance path.
 
 ## Implementation Order
 
@@ -419,9 +421,12 @@ Current Q1-A/Q1-B/Q2-A result, recorded in `docs/BENCHMARKS.md`: `benches/agent_
 21. Use Q1-A evidence to choose the first read-path implementation. Done in Q1-B with entity/attribute-bound as-of selective pushdown; prepared helper was rejected by full 1M measurements, and recent fact-log replay remains deferred until Vetch proves that export/replay path is still hot.
 22. Add an internal streaming fact visitor and route `export_fact_log()` through it. Done in Q2-A; public export still returns `Vec<FactRecord>`, but committed facts no longer materialize as an intermediate `Vec<Fact>`.
 23. Prototype Q2-B recompact input streaming without changing public API or
-    checkpoint policy. The merge gate is crash-path coverage on the new writer:
-    pre-page-0 publish must keep the previous base plus manifest visible, and
-    post-page-0 publish must make the new base visible.
+    checkpoint policy. Done in Q2-B: the private recompact candidate writer
+    streams visible facts through `for_each_fact()` and `PackedFactPacker`
+    instead of materializing `get_all_facts()`. The crash-path gate remains
+    covered by pre-page-0 publish visibility and post-page-0 publish reopen
+    tests. This is not a bounded-memory recompact design because candidate fact
+    pages and sorted index-entry buffers remain in memory.
 
 ## Open Questions
 

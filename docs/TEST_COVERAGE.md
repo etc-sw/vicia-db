@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Vicia DB V2 Rust API compatibility alias (June 2026), 1119 tests ✅
+**Last Updated**: Q2-B recompact input streaming cleanup (June 2026), 1122 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1119 ✅ (1111 passing, 8 ignored)
-- ✅ 744 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, and T9C-C idle maintenance policy guards)
+**Total Tests**: 1122 ✅ (1113 passing, 9 ignored)
+- ✅ 747 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, and Q2-B recompact input streaming guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -744,6 +744,8 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ both invalid manifest slots error instead of silently dropping committed delta writes
 - ✅ full rebuild fallback after a visible delta preserves results and fact-log rows
 - ✅ recompact writes a copy-on-write base, records checksum-protected base fact start, and keeps unpublished candidate pages invisible before page 0 publish
+- ✅ recompact streams visible facts into candidate pages without materializing an intermediate committed `Vec<Fact>`
+- ✅ recompact preserves fact-log storage order before/after/reopen, including `Value::Ref` assertions and scoped retractions
 - ✅ private idle delta maintenance noops on healthy deltas, recompact scheduled/backpressure deltas, and rejects pending facts
 - ✅ FileBackend non-header page writes do not publish disk page 0; durable page-count changes require an explicit header write
 

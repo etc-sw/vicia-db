@@ -415,6 +415,29 @@ Change: `export_fact_log()` now uses an internal streaming fact visitor over com
 
 Q2-A observation: export/replay latency remains in the same broad range as Q1-B (`~197-246 ms` p95 versus `~200-235 ms` p95 before this cleanup), because the public operation still exports the full log and then filters recent records in the benchmark. The meaningful improvement is memory shape: export no longer materializes committed facts as `Vec<Fact>` before converting them to `Vec<FactRecord>`. A narrower recent fact-log reader should remain deferred until Vetch proves export/replay, not Datalog as-of, is still hot in real agent-brief construction.
 
+### Q2-B: Recompact Input Streaming Cleanup
+
+Run: 2026-06-07,
+`/usr/bin/time -v cargo test measure_q2b_recompact_streaming_1m --lib -- --ignored --nocapture`.
+
+Change: private `write_recompact_candidate_from_visible_facts()` now streams
+visible facts through `for_each_fact()` and `PackedFactPacker` instead of first
+materializing `self.storage.get_all_facts()`. Public API, file format, ledger
+identity, foreground `checkpoint()` policy, and copy-on-write recompact publish
+discipline are unchanged.
+
+| Visible facts | Recompact-only wall time | Base file bytes | Recompact file bytes | Published fact pages | Candidate fact-page bytes | End-to-end max RSS |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000,001 | 11,791.318 ms | 337,833,984 | 675,770,368 | 14,275 | 58,470,400 | 2,186,428 KB |
+
+Q2-B observation: this is a memory-shape cleanup, not a bounded-memory
+recompact design. It removes the decoded committed `Vec<Fact>` allocation from
+recompact input, and tests pin byte-identical packed-page output plus
+fact-log/recompact ordering. Candidate fact pages and sorted EAVT/AEVT/AVET/VAET
+entry buffers still remain O(total facts). The reported max RSS is for the whole
+ignored test process, including 1M fixture setup; the table's wall time is
+measured only around `recompact_visible_delta()`.
+
 ---
 
 ## Concurrency (In-Memory)

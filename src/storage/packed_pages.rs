@@ -55,15 +55,42 @@ pub const MAX_FACT_BYTES: usize = PAGE_SIZE - PACKED_HEADER_SIZE - 4;
 /// `start_page_id` is assigned to `pages[0]`; subsequent pages get
 /// `start_page_id + 1`, `start_page_id + 2`, etc.
 pub fn pack_facts(facts: &[Fact], start_page_id: u64) -> Result<(Vec<Vec<u8>>, Vec<FactRef>)> {
-    let mut pages: Vec<Vec<u8>> = Vec::new();
+    let mut packer = PackedFactPacker::new(start_page_id);
     let mut fact_refs: Vec<FactRef> = Vec::with_capacity(facts.len());
 
-    let mut current_page: Vec<u8> = new_packed_page();
-    let mut current_record_count: u16 = 0;
-    let mut dir_offset: usize = PACKED_HEADER_SIZE;
-    let mut data_offset: usize = PAGE_SIZE; // data written from end backwards
-
     for fact in facts {
+        fact_refs.push(packer.push(fact)?);
+    }
+
+    Ok((packer.finish(), fact_refs))
+}
+
+/// Incrementally pack facts into packed pages.
+///
+/// This preserves the exact page layout produced by [`pack_facts`] while
+/// allowing callers to stream facts instead of materializing a full fact slice.
+pub struct PackedFactPacker {
+    start_page_id: u64,
+    pages: Vec<Vec<u8>>,
+    current_page: Vec<u8>,
+    current_record_count: u16,
+    dir_offset: usize,
+    data_offset: usize,
+}
+
+impl PackedFactPacker {
+    pub fn new(start_page_id: u64) -> Self {
+        Self {
+            start_page_id,
+            pages: Vec::new(),
+            current_page: new_packed_page(),
+            current_record_count: 0,
+            dir_offset: PACKED_HEADER_SIZE,
+            data_offset: PAGE_SIZE,
+        }
+    }
+
+    pub fn push(&mut self, fact: &Fact) -> Result<FactRef> {
         let serialised = postcard::to_allocvec(fact)?;
         let len = serialised.len();
         let dir_entry_size = 4usize;
@@ -80,76 +107,80 @@ pub fn pack_facts(facts: &[Fact], start_page_id: u64) -> Result<(Vec<Vec<u8>>, V
         // Check if this fact fits on the current page.
         // Free space = data_offset - dir_offset - dir_entry_size (for the new dir entry).
         // saturating_sub is safe: dir_offset + dir_entry_size is bounded by PAGE_SIZE.
-        let free = data_offset.saturating_sub(dir_offset.saturating_add(dir_entry_size));
-        if len > free || current_record_count == u16::MAX {
+        let free = self
+            .data_offset
+            .saturating_sub(self.dir_offset.saturating_add(dir_entry_size));
+        if len > free || self.current_record_count == u16::MAX {
             // Flush current page and start a new one.
-            write_record_count(&mut current_page, current_record_count);
-            pages.push(current_page);
-            current_page = new_packed_page();
-            current_record_count = 0;
-            dir_offset = PACKED_HEADER_SIZE;
-            data_offset = PAGE_SIZE;
+            write_record_count(&mut self.current_page, self.current_record_count);
+            let flushed_page = std::mem::replace(&mut self.current_page, new_packed_page());
+            self.pages.push(flushed_page);
+            self.current_record_count = 0;
+            self.dir_offset = PACKED_HEADER_SIZE;
+            self.data_offset = PAGE_SIZE;
         }
 
         // Write data from end of page backwards.
         // len <= MAX_FACT_BYTES <= PAGE_SIZE, and we checked len <= free <= data_offset,
         // so this subtraction cannot underflow.
-        data_offset = data_offset.wrapping_sub(len);
-        current_page
-            .get_mut(data_offset..data_offset.saturating_add(len))
+        self.data_offset = self.data_offset.wrapping_sub(len);
+        self.current_page
+            .get_mut(self.data_offset..self.data_offset.saturating_add(len))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "packed page too short: data region {}..{} out of bounds",
-                    data_offset,
-                    data_offset.saturating_add(len)
+                    self.data_offset,
+                    self.data_offset.saturating_add(len)
                 )
             })?
             .copy_from_slice(&serialised);
 
         // Write directory entry: offset (u16 LE) | length (u16 LE).
         // data_offset <= PAGE_SIZE (4096) which fits in u16; len <= MAX_FACT_BYTES < u16::MAX.
-        let offset_u16 = u16::try_from(data_offset)
-            .map_err(|_| anyhow::anyhow!("data_offset {} overflows u16", data_offset))?;
+        let offset_u16 = u16::try_from(self.data_offset)
+            .map_err(|_| anyhow::anyhow!("data_offset {} overflows u16", self.data_offset))?;
         let len_u16 = u16::try_from(len)
             .map_err(|_| anyhow::anyhow!("serialised fact too large: {} bytes", len))?;
-        current_page
-            .get_mut(dir_offset..dir_offset.saturating_add(2))
+        self.current_page
+            .get_mut(self.dir_offset..self.dir_offset.saturating_add(2))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "packed page dir out of bounds at {}..{}",
-                    dir_offset,
-                    dir_offset.saturating_add(2)
+                    self.dir_offset,
+                    self.dir_offset.saturating_add(2)
                 )
             })?
             .copy_from_slice(&offset_u16.to_le_bytes());
-        current_page
-            .get_mut(dir_offset.saturating_add(2)..dir_offset.saturating_add(4))
+        self.current_page
+            .get_mut(self.dir_offset.saturating_add(2)..self.dir_offset.saturating_add(4))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "packed page dir out of bounds at {}..{}",
-                    dir_offset.saturating_add(2),
-                    dir_offset.saturating_add(4)
+                    self.dir_offset.saturating_add(2),
+                    self.dir_offset.saturating_add(4)
                 )
             })?
             .copy_from_slice(&len_u16.to_le_bytes());
-        dir_offset = dir_offset.saturating_add(4);
+        self.dir_offset = self.dir_offset.saturating_add(4);
 
-        let page_id = start_page_id.saturating_add(
-            u64::try_from(pages.len())
+        let page_id = self.start_page_id.saturating_add(
+            u64::try_from(self.pages.len())
                 .map_err(|_| anyhow::anyhow!("too many pages: overflows u64"))?,
         );
-        fact_refs.push(FactRef {
+        let fact_ref = FactRef {
             page_id,
-            slot_index: current_record_count,
-        });
-        current_record_count = current_record_count.saturating_add(1);
+            slot_index: self.current_record_count,
+        };
+        self.current_record_count = self.current_record_count.saturating_add(1);
+        Ok(fact_ref)
     }
 
-    // Always flush the last page (even if facts slice is empty).
-    write_record_count(&mut current_page, current_record_count);
-    pages.push(current_page);
-
-    Ok((pages, fact_refs))
+    pub fn finish(mut self) -> Vec<Vec<u8>> {
+        // Always flush the last page (even if no facts were packed).
+        write_record_count(&mut self.current_page, self.current_record_count);
+        self.pages.push(self.current_page);
+        self.pages
+    }
 }
 
 /// Read a single fact from a packed page at the given slot index.
@@ -299,6 +330,50 @@ mod tests {
         )
     }
 
+    fn make_rich_fact_set() -> Vec<Fact> {
+        let source = Uuid::from_u128(0xabc);
+        let target = Uuid::from_u128(0xdef);
+        let ref_value = Value::Ref(target);
+        vec![
+            Fact::with_valid_time(
+                source,
+                ":name".to_string(),
+                Value::String("source".to_string()),
+                100,
+                1,
+                100,
+                VALID_TIME_FOREVER,
+            ),
+            Fact::with_valid_time(
+                source,
+                ":edge/to".to_string(),
+                ref_value.clone(),
+                200,
+                2,
+                120,
+                220,
+            ),
+            Fact::retract_with_valid_time(
+                source,
+                ":edge/to".to_string(),
+                ref_value.clone(),
+                300,
+                3,
+                120,
+                220,
+            ),
+            Fact::with_valid_time(
+                source,
+                ":edge/to".to_string(),
+                ref_value,
+                300,
+                3,
+                220,
+                VALID_TIME_FOREVER,
+            ),
+        ]
+    }
+
     #[test]
     fn test_single_fact_roundtrip() {
         let facts = vec![make_fact(1)];
@@ -334,6 +409,22 @@ mod tests {
             let recovered = read_slot(page, r.slot_index).unwrap();
             assert_eq!(recovered.entity, fact.entity, "fact {} mismatched", i);
         }
+    }
+
+    #[test]
+    fn test_streaming_packer_matches_pack_facts_layout() {
+        let mut facts = make_rich_fact_set();
+        facts.extend((0..80).map(make_fact));
+        let (expected_pages, expected_refs) = pack_facts(&facts, 42).unwrap();
+
+        let mut packer = PackedFactPacker::new(42);
+        let mut refs = Vec::new();
+        for fact in &facts {
+            refs.push(packer.push(fact).unwrap());
+        }
+
+        assert_eq!(packer.finish(), expected_pages);
+        assert_eq!(refs, expected_refs);
     }
 
     #[test]

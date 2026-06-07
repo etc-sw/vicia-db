@@ -3,7 +3,7 @@ use crate::graph::FactStorage;
 ///
 /// This module bridges the gap between high-level fact operations and
 /// low-level page-based storage backends.
-use crate::graph::types::{Fact, RETRACT_ALL_VALID_FROM, VALID_TIME_FOREVER};
+use crate::graph::types::{Fact, RETRACT_ALL_VALID_FROM, VALID_TIME_FOREVER, Value};
 use crate::storage::FACT_PAGE_FORMAT_PACKED;
 use crate::storage::btree_v6::{
     MutexStorageBackend, OnDiskIndexReader, btree_entries, build_btree, merge_sorted_vecs,
@@ -23,7 +23,7 @@ use crate::storage::header_extension::{
     select_header_manifest_slot_from_page0,
 };
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey, encode_value};
-use crate::storage::packed_pages::pack_facts;
+use crate::storage::packed_pages::{PackedFactPacker, pack_facts};
 use crate::storage::{
     CommittedFactReader, CommittedIndexReader, FileHeader, PAGE_SIZE, StorageBackend,
 };
@@ -628,28 +628,44 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     }
 
     fn write_recompact_candidate_from_visible_facts(&mut self) -> Result<RecompactCandidate> {
-        let all_facts = self.storage.get_all_facts()?;
         let checkpoint_tx_count = self.storage.current_tx_count();
+
+        let base_fact_page_start = {
+            let backend = self
+                .backend
+                .lock()
+                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+            let curr_header_page = backend.read_page(0)?;
+            let curr_header = FileHeader::from_bytes(&curr_header_page)?;
+            curr_header.validate()?;
+            curr_header.page_count
+        };
+        if base_fact_page_start == 0 {
+            anyhow::bail!("Recompact base candidate cannot start on page 0");
+        }
+
+        let mut packer = PackedFactPacker::new(base_fact_page_start);
+        let mut index_entries = new_index_entries_with_capacity(0);
+        let mut node_count = 0u64;
+        self.storage.for_each_fact(|fact| {
+            let fact_ref = packer.push(&fact)?;
+            push_index_entries_for_fact(&mut index_entries, &fact, fact_ref);
+            node_count = node_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
+            Ok(())
+        })?;
+
+        let fact_pages = packer.finish();
+        let num_fact_pages = u64::try_from(fact_pages.len())
+            .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
+        sort_index_entries(&mut index_entries);
+        let (eavt_entries, aevt_entries, avet_entries, vaet_entries) = index_entries;
 
         let mut backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        let curr_header_page = backend.read_page(0)?;
-        let curr_header = FileHeader::from_bytes(&curr_header_page)?;
-        curr_header.validate()?;
-        let base_fact_page_start = curr_header.page_count;
-        if base_fact_page_start == 0 {
-            anyhow::bail!("Recompact base candidate cannot start on page 0");
-        }
-
-        let (fact_pages, fact_refs) = pack_facts(&all_facts, base_fact_page_start)?;
-        let num_fact_pages = u64::try_from(fact_pages.len())
-            .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
-        let (eavt_entries, aevt_entries, avet_entries, vaet_entries) =
-            build_sorted_index_entries(&all_facts, &fact_refs);
-        let node_count = u64::try_from(all_facts.len())
-            .map_err(|_| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
 
         self.page_cache.invalidate_from(base_fact_page_start);
         for (i, page_data) in fact_pages.iter().enumerate() {
@@ -1901,118 +1917,108 @@ fn build_header_page_with_base_start(
     }
 }
 
-/// Build sorted index entry vecs for a slice of facts and their corresponding FactRefs.
-///
-/// Returns `(eavt_entries, aevt_entries, avet_entries, vaet_entries)`, each sorted by their
-/// respective key type. The `vaet` vec only contains entries whose value is a `Value::Ref`.
-#[allow(clippy::type_complexity)]
-fn build_sorted_index_entries(
-    facts: &[Fact],
-    refs: &[FactRef],
-) -> (
+type SortedIndexEntries = (
     Vec<(EavtKey, FactRef)>,
     Vec<(AevtKey, FactRef)>,
     Vec<(AvetKey, FactRef)>,
     Vec<(VaetKey, FactRef)>,
-) {
-    let mut eavt: Vec<(EavtKey, FactRef)> = facts
-        .iter()
-        .zip(refs.iter())
-        .map(|(f, &fr)| {
-            (
-                EavtKey {
-                    entity: f.entity,
-                    attribute: f.attribute.clone(),
-                    valid_from: f.valid_from,
-                    valid_to: f.valid_to,
-                    tx_count: f.tx_count,
-                    value_bytes: encode_value(&f.value),
-                    tx_id: f.tx_id,
-                    asserted: f.asserted,
-                },
-                fr,
-            )
-        })
-        .collect();
-    eavt.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+);
 
-    let mut aevt: Vec<(AevtKey, FactRef)> = facts
-        .iter()
-        .zip(refs.iter())
-        .map(|(f, &fr)| {
-            (
-                AevtKey {
-                    attribute: f.attribute.clone(),
-                    entity: f.entity,
-                    valid_from: f.valid_from,
-                    valid_to: f.valid_to,
-                    tx_count: f.tx_count,
-                    value_bytes: encode_value(&f.value),
-                    tx_id: f.tx_id,
-                    asserted: f.asserted,
-                },
-                fr,
-            )
-        })
-        .collect();
-    aevt.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+fn new_index_entries_with_capacity(capacity: usize) -> SortedIndexEntries {
+    (
+        Vec::with_capacity(capacity),
+        Vec::with_capacity(capacity),
+        Vec::with_capacity(capacity),
+        Vec::new(),
+    )
+}
 
-    let mut avet: Vec<(AvetKey, FactRef)> = facts
-        .iter()
-        .zip(refs.iter())
-        .map(|(f, &fr)| {
-            (
-                AvetKey {
-                    attribute: f.attribute.clone(),
-                    value_bytes: encode_value(&f.value),
-                    valid_from: f.valid_from,
-                    valid_to: f.valid_to,
-                    entity: f.entity,
-                    tx_count: f.tx_count,
-                    tx_id: f.tx_id,
-                    asserted: f.asserted,
-                },
-                fr,
-            )
-        })
-        .collect();
-    avet.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+fn push_index_entries_for_fact(entries: &mut SortedIndexEntries, fact: &Fact, fact_ref: FactRef) {
+    let value_bytes = encode_value(&fact.value);
+    entries.0.push((
+        EavtKey {
+            entity: fact.entity,
+            attribute: fact.attribute.clone(),
+            valid_from: fact.valid_from,
+            valid_to: fact.valid_to,
+            tx_count: fact.tx_count,
+            value_bytes: value_bytes.clone(),
+            tx_id: fact.tx_id,
+            asserted: fact.asserted,
+        },
+        fact_ref,
+    ));
+    entries.1.push((
+        AevtKey {
+            attribute: fact.attribute.clone(),
+            entity: fact.entity,
+            valid_from: fact.valid_from,
+            valid_to: fact.valid_to,
+            tx_count: fact.tx_count,
+            value_bytes: value_bytes.clone(),
+            tx_id: fact.tx_id,
+            asserted: fact.asserted,
+        },
+        fact_ref,
+    ));
+    entries.2.push((
+        AvetKey {
+            attribute: fact.attribute.clone(),
+            value_bytes,
+            valid_from: fact.valid_from,
+            valid_to: fact.valid_to,
+            entity: fact.entity,
+            tx_count: fact.tx_count,
+            tx_id: fact.tx_id,
+            asserted: fact.asserted,
+        },
+        fact_ref,
+    ));
+    if let Value::Ref(target) = &fact.value {
+        entries.3.push((
+            VaetKey {
+                ref_target: *target,
+                attribute: fact.attribute.clone(),
+                valid_from: fact.valid_from,
+                valid_to: fact.valid_to,
+                source_entity: fact.entity,
+                tx_count: fact.tx_count,
+                tx_id: fact.tx_id,
+                asserted: fact.asserted,
+            },
+            fact_ref,
+        ));
+    }
+}
 
-    let mut vaet: Vec<(VaetKey, FactRef)> = facts
-        .iter()
-        .zip(refs.iter())
-        .filter_map(|(f, &fr)| {
-            if let crate::graph::types::Value::Ref(target) = &f.value {
-                Some((
-                    VaetKey {
-                        ref_target: *target,
-                        attribute: f.attribute.clone(),
-                        valid_from: f.valid_from,
-                        valid_to: f.valid_to,
-                        source_entity: f.entity,
-                        tx_count: f.tx_count,
-                        tx_id: f.tx_id,
-                        asserted: f.asserted,
-                    },
-                    fr,
-                ))
-            } else {
-                None
-            }
-        })
-        .collect();
-    vaet.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+fn sort_index_entries(entries: &mut SortedIndexEntries) {
+    entries.0.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    entries.1.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    entries.2.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    entries.3.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+}
 
-    (eavt, aevt, avet, vaet)
+/// Build sorted index entry vecs for a slice of facts and their corresponding FactRefs.
+///
+/// Returns `(eavt_entries, aevt_entries, avet_entries, vaet_entries)`, each sorted by their
+/// respective key type. The `vaet` vec only contains entries whose value is a `Value::Ref`.
+fn build_sorted_index_entries(facts: &[Fact], refs: &[FactRef]) -> SortedIndexEntries {
+    let mut entries = new_index_entries_with_capacity(facts.len());
+    for (fact, &fact_ref) in facts.iter().zip(refs.iter()) {
+        push_index_entries_for_fact(&mut entries, fact, fact_ref);
+    }
+    sort_index_entries(&mut entries);
+    entries
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::graph::types::Value;
+    use crate::graph::types::{FactRecord, Value};
     use crate::storage::PAGE_SIZE;
-    use crate::storage::backend::MemoryBackend;
+    use crate::storage::backend::{FileBackend, MemoryBackend};
     use std::io::Write;
+    use std::time::Instant;
     use uuid::Uuid;
 
     #[test]
@@ -2946,7 +2952,7 @@ mod tests {
 
     fn fact_projection(
         storage: &FactStorage,
-    ) -> Result<Vec<(Uuid, String, Vec<u8>, u64, u64, bool)>> {
+    ) -> Result<Vec<(Uuid, String, Vec<u8>, i64, i64, u64, u64, bool)>> {
         let mut facts: Vec<_> = storage
             .get_all_facts()?
             .into_iter()
@@ -2955,6 +2961,8 @@ mod tests {
                     fact.entity,
                     fact.attribute,
                     encode_value(&fact.value),
+                    fact.valid_from,
+                    fact.valid_to,
                     fact.tx_count,
                     fact.tx_id,
                     fact.asserted,
@@ -2963,6 +2971,15 @@ mod tests {
             .collect();
         facts.sort();
         Ok(facts)
+    }
+
+    fn fact_log_projection(storage: &FactStorage) -> Result<Vec<FactRecord>> {
+        let mut records = Vec::new();
+        storage.for_each_fact(|fact| {
+            records.push(FactRecord::from_fact(fact));
+            Ok(())
+        })?;
+        Ok(records)
     }
 
     fn test_ref_edge_facts(source: Uuid, target: Uuid) -> (Fact, Fact, Fact, Fact) {
@@ -3077,6 +3094,40 @@ mod tests {
             before,
             fact_projection(reopened.storage())?,
             "reopened recompact base must preserve full-history identity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_recompact_visible_delta_preserves_fact_log_order() -> Result<()> {
+        let mut storage = storage_with_visible_ref_delta()?;
+        let before = fact_log_projection(storage.storage())?;
+        assert_eq!(before.len(), 4, "fact log must include full Ref history");
+        assert_eq!(
+            before
+                .iter()
+                .map(|record| record.tx_count)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 2, 3],
+            "fixture must exercise deterministic storage replay order"
+        );
+
+        assert_eq!(
+            storage.recompact_visible_delta()?,
+            CheckpointOutcome::FullRebuildFromVisibleDelta
+        );
+        assert_eq!(
+            before,
+            fact_log_projection(storage.storage())?,
+            "recompact must preserve export/replay fact-log order"
+        );
+
+        let backend = storage.into_backend()?;
+        let reopened = PersistentFactStorage::new(backend, 256)?;
+        assert_eq!(
+            before,
+            fact_log_projection(reopened.storage())?,
+            "reopened recompact base must preserve export/replay fact-log order"
         );
         Ok(())
     }
@@ -3268,6 +3319,76 @@ mod tests {
             storage.delta_manifest_selection(),
             PersistedManifestSelection::Use { .. }
         ));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Q2-B 1M recompact measurement; run manually with --ignored --nocapture"]
+    fn measure_q2b_recompact_streaming_1m() -> Result<()> {
+        let fact_count = std::env::var("MINIGRAF_Q2B_RECOMPACT_FACTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1_000_000);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("q2b-recompact-streaming.graph");
+        let mut storage = PersistentFactStorage::new(FileBackend::open(&path)?, 256)?;
+
+        for index in 0..fact_count {
+            let n = u64::try_from(index)
+                .map_err(|_| anyhow::anyhow!("fixture index exceeds u64::MAX"))?
+                .saturating_add(1);
+            storage.storage().load_fact(Fact::with_valid_time(
+                Uuid::from_u128(u128::from(n)),
+                ":bench/value".to_string(),
+                Value::Integer(i64::try_from(n).unwrap_or(i64::MAX)),
+                n,
+                n,
+                i64::try_from(n).unwrap_or(i64::MAX),
+                VALID_TIME_FOREVER,
+            ))?;
+        }
+        let base_tx_count =
+            u64::try_from(fact_count).map_err(|_| anyhow::anyhow!("fixture too large"))?;
+        storage.storage().restore_tx_counter_from(base_tx_count);
+        storage.mark_dirty();
+        assert_eq!(storage.save()?, CheckpointOutcome::FullRebuild);
+
+        let base_file_bytes = std::fs::metadata(&path)?.len();
+        let base_fact_pages = storage.committed_fact_pages.load(Ordering::SeqCst);
+        let delta_tx_count = base_tx_count.saturating_add(1);
+        storage.storage().load_fact(Fact::with_valid_time(
+            Uuid::from_u128(0xfeed),
+            ":bench/ref".to_string(),
+            Value::Ref(Uuid::from_u128(0xbeef)),
+            delta_tx_count,
+            delta_tx_count,
+            i64::try_from(delta_tx_count).unwrap_or(i64::MAX),
+            VALID_TIME_FOREVER,
+        ))?;
+        storage.storage().restore_tx_counter_from(delta_tx_count);
+        storage.mark_dirty();
+        assert_eq!(storage.save()?, CheckpointOutcome::DeltaSegment);
+
+        let recompact_started = Instant::now();
+        assert_eq!(
+            storage.recompact_visible_delta()?,
+            CheckpointOutcome::FullRebuildFromVisibleDelta
+        );
+        let recompact_elapsed = recompact_started.elapsed();
+        let recompact_file_bytes = std::fs::metadata(&path)?.len();
+        let recompact_fact_pages = storage.committed_fact_pages.load(Ordering::SeqCst);
+        let candidate_fact_page_bytes = recompact_fact_pages.saturating_mul(PAGE_SIZE as u64);
+
+        println!(
+            "q2b_recompact_streaming,facts={},elapsed_ms={:.3},base_file_bytes={},recompact_file_bytes={},base_fact_pages={},recompact_fact_pages={},candidate_fact_page_bytes={}",
+            fact_count.saturating_add(1),
+            recompact_elapsed.as_secs_f64() * 1000.0,
+            base_file_bytes,
+            recompact_file_bytes,
+            base_fact_pages,
+            recompact_fact_pages,
+            candidate_fact_page_bytes
+        );
         Ok(())
     }
 

@@ -12,12 +12,13 @@ idle/background maintenance caller, and Q1-A adds a dedicated agent-brief
 read-path benchmark harness. Q1-B resolves the entity/attribute-bound as-of
 agent-brief point-read blocker with selective index pushdown. Q2-A removes the
 intermediate committed `Vec<Fact>` allocation from `export_fact_log()` without
-changing its public `Vec<FactRecord>` API. S1 has rechecked the Q1-B/Q2-A
-surface before Q2-B. A follow-up review confirmed that Q2-B must keep crash
-coverage on any new streaming recompact writer and that T9C-C maintenance is
-still private/internal, not an embedder scheduling surface. Automatic/background
-scheduling remains a caller-policy decision and is not wired into foreground
-`checkpoint()`.
+changing its public `Vec<FactRecord>` API. S1 rechecked the Q1-B/Q2-A surface,
+and Q2-B removes the intermediate `Vec<Fact>` allocation from the private
+recompact candidate writer. Q2-B is still only a memory-shape cleanup: candidate
+packed pages and the four sorted index-entry buffers remain O(total facts).
+T9C-C maintenance is still private/internal, not an embedder scheduling surface.
+Automatic/background scheduling remains a caller-policy decision and is not
+wired into foreground `checkpoint()`.
 This document is the single high-level plan for the Vetch-driven Minigraf /
 Vicia DB delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
@@ -49,18 +50,19 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/REFACTORING_AND_ALGORITHM_PLAN.md` | Original R0-R6 cleanup, benchmark, and gate plan. Records Gate 1 and Gate 2 decisions. |
 | `docs/DELTA_INDEX_REFERENCE_SURVEY.md` | Reference DB survey. Extracts portable invariants from GrafeoDB, Fjall, and redb without adopting them as dependencies. |
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
-| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, and Q2-A. |
+| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, Q2-A, and Q2-B. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
 | `docs/VICIA_DB_RENAME_PLAN.md` | Staged Vicia DB successor rename plan, compatibility policy, attribution checklist, and `vicia-db-decision-gate` skill shape. |
 
 ## Decision Summary
 
 Minigraf should keep the v10 in-file delta-index direction. T9 threshold and
-recompact policy, Q1-B agent-brief as-of pushdown, and Q2-A export allocation
-cleanup are complete. After S1, the next implementation slice can be Q2-B as a
-cleanup spike only: reduce recompact/checkpoint/export memory shape where the
-current locking model allows it, without changing public API, ledger identity,
-or foreground checkpoint policy.
+recompact policy, Q1-B agent-brief as-of pushdown, Q2-A export allocation
+cleanup, and Q2-B private recompact input streaming are complete. Q2-B confirms
+the current locking model can stream visible facts into the recompact candidate
+without a cursor redesign, but it does not make recompact bounded-memory or
+foreground-safe. The next storage decision should be about Vetch maintenance API
+cadence or deeper index/page streaming, not another hot-path checkpoint change.
 
 T7C showed that the current single-segment replacement path is not viable for
 Vetch's long-running receipt cadence:
@@ -137,7 +139,7 @@ the result of progressively narrower gates:
 | Q1-A | Full 1M agent-brief benchmark split current, formatted as-of, prepared as-of, and export/replay paths. | Optimize as-of point reads first; do not add a public receipt API yet. |
 | Q1-B | Entity/attribute-bound as-of p95 dropped from `1,257.698-1,499.003 ms` to `0.017-0.043 ms` on the 1M matrix. | Treat the receipt-scoped Datalog read blocker as fixed for Vetch-shaped point reads. |
 | Q2-A | `export_fact_log()` streams committed facts into `FactRecord`s instead of first collecting committed `Vec<Fact>`. | Keep export as full-log audit API; defer narrower recent-log reads until Vetch proves that path is hot. |
-| S1 | Q1-B/Q2-A review and stability checks passed; all-target clippy still fails on pre-existing test-lint debt. | Proceed to Q2-B only as a bounded cleanup spike. |
+| S1 | Q1-B/Q2-A review and stability checks passed; all-target clippy still fails on pre-existing test-lint debt. | Constrained Q2-B to a bounded cleanup spike. |
 
 ## Philosophy Fit
 
@@ -213,7 +215,7 @@ Vetch should use Minigraf with this cadence:
 | Q1-B | Done | Agent-brief read strategy decision. | Entity/attribute-bound as-of selective pushdown fixes the receipt-scoped point-read blocker without public API changes. |
 | Q2-A | Done | Export fact-log allocation cleanup. | `export_fact_log()` uses a streaming committed fact visitor and avoids an intermediate `Vec<Fact>`. |
 | S1 | Done | Stability/code-quality review before Q2-B. | Q1-B/Q2-A surfaces pass targeted tests, full tests, fmt, lib clippy, and diff whitespace checks. |
-| Q2-B | Planned cleanup lane | Continue streaming/allocation cleanup after correctness shape stabilizes. | Recompact/checkpoint/export memory improves without semantic drift. |
+| Q2-B | Done | Private recompact input streaming cleanup. | Recompact candidate writing avoids an intermediate `Vec<Fact>` without semantic drift; index/page buffers remain O(total facts). |
 
 Adoption caveat:
 
@@ -815,50 +817,61 @@ Evidence:
   pre-existing test-lint debt such as `unwrap/expect/panic/indexing` in tests
   and a pre-existing test-helper `type_complexity` lint.
 
-## Next Slice Goal Spec
+## Completed Slice: Q2-B Recompact Input Streaming
 
 Name: Q2-B recompact input streaming spike.
 
 Objective:
 
 - Determine whether private recompact can stream visible facts into candidate
-  pages and index entries without first materializing `self.storage.get_all_facts()`.
+  pages and index entries without first materializing
+  `self.storage.get_all_facts()`.
 
-Candidate paths:
+Done:
 
-- Keep a pure behavior fixture: recompact before/after full-history projection
-  must stay identical, including `Value::Ref` assertions/retractions.
-- Prototype a private writer that builds fact pages and index entries from a
-  visitor rather than an all-facts vector.
-- Keep the writer path under the existing copy-on-write publish discipline:
-  candidate pages and indexes first, page 0 publish last.
-- Stop early if the backend locking model forces a larger read/write cursor
-  redesign; document that as the Q2-B result instead of widening scope.
+- Done: added `PackedFactPacker`, a streaming packed-page builder that preserves
+  the byte layout produced by `pack_facts()`.
+- Done: changed `write_recompact_candidate_from_visible_facts()` to use
+  `FactStorage::for_each_fact()` instead of `get_all_facts()`.
+- Done: recompact builds candidate packed pages and index entries from the
+  visitor while keeping copy-on-write publish discipline unchanged: candidate
+  pages and indexes first, page 0 publish last.
+- Done: full-history identity coverage now includes `valid_from` and `valid_to`
+  in the recompact projection.
+- Done: added a storage-order fact-log canary for recompact before/after/reopen.
+- Done: added a rich packed-page byte-equivalence fixture covering `Value::Ref`,
+  scoped retraction, and same-EAV assert/retract shape.
 
-Acceptance:
+Evidence:
 
-- Full-history rows are byte/order stable before and after recompact, including
-  `entity`, `attribute`, encoded `value`, `valid_from`, `valid_to`, `tx_count`,
-  `tx_id`, and `asserted`.
-- Coverage includes `Value::Ref`, asserted and retracted rows, valid-time-scoped
-  retractions, and base-plus-delta visibility.
-- `export_fact_log()` output is identical before and after recompact.
-- Any new streaming recompact writer is exercised by the T9C-B crash boundary:
-  crash before page-0 publish keeps the previous base plus manifest visible;
-  crash after publish makes the new base visible.
-- Pending-facts guard coverage stays green on the streaming path, so recompact
-  input remains committed visible base plus deltas only.
-- A monotonic `tx_count`/storage-order canary protects the shared
-  `for_each_fact()` ordering contract used by export and recompact.
-- Q2-B records peak-memory proxy and wall-time evidence for a 1M-base
-  recompact, or explicitly stops as a locking/cursor redesign finding.
+- Passed: `cargo test test_streaming_packer_matches_pack_facts_layout --lib`.
+- Passed: `cargo test recompact --lib`.
+- Passed: `cargo test --test delta_checkpoint_crash_recovery_test`.
+- Passed: `cargo test measure_q2b_recompact_streaming_1m --lib`.
+- Passed 1M manual measurement:
+  `/usr/bin/time -v cargo test measure_q2b_recompact_streaming_1m --lib -- --ignored --nocapture`.
+  The printed recompact-only wall time was `11791.318 ms` for `1,000,001`
+  visible facts. End-to-end test process max RSS was `2,186,428 KB`; this
+  includes fixture setup, not only the recompact call.
+- Peak-memory proxy from the 1M run: candidate fact pages were `14,275` pages,
+  or `58,470,400` bytes. The implementation still keeps candidate fact pages
+  and sorted EAVT/AEVT/AVET/VAET entry buffers in memory.
 
 Stop conditions:
 
-- Do not change public API.
-- Do not change ledger identity, retraction semantics, or base/delta/recompact
-  visibility.
-- Do not introduce new dependencies for this cleanup lane.
-- Do not call recompact from foreground `checkpoint()`.
-- Do not claim Vetch production readiness until the private maintenance caller
-  has an explicit embedder scheduling contract.
+- No public API change.
+- No file-format change.
+- No ledger identity, retraction, base/delta/recompact visibility, or foreground
+  checkpoint policy change.
+- No new dependency.
+- No Vetch production-readiness claim: recompact remains private/internal and
+  still needs an explicit embedder scheduling contract before production use.
+
+Result:
+
+- Q2-B succeeds as a first cleanup cut. It removes the committed `Vec<Fact>`
+  materialization from private recompact input, so the writer no longer holds a
+  decoded full fact log solely to pack candidate pages.
+- Q2-B does not make recompact bounded-memory. The next deeper cleanup, if
+  needed, is a separate page/index streaming writer that writes candidate fact
+  pages as they fill and bounds or externalizes sorted index-entry buffers.
