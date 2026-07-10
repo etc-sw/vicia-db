@@ -18,48 +18,94 @@ impl FileLock {
     /// Attempt to acquire an exclusive lock for the given database path.
     /// Returns `Err` if another process already holds the lock.
     ///
-    /// If a stale lock file exists (the holder PID is no longer running),
-    /// it is automatically removed and a new lock is acquired. This handles
-    /// the case where the previous process crashed without cleaning up.
+    /// The lock name only ever appears with its PID content already complete:
+    /// the PID is staged in a sibling temp file and hard-linked into place.
+    /// A direct `create_new` + `write` sequence has a kill window between the
+    /// two syscalls that leaves an empty lock file, which no liveness check
+    /// can ever classify — permanently blocking open until manual deletion
+    /// (found by the A7 kill -9 harness).
+    ///
+    /// If a stale lock file exists — dead holder PID, our own leaked handle,
+    /// or a contentless artifact from a pre-fix crash — it is automatically
+    /// removed and acquisition retried.
     fn acquire(db_path: &Path) -> Result<Self> {
         let lock_path = db_path.with_extension("graph.lock");
-        // create_new fails with AlreadyExists if the lock file is present
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(mut f) => {
-                // Write PID for diagnostics (best-effort)
-                let _ = write!(f, "{}", std::process::id());
-                Ok(FileLock { path: lock_path })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Check if the holder process is still alive
-                let holder = std::fs::read_to_string(&lock_path).unwrap_or_default();
-                if let Ok(pid) = holder.trim().parse::<u32>() {
-                    let our_pid = std::process::id();
-                    if pid == our_pid || !Self::is_process_alive(pid) {
-                        // Stale lock — either our own leaked handle or previous
-                        // process crashed. Remove and retry.
-                        let _ = std::fs::remove_file(&lock_path);
-                        return Self::acquire(db_path);
+        let our_pid = std::process::id();
+        // Bounded retries: each retry follows a stale-lock removal, and a
+        // contended lock bails out — this cannot spin.
+        for _ in 0..4 {
+            match Self::try_create(&lock_path, our_pid)? {
+                None => return Ok(FileLock { path: lock_path }),
+                Some(holder) => {
+                    match holder.trim().parse::<u32>() {
+                        Ok(pid) if pid != our_pid && Self::is_process_alive(pid) => {
+                            anyhow::bail!(
+                                "Database is locked by another process (lock file: {}, holder PID: {}). \
+                                 If no other process is using this database, delete the lock file manually.",
+                                lock_path.display(),
+                                holder.trim()
+                            );
+                        }
+                        _ => {
+                            // Stale: dead holder, our own leaked handle, or an
+                            // unparseable/empty artifact left by a pre-fix
+                            // binary killed mid-acquire. Atomic creation means
+                            // a live holder's lock is never observed without
+                            // its PID, so removal here cannot steal a lock.
+                            let _ = std::fs::remove_file(&lock_path);
+                        }
                     }
                 }
-                anyhow::bail!(
-                    "Database is locked by another process (lock file: {}, holder PID: {}). \
-                     If no other process is using this database, delete the lock file manually.",
-                    lock_path.display(),
-                    holder.trim()
-                );
             }
-            Err(e) => {
-                anyhow::bail!(
-                    "Failed to acquire database lock at {}: {}",
-                    lock_path.display(),
+        }
+        anyhow::bail!(
+            "Failed to acquire database lock at {} after retries",
+            lock_path.display()
+        );
+    }
+
+    /// Atomically create the lock file with the PID as content.
+    ///
+    /// Returns `Ok(None)` when the lock was acquired, `Ok(Some(holder))`
+    /// with the current holder content when the lock already exists.
+    fn try_create(lock_path: &Path, our_pid: u32) -> Result<Option<String>> {
+        // Stage content in a PID-unique sibling so concurrent acquirers never
+        // collide on the temp name; a process killed here leaves a harmless
+        // temp file, never a contentless lock.
+        let tmp_path = lock_path.with_extension(format!("lock.tmp{our_pid}"));
+        {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to stage database lock at {}: {}",
+                        tmp_path.display(),
+                        e
+                    )
+                })?;
+            write!(f, "{our_pid}").map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to write database lock at {}: {}",
+                    tmp_path.display(),
                     e
-                );
+                )
+            })?;
+        }
+        let link_result = std::fs::hard_link(&tmp_path, lock_path);
+        let _ = std::fs::remove_file(&tmp_path);
+        match link_result {
+            Ok(()) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Ok(Some(std::fs::read_to_string(lock_path).unwrap_or_default()))
             }
+            Err(e) => anyhow::bail!(
+                "Failed to acquire database lock at {}: {}",
+                lock_path.display(),
+                e
+            ),
         }
     }
 
@@ -396,5 +442,77 @@ mod tests {
 
         backend.write_page(2, &vec![0u8; PAGE_SIZE]).unwrap();
         assert_eq!(backend.page_count().unwrap(), 3);
+    }
+
+    // ── FileLock crash robustness (found by the A7 kill -9 harness) ─────────
+
+    #[test]
+    fn test_lock_file_carries_complete_pid_after_acquire() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lockpid.graph");
+        let lock = FileLock::acquire(&db_path).unwrap();
+        let content = std::fs::read_to_string(db_path.with_extension("graph.lock")).unwrap();
+        assert_eq!(
+            content.trim().parse::<u32>().unwrap(),
+            std::process::id(),
+            "lock file must hold the complete holder PID"
+        );
+        drop(lock);
+        assert!(
+            !db_path.with_extension("graph.lock").exists(),
+            "lock file must be removed on drop"
+        );
+    }
+
+    #[test]
+    fn test_empty_lock_file_is_healed_not_fatal() {
+        // A pre-fix binary killed between create_new and the PID write left a
+        // contentless lock that blocked open forever. Acquisition must treat
+        // it as stale and self-heal.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("emptylock.graph");
+        std::fs::write(db_path.with_extension("graph.lock"), b"").unwrap();
+        let _lock = FileLock::acquire(&db_path).expect("empty lock artifact must be healed");
+    }
+
+    #[test]
+    fn test_garbage_lock_file_is_healed_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("garbagelock.graph");
+        std::fs::write(db_path.with_extension("graph.lock"), b"not-a-pid").unwrap();
+        let _lock = FileLock::acquire(&db_path).expect("unparseable lock artifact must be healed");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_dead_holder_lock_is_healed() {
+        // A PID far above pid_max cannot belong to a live process.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("deadlock.graph");
+        std::fs::write(db_path.with_extension("graph.lock"), b"4194304999").unwrap();
+        let _lock = FileLock::acquire(&db_path).expect("dead-holder lock must be healed");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_live_foreign_holder_still_blocks() {
+        // PID 1 is always alive on Linux and is never this test process.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("livelock.graph");
+        std::fs::write(db_path.with_extension("graph.lock"), b"1").unwrap();
+        let err = FileLock::acquire(&db_path);
+        assert!(err.is_err(), "live foreign holder must still block acquisition");
+    }
+
+    #[test]
+    fn test_own_pid_lock_is_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ownlock.graph");
+        std::fs::write(
+            db_path.with_extension("graph.lock"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let _lock = FileLock::acquire(&db_path).expect("own leaked lock must be reclaimed");
     }
 }

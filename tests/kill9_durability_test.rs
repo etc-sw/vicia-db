@@ -618,7 +618,10 @@ fn verify_cycle(
     .map_err(|e| {
         let msg = e.to_string();
         if msg.contains("locked by another process") {
-            format!("HARNESS BUG (lock hygiene): {msg}")
+            // The child is dead and reaped, and the parent heals its own
+            // leaked locks — a residual lock here means a kill left the
+            // database unopenable without manual intervention.
+            format!("GATE unopenable file (lock survived the kill): {msg}")
         } else {
             format!("GATE unopenable file: {msg}")
         }
