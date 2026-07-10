@@ -2,7 +2,8 @@
 
 Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 `docs/HARREKKI_CALLER_REQUIREMENTS.md`. Caller decisions override the initial
-2026-07-11 audit inferences (see Revision Note). No slice started. This line
+2026-07-11 audit inferences (see Revision Note). A0 landed 2026-07-11; next
+up is A6. This line
 sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
 delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 apply unchanged.
