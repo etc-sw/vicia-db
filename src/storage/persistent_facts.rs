@@ -1747,6 +1747,23 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
     }
 
+    /// (visible delta segment count, visible delta page growth) for the A6
+    /// session `status` op. Zero for both when no delta manifest is selected.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn delta_growth_snapshot(&self) -> (u64, u64) {
+        match &self.delta_manifest_selection {
+            PersistedManifestSelection::Use { manifest, .. } => {
+                let metrics = DeltaGrowthMetrics::from_manifest(manifest);
+                (
+                    metrics.visible_delta_segment_count(),
+                    metrics.visible_delta_page_growth(),
+                )
+            }
+            PersistedManifestSelection::NoDeltaManifest
+            | PersistedManifestSelection::RecoveryRequired { .. } => (0, 0),
+        }
+    }
+
     /// Fold the selected visible delta into a fresh base through the existing
     /// full-rebuild path.
     ///

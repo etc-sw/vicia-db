@@ -158,6 +158,23 @@ impl MaintenanceOutcome {
     }
 }
 
+/// Crate-internal status numbers for the A6 session `status` op.
+/// File-only fields are `None` for in-memory databases.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct SessionStatusSnapshot {
+    /// Exact total fact count when cheaply knowable (in-memory databases);
+    /// `None` for file-backed databases, where an exact count would need a
+    /// committed full scan. Callers wanting totals track them via `tx_count`
+    /// deltas or `export_fact_log`.
+    pub(crate) fact_count: Option<u64>,
+    /// In-memory (pending, not yet checkpointed) fact records. Always exact.
+    pub(crate) pending_facts: u64,
+    pub(crate) tx_count: u64,
+    pub(crate) wal_bytes: Option<u64>,
+    pub(crate) delta_segments: Option<u64>,
+    pub(crate) delta_pages: Option<u64>,
+}
+
 // ─── OpenOptions ─────────────────────────────────────────────────────────────
 
 /// Configuration options for opening a `Minigraf` database.
@@ -743,6 +760,57 @@ impl Minigraf {
     /// regardless of how many facts the batch contains.
     pub fn current_tx_count(&self) -> u64 {
         self.inner.fact_storage.current_tx_count()
+    }
+
+    /// Session-protocol status snapshot (A6). Crate-internal: the public
+    /// surface is the `status` op on [`crate::session::Session`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn session_status(&self) -> Result<SessionStatusSnapshot> {
+        let ctx = self.inner.write_lock.lock().map_err(|_| {
+            anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
+        })?;
+        let (wal_bytes, delta_segments, delta_pages) = match &*ctx {
+            WriteContext::Memory => (None, None, None),
+            WriteContext::File { pfs, db_path, .. } => {
+                let wal_path = Self::wal_path_for(db_path);
+                let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).ok();
+                let (segments, pages) = pfs.delta_growth_snapshot();
+                (wal_bytes, Some(segments), Some(pages))
+            }
+        };
+        let pending_facts = self.inner.fact_storage.pending_fact_count() as u64;
+        // Exact total is only knowable without a committed full scan when
+        // everything lives in memory; file-backed databases report None.
+        let fact_count = if self.inner.fact_storage.has_committed_reader() {
+            None
+        } else {
+            Some(pending_facts)
+        };
+        Ok(SessionStatusSnapshot {
+            fact_count,
+            pending_facts,
+            tx_count: self.inner.fact_storage.current_tx_count(),
+            wal_bytes,
+            delta_segments,
+            delta_pages,
+        })
+    }
+
+    /// Whether the delta-growth thresholds currently advise maintenance.
+    /// Backs the `maintenance_pending` durability classification on session
+    /// write responses; `false` for in-memory databases and on lock poisoning.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn maintenance_advised(&self) -> bool {
+        let Ok(ctx) = self.inner.write_lock.lock() else {
+            return false;
+        };
+        match &*ctx {
+            WriteContext::Memory => false,
+            WriteContext::File { pfs, .. } => !matches!(
+                pfs.delta_maintenance_decision(),
+                DeltaMaintenanceDecision::ContinueDeltaAppend
+            ),
+        }
     }
 
     /// Export the complete append-only fact log in deterministic storage order.

@@ -34,11 +34,20 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
 
+        let session_flag = args.iter().any(|a| a == "--session");
+
         let db = if let Some(path) = db_path {
             OpenOptions::new().path(path).open()?
         } else {
             Minigraf::in_memory()?
         };
+
+        if session_flag {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            let mut session = minigraf::session::Session::new(db);
+            return session.run(stdin.lock(), stdout.lock());
+        }
 
         let repl = db.repl();
         if let Some(path) = init_path {

@@ -79,6 +79,9 @@ pub(crate) mod graph;
 pub(crate) mod query;
 /// Interactive REPL for exploring a [`Minigraf`] database from the command line.
 pub mod repl;
+/// A6 framed pipe session mode — NDJSON protocol for caller-owned child processes.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod session;
 pub(crate) mod storage;
 pub(crate) mod temporal;
 pub(crate) mod wal;

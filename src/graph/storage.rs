@@ -510,6 +510,22 @@ impl FactStorage {
         d.committed_index_reader = Some(reader);
     }
 
+    /// Count of in-memory (pending, not yet checkpointed) fact records.
+    /// Cheap: no committed scan. Backs the A6 session `status` op.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn pending_fact_count(&self) -> usize {
+        let d = self.data.read().unwrap_or_else(|e| e.into_inner());
+        d.facts.len()
+    }
+
+    /// `true` when this storage has a committed reader — some facts live on
+    /// disk, so [`Self::pending_fact_count`] is not the exact total.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn has_committed_reader(&self) -> bool {
+        let d = self.data.read().unwrap_or_else(|e| e.into_inner());
+        d.committed.is_some()
+    }
+
     /// Returns (eavt_len, aevt_len, avet_len, vaet_len) for the pending indexes.
     /// Used in tests to verify pending index state.
     #[allow(dead_code)]

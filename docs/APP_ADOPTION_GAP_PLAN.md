@@ -2,8 +2,8 @@
 
 Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 `docs/HARREKKI_CALLER_REQUIREMENTS.md`. Caller decisions override the initial
-2026-07-11 audit inferences (see Revision Note). A0 landed 2026-07-11; next
-up is A6. This line
+2026-07-11 audit inferences (see Revision Note). A0 and A6 landed
+2026-07-11; next up is A7 (kill -9 harness), then A2. This line
 sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
 delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 apply unchanged.
@@ -83,28 +83,27 @@ Suites" plus the re-measured Query Latency / Time-Travel tables). Suites:
 - Gate: PASSED — no adoption-relevant table carries v0.8.0-era numbers; all
   three caller-shaped suites exist with documented local runners.
 
-### A6 — Framed pipe session protocol + status frames (harrekki P0 #1, #4)
+### A6 — Framed pipe session protocol + status frames (DONE 2026-07-11)
 
-Design frozen 2026-07-11 — all five questions in
-`docs/A6_SESSION_PROTOCOL_QUESTIONS.md` ACKed by both caller lanes (see its
-status block for pointers): NDJSON framing; tagged `$ref`/`$kw` value
-encoding; sequential v0 with reserved echoed `id`; raw ops only
-(`execute`/`status`/`checkpoint`/`maintenance`/`ping`/`shutdown` —
-supersede stays in the harrekki adapter); EOF = graceful exit, no implicit
-checkpoint.
+Landed. Frame reference: `docs/SESSION_PROTOCOL.md`; implementation:
+`src/session.rs` (+ `minigraf --session [--file <path>]`); tests:
+`tests/session_protocol_test.rs` (17 tests, including real child-process
+runs). Design as frozen by the dual-lane ACK: NDJSON framing; tagged
+`$ref`/`$kw` encoding; sequential v0 with echoed `id`; raw ops
+(`execute`/`status`/`checkpoint`/`maintenance`/`ping`/`shutdown`); EOF =
+graceful, no implicit checkpoint; durability classification on write
+frames (`applied`/`maintenance_pending`; `published` on checkpoint;
+rejection = error frame).
 
-Formalize the existing REPL/piped mode into a machine-parseable
-request/response framing for a **caller-owned child process**. No network
-server, no listener socket; the daemon owns the child's lifecycle. Include
-a status frame exposing fact count, current `tx_count`, WAL size, delta
-size, and last checkpoint time/outcome (G10), and make result frames carry
-the durability classification from G13 (`applied` / `published` /
-`rejected` / `maintenance_pending`) where the distinction exists.
+One caller-favoring deviation from the name-review list, documented in the
+protocol doc: status `fact_count` is exact only when cheaply knowable and
+`null` once committed data lives on disk (an exact total would need a
+committed full scan); always-exact `pending_facts` was added alongside.
 
-- Non-goals: no network transport, no multi-writer, no auth layer.
-- Gate (from the harrekki doc): an external process holds one session open,
-  runs 10k mixed transact/query round-trips without respawn, and observes
-  deterministic framing under malformed input.
+- Gate: PASSED — `gate_10k_mixed_round_trips_single_session` holds one
+  child session for 10k mixed transact/query round-trips (1.2 s, zero
+  failures); `malformed_input_over_real_pipe` proves deterministic framing
+  and survival under garbage input.
 
 ### A7 — kill -9 durability harness (harrekki P0 #3)
 
