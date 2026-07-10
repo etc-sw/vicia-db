@@ -1,10 +1,21 @@
 # A6 Framed Pipe Session Protocol — Design Questions
 
-Status: awaiting caller-lane answers, 2026-07-11. A6 implementation starts
-after Q1–Q5 are answered (ACK of the recommended default is enough). The
-protocol is a long-term contract with the harrekki JVM adapter (the
+Status: ANSWERED 2026-07-11 — all five recommendations ACKed by both caller
+lanes; A6 implementation unblocked. Harrekki lane:
+`docs/A6_SESSION_PROTOCOL_ANSWERS_HARREKKI.md` (97e8574; includes direct
+answers — wake-loop needs no pipelining, supersede stays harrekki-owned).
+Vetch lane: shared-memory decision
+`:m/20260710T181042Z-vetch-codex-vetch-lane-acks-a6-defaults-ndjson-framing-eba29494`
+(topic `:topic/vicia-db`) — ACKs all defaults and names. On the Q2
+follow-up the vetch lane (owner) supersedes the harrekki opinion: browser
+`execute()` converges on the same tagged encoding in a planned breaking
+transition; the lossy JSON form remains only as an explicitly named
+temporary compatibility surface, not permanent canon. A5 documents both
+encodings plus that convergence plan.
+
+The protocol is a long-term contract with the harrekki JVM adapter (the
 `xtdb_ledger.clj` seat) and possibly other non-Rust callers, so caller
-lanes get a veto before the first byte is frozen.
+lanes got a veto before the first byte was frozen.
 
 Context: `docs/APP_ADOPTION_GAP_PLAN.md` slice A6;
 `docs/HARREKKI_CALLER_REQUIREMENTS.md` P0 #1 (framed pipe mode) and #4

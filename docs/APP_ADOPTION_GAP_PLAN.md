@@ -85,14 +85,21 @@ Suites" plus the re-measured Query Latency / Time-Travel tables). Suites:
 
 ### A6 — Framed pipe session protocol + status frames (harrekki P0 #1, #4)
 
+Design frozen 2026-07-11 — all five questions in
+`docs/A6_SESSION_PROTOCOL_QUESTIONS.md` ACKed by both caller lanes (see its
+status block for pointers): NDJSON framing; tagged `$ref`/`$kw` value
+encoding; sequential v0 with reserved echoed `id`; raw ops only
+(`execute`/`status`/`checkpoint`/`maintenance`/`ping`/`shutdown` —
+supersede stays in the harrekki adapter); EOF = graceful exit, no implicit
+checkpoint.
+
 Formalize the existing REPL/piped mode into a machine-parseable
-request/response framing for a **caller-owned child process**: length- or
-line-delimited frames, stable result encoding, explicit error frames. No
-network server, no listener socket; the daemon owns the child's lifecycle.
-Include a status frame exposing fact count, current `tx_count`, WAL size,
-delta size, and last checkpoint time/outcome (G10), and make result frames
-carry the durability classification from G13 (applied / durably published /
-rejected / maintenance-pending) where the distinction exists.
+request/response framing for a **caller-owned child process**. No network
+server, no listener socket; the daemon owns the child's lifecycle. Include
+a status frame exposing fact count, current `tx_count`, WAL size, delta
+size, and last checkpoint time/outcome (G10), and make result frames carry
+the durability classification from G13 (`applied` / `published` /
+`rejected` / `maintenance_pending`) where the distinction exists.
 
 - Non-goals: no network transport, no multi-writer, no auth layer.
 - Gate (from the harrekki doc): an external process holds one session open,
@@ -137,7 +144,11 @@ legacy load path. Scope:
    (write-through IndexedDB, no WAL), batch multi-statement work into one
    `execute`.
 2. Documented durability semantics per backend (G13): what `execute` /
-   `checkpoint` guarantee on return, native vs browser; failure and
+   `checkpoint` guarantee on return, native vs browser; document both value
+   encodings per the vetch lane's A6 Q2 decision — the tagged A6 encoding is
+   the long-term canonical form, the current lossy browser JSON is an
+   explicitly named temporary compatibility surface, and browser `execute()`
+   converges on tagged in a planned breaking transition; failure and
    corruption classification for open / execute / checkpoint / import.
 3. Parity evidence: browser open memory/startup at 1M-fact scale (from A0),
    long-running IndexedDB growth measurement, and verification that
