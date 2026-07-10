@@ -2,8 +2,8 @@
 
 Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 `docs/HARREKKI_CALLER_REQUIREMENTS.md`. Caller decisions override the initial
-2026-07-11 audit inferences (see Revision Note). A0 and A6 landed
-2026-07-11; next up is A7 (kill -9 harness), then A2. This line
+2026-07-11 audit inferences (see Revision Note). A0, A6, and A7 landed
+2026-07-11; next up is A2. This line
 sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
 delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 apply unchanged.
@@ -105,14 +105,34 @@ committed full scan); always-exact `pending_facts` was added alongside.
   failures); `malformed_input_over_real_pipe` proves deterministic framing
   and survival under garbage input.
 
-### A7 — kill -9 durability harness (harrekki P0 #3)
+### A7 — kill -9 durability harness (DONE 2026-07-11)
 
-A test-harness slice, not a feature: automated kill-loop in `tests/` running
-tens of thousands of small transactions with periodic checkpoints, SIGKILL
-at random points including mid-checkpoint, over thousands of iterations.
-Seed from `tests/delta_checkpoint_crash_recovery_test.rs`.
+Landed. Harness: `tests/kill9_durability_test.rs` — SIGKILLs real
+`minigraf --session --file` children (the A6 protocol is the ack boundary:
+a complete `ok:true` transacted frame implies WAL fsync) at randomized
+instants over growing `.graph` lineages, three kill modes (random-instant,
+mid-checkpoint biased, mid-maintenance), per-cycle audit of every
+acknowledged transaction plus atomicity / duplicate / phantom / tx-count
+monotonicity checks and a functional-after-recovery probe. Deterministic
+schedule via seeded SplitMix64 (`VICIA_A7_SEED`, `VICIA_A7_CYCLES`);
+failure artifacts preserved. Smoke (24 cycles) runs in the default suite;
+the full gate is `#[ignore]`d
+(`cargo test --release --test kill9_durability_test -- --ignored`).
 
-- Gate: zero lost acknowledged transactions, zero unopenable files.
+The harness found and drove the fix of two real crash-robustness bugs:
+WAL replay resetting the tx counter below the committed watermark on a
+header-only WAL (acked writes then skipped on the next replay — lost), and
+non-atomic `.graph.lock` creation leaving a contentless lock after a kill
+that blocked open until manual deletion. Regression tests live in
+`tests/wal_test.rs` and `src/storage/backend/file.rs`.
+
+- Gate: PASSED — 2,400 kill cycles, 155,699 acknowledged transactions,
+  zero lost, zero unopenable files, 912 confirmed mid-checkpoint kills,
+  263.5 s wall. Evidence: `docs/BENCHMARKS.md` "A7: kill -9 Durability
+  Gate". Caveats: process-death durability, not power loss; recompact
+  thresholds unreachable at harness scale (maintenance checkpoint path
+  only). A8's new write path must be added to the harness op mix when it
+  lands (weight table in `gen_stream_op`).
 
 ### A2 — Incremental fact log: `export_fact_log_since(tx_count)` (harrekki P0 #2)
 

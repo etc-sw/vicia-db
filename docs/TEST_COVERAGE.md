@@ -1,16 +1,18 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: Q3-A public idle maintenance API (June 2026), 1128 tests ✅
+**Last Updated**: A7 kill -9 durability harness (July 2026), 1154 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1128 ✅ (1119 passing, 9 ignored)
-- ✅ 753 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, and Q3-A public idle maintenance API guards)
+**Total Tests**: 1154 ✅ (1143 passing, 11 ignored)
+- ✅ 759 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, and A7 FileLock crash-robustness guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
 - ✅ 12 concurrency tests (integration, 1 ignored: nightly stress)
-- ✅ 21 WAL / crash recovery tests (integration)
+- ✅ 22 WAL / crash recovery tests (integration — includes the A7-found header-only-WAL tx-counter regression)
+- ✅ 17 session protocol tests (integration, A6 — framed pipe NDJSON, tagged values, child-process gate runs)
+- ✅ 2 kill -9 durability harness tests (integration, A7 — default smoke + `#[ignore]`d 2,400-cycle nightly gate)
 - ✅ 2 cross-platform compat tests (integration, Phase 8.1)
 - ✅ 6 index tests (integration, Phase 6.1)
 - ✅ 7 performance tests (integration, Phase 6.2/6.4b)
@@ -50,7 +52,7 @@
 - ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 1119 non-ignored tests passing** (9 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement)
+**Status**: ✅ **All 1143 non-ignored tests passing** (11 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7 full kill -9 gate)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -551,7 +553,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ Valid-at inside/outside/boundary, default filter, any-valid-time
 - ✅ Combined bi-temporal (both dimensions), multi-entity valid ranges
 
-### WAL / Crash Recovery (`tests/wal_test.rs`) - ✅ 21 tests
+### WAL / Crash Recovery (`tests/wal_test.rs`) - ✅ 22 tests
 
 - ✅ Basic persistence (file-backed transact and query)
 - ✅ WAL replay after `mem::forget` crash simulation
@@ -573,6 +575,14 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ Multi-writer serialisation: concurrent writers serialise correctly under fault conditions (Wave 3 #217)
 - ✅ Concurrent write+checkpoint: no deadlock or data loss under concurrent fault injection (Wave 3 #214)
 - ✅ Backend error propagation: storage errors surface as Err, not panic (Wave 3 #209)
+- ✅ Header-only WAL preserves tx counter and acked writes (A7-found regression: counter must hold the committed watermark, next write must extend not reuse tx_counts, and its WAL entry must replay)
+
+### kill -9 Durability Harness (`tests/kill9_durability_test.rs`) - ✅ 2 tests (A7)
+
+- ✅ Smoke: 24 kill cycles against real `minigraf --session --file` children (default suite, ~1 s)
+- ✅ `#[ignore]` Nightly gate: 2,400 kill cycles / 155,699 acked transactions, zero lost, zero unopenable (see `docs/BENCHMARKS.md` "A7: kill -9 Durability Gate")
+- Per-cycle audit: acked exactly-once, in-flight all-or-nothing promotion, transaction atomicity, phantom/duplicate detection, tx-count monotonicity, functional-after-recovery probe
+- FileLock crash-robustness unit tests (6) live in `src/storage/backend/file.rs`
 
 ### Covering Indexes (`tests/index_test.rs`) - ✅ 6 tests (Phase 6.1)
 
@@ -935,12 +945,13 @@ cargo test
 cargo test --quiet
 
 # Run specific test suites
-cargo test --lib                       # Unit tests (216)
+cargo test --lib                       # Unit tests (759)
 cargo test --test bitemporal           # Bi-temporal (10)
 cargo test --test complex_queries      # Complex queries (10)
 cargo test --test recursive_rules      # Recursive rules (9)
 cargo test --test concurrency          # Concurrency (12, 1 ignored)
-cargo test --test wal_test             # WAL / crash recovery (21)
+cargo test --test wal_test             # WAL / crash recovery (22)
+cargo test --test kill9_durability_test  # A7 kill -9 harness (smoke; full gate: -- --ignored)
 cargo test --test index_test           # Covering indexes (6)
 cargo test --test performance_test     # Packed pages (7)
 cargo test --test retraction_test      # Retraction semantics (7)
@@ -1009,7 +1020,7 @@ cargo test -- --nocapture
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 1128 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and maintenance regressions (including browser WASM + WASI + cross-platform compat + fuzzing CI)
+- 1154 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and maintenance regressions + A6 session protocol + A7 kill -9 durability (including browser WASM + WASI + cross-platform compat + fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

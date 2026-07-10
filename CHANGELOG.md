@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- WAL replay no longer resets the tx counter below the committed watermark when a crash leaves a WAL with zero replayable entries (header-only sidecar from a torn first append, or a checkpoint/delete race). Before the fix, the next write reused an already-committed `tx_count` and its WAL entry was skipped by the replay dedup rule — an acknowledged write silently lost, plus `:as-of N` ambiguity. Found by the A7 kill -9 harness on its first cycle; deterministic regression in `tests/wal_test.rs`.
+- `.graph.lock` acquisition is now atomic (PID staged in a temp file and hard-linked into place). Before the fix, SIGKILL between lock-file creation and the PID write left a contentless lock that no liveness check could classify, blocking open until manual deletion. The contention path also heals empty/unparseable artifacts left by pre-fix binaries. Found by the A7 kill -9 gate at cycle 191; unit coverage in `src/storage/backend/file.rs`.
+
 ### Added
 
+- A7 kill -9 durability harness (`tests/kill9_durability_test.rs`, harrekki P0 #3): SIGKILLs real `minigraf --session --file` child processes at randomized instants — including checkpoint-biased windows — over growing `.graph` lineages, auditing every acknowledged transaction after reopen (acked exactly-once, in-flight all-or-nothing, atomicity, phantoms, tx-count monotonicity, functional-after-recovery probe). Default-suite smoke plus `#[ignore]`d nightly gate. Gate PASSED: 2,400 kill cycles, 155,699 acked transactions, zero lost, zero unopenable files (`docs/BENCHMARKS.md` "A7: kill -9 Durability Gate").
 - Add `Minigraf::run_idle_maintenance()` as an explicit embedder maintenance hook for file-backed databases
   - Checkpoints pending WAL-backed writes first, then runs private delta maintenance under the same write lock
   - Returns public `MaintenanceOutcome` with non-exhaustive checkpoint, delta, and advice enums instead of exposing internal `CheckpointOutcome`

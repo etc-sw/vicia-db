@@ -550,6 +550,46 @@ memory accounting may vary by Chrome version).
 
 ---
 
+## A7: kill -9 Durability Gate (2026-07-11)
+
+Reliability gate, not a benchmark (`docs/APP_ADOPTION_GAP_PLAN.md` slice A7,
+harrekki P0 #3). `tests/kill9_durability_test.rs` SIGKILLs real
+`minigraf --session --file` child processes at randomized instants —
+including checkpoint-biased windows — over growing `.graph` lineages, then
+reopens and audits every acknowledged transaction (an ack = a complete
+`ok:true` transacted frame, which the A6 protocol only emits after WAL
+fsync). Run:
+
+```bash
+cargo test --release --test kill9_durability_test -- --ignored --nocapture
+# seed / scale overrides: VICIA_A7_SEED, VICIA_A7_CYCLES
+```
+
+Gate run (A0 environment, seed `0xa7a720260711`, defaults):
+
+| Metric | Value |
+|---|---|
+| Kill cycles | 2,400 (random-instant / mid-checkpoint / mid-maintenance ≈ 6:3:1) |
+| Acknowledged transactions | 155,699 |
+| Lost acknowledged transactions | **0** |
+| Unopenable files | **0** |
+| Confirmed mid-checkpoint kills | 912 |
+| In-flight promotions (unacked but fsynced, all-or-nothing) | 501 |
+| Lineage rotations | 26 |
+| Wall time | 263.5 s |
+
+The harness found two real crash-robustness bugs before passing: a WAL
+replay that reset the tx counter below the committed watermark when a kill
+left a header-only WAL (acked writes then skipped on the next replay), and
+a non-atomic lock-file creation whose kill window left a contentless
+`.graph.lock` that blocked open until manual deletion. Both are fixed and
+regression-tested (`tests/wal_test.rs`, `src/storage/backend/file.rs` unit
+tests). Scope caveats: SIGKILL validates process-death durability, not
+power loss; maintenance-op kills exercise the maintenance checkpoint path
+only (recompact thresholds are unreachable at this scale).
+
+---
+
 ## Concurrency (In-Memory)
 
 All threads operate concurrently. Throughput = aggregate ops/sec across all threads (v0.20.1).
