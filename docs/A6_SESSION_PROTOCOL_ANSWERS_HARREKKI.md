@@ -59,6 +59,12 @@ as-durability is exactly what P0 #3 (kill -9 harness, A7) verifies.
 
 - Status fields cover P0 #4's list exactly (fact/tx counts, WAL size,
   delta size, last checkpoint time/outcome). Good.
+- Post-ACK deviation, accepted (2026-07-11): `fact_count` is null once
+  committed data lives on disk (exact total would need a full scan, which
+  status must never do); `pending_facts` (always exact) was added instead.
+  Fine for this caller — the resident's self-model tracks growth via
+  `tx_count`, which is monotonic and always present; an exact fact total
+  was never load-bearing.
 - Durability classification (`applied`/`published`/`rejected`/
   `maintenance_pending`): `applied` (WAL-fsynced) is the level the
   resident treats as "remembered".
