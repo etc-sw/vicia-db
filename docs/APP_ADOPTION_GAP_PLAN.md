@@ -59,23 +59,28 @@ line. A1/A3/A4 keep their IDs but are demoted to candidates. Implementation
 slices use isolated worktrees per repo policy; each lands with tests, doc
 sync, and — where a gate has a number — a `docs/BENCHMARKS.md` entry.
 
-### A0 — Caller-shaped evidence gate (expanded; do first)
+### A0 — Caller-shaped evidence gate (DONE 2026-07-11)
 
-Two parts:
+Landed. Evidence lives in `docs/BENCHMARKS.md` ("A0: Caller-Shaped Evidence
+Suites" plus the re-measured Query Latency / Time-Travel tables). Suites:
 
-1. Re-run the stale tables: `point_entity`, `point_attribute`,
-   `join_3pattern`, `as_of_counter`, `valid_at` at 100K and 1M on the current
-   build; update BENCHMARKS.md with a version note.
-2. Add caller-shaped suites that later gates and the A1/A3 promotion
-   decisions will cite:
-   - a Vetch-cadence mini replay (capture / canvas edit / receipt /
-     agent-brief mix on a 1M+ base — the Vicia-side seed of Vetch Gate D);
-   - browser open memory shape and startup time at scale (today open loads
-     all IndexedDB pages into memory — Vetch requires this benchmarked);
-   - harrekki decay-candidate query ("entities untouched since T") cost.
+- Stale-table refresh: `MINIGRAF_BENCH_MODE=full` extends `query/` scales to
+  100K/1M in `benches/minigraf_bench.rs`. Headline: `point_entity` and both
+  time-travel reads are flat ~4 µs from 1K to 1M (selective index path);
+  the v0.8.0-era 266 ms / 4.33 s rows are gone.
+- Vetch cadence replay: `benches/vetch_cadence_benchmark.rs` (full 1M /
+  smoke 10K). Headline: every interactive op ≤ ~2 ms p50 and independent of
+  base size; per-slice checkpoint ~5 ms p95 at 1M.
+- Decay-candidate cost: `decay/` groups in `benches/minigraf_bench.rs`.
+  Headline: comparison scan is linear (407 ms at 1M — idle-window OK,
+  per-tick no) — this is the A3 promotion evidence; the not-join shape is
+  superlinear and capped at 10K by design.
+- Browser open at scale: `examples/browser/bench.html` + `bench-driver.cjs`
+  + `examples/generate_bench_fixture.rs`. Headline: open latency and heap
+  are linear in file size — 1M facts = 3.2 s open, +420 MB per tab.
 
-- Gate: no adoption-relevant table carries v0.8.0-era numbers; the three
-  caller-shaped suites exist in CI or a documented local runner.
+- Gate: PASSED — no adoption-relevant table carries v0.8.0-era numbers; all
+  three caller-shaped suites exist with documented local runners.
 
 ### A6 — Framed pipe session protocol + status frames (harrekki P0 #1, #4)
 

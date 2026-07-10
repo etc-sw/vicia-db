@@ -396,6 +396,35 @@ pub fn populate_with_string_vals(n: usize) -> Arc<Minigraf> {
     Arc::new(db)
 }
 
+// ── Decay-candidate fixture (A0 / harrekki) ───────────────────────────────────
+
+/// Threshold used by the decay-candidate queries: entities whose
+/// `:touched/at` value is below this are "untouched since T".
+pub const DECAY_THRESHOLD: i64 = 1_000_000;
+
+/// In-memory DB with `n` entities carrying one `:touched/at` integer
+/// timestamp each. Every 5th entity (20%) is decayed (timestamp below
+/// [`DECAY_THRESHOLD`]); the rest are recent. Inserted in batches of 100.
+pub fn populate_with_touch_timestamps(n: usize) -> Arc<Minigraf> {
+    let db = Minigraf::in_memory().unwrap();
+    const BATCH: usize = 100;
+    for batch_start in (0..n).step_by(BATCH) {
+        let batch_end = (batch_start + BATCH).min(n);
+        let mut cmd = String::from("(transact [");
+        for i in batch_start..batch_end {
+            let ts = if i % 5 == 0 {
+                (i % 1_000) as i64
+            } else {
+                DECAY_THRESHOLD + i as i64
+            };
+            cmd.push_str(&format!("[:e{i} :touched/at {ts}]"));
+        }
+        cmd.push_str("])");
+        db.execute(&cmd).unwrap();
+    }
+    Arc::new(db)
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn insert_val_facts(db: &Minigraf, n: usize) {

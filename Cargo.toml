@@ -84,6 +84,10 @@ harness = false
 name = "agent_brief_read_path_benchmark"
 harness = false
 
+[[bench]]
+name = "vetch_cadence_benchmark"
+harness = false
+
 [features]
 default = []
 wasm = []

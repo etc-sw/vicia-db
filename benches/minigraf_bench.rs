@@ -25,6 +25,24 @@ mod simd_helpers;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use minigraf::OpenOptions;
 
+// ── A0 evidence-gate mode ─────────────────────────────────────────────────────
+//
+// `MINIGRAF_BENCH_MODE=full` extends the query-latency scales to 100K/1M for
+// local BENCHMARKS.md refresh runs (docs/APP_ADOPTION_GAP_PLAN.md, A0).
+// Without it the CI-shaped run keeps the fast 1K/10K scales.
+
+fn full_bench_mode() -> bool {
+    std::env::var("MINIGRAF_BENCH_MODE").as_deref() == Ok("full")
+}
+
+fn query_scales() -> Vec<(&'static str, usize)> {
+    let mut scales = vec![("1k", 1_000), ("10k", 10_000)];
+    if full_bench_mode() {
+        scales.extend([("100k", 100_000), ("1m", 1_000_000)]);
+    }
+    scales
+}
+
 // ── Task 3: insert/ ───────────────────────────────────────────────────────────
 
 fn bench_insert(c: &mut Criterion) {
@@ -175,13 +193,13 @@ fn bench_insert_file(c: &mut Criterion) {
 // ── Task 5: query/ ────────────────────────────────────────────────────────────
 
 fn bench_query(c: &mut Criterion) {
-    const SCALES: &[(&str, usize)] = &[("1k", 1_000), ("10k", 10_000)];
+    let scales = query_scales();
 
     // point_entity: EAVT range scan on a known entity
     {
         let mut group = c.benchmark_group("query/point_entity");
         group.sample_size(10); // 1m scale takes ~2s/iter
-        for &(label, n) in SCALES {
+        for &(label, n) in &scales {
             group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
                 let db = helpers::populate_in_memory(n);
                 b.iter(|| {
@@ -197,7 +215,7 @@ fn bench_query(c: &mut Criterion) {
     {
         let mut group = c.benchmark_group("query/point_attribute");
         group.sample_size(10); // 1m scale returns all N results — slow
-        for &(label, n) in SCALES {
+        for &(label, n) in &scales {
             group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
                 let db = helpers::populate_in_memory(n);
                 b.iter(|| db.execute("(query [:find ?e :where [?e :val _]])").unwrap());
@@ -212,7 +230,7 @@ fn bench_query(c: &mut Criterion) {
     {
         let mut group = c.benchmark_group("query/join_3pattern");
         group.sample_size(10); // 1m scale may be slow
-        for &(label, n) in SCALES {
+        for &(label, n) in &scales {
             group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
                 let db = helpers::populate_for_join(n);
                 b.iter(|| {
@@ -270,6 +288,56 @@ fn bench_time_travel(c: &mut Criterion) {
                     )
                     .unwrap()
                 });
+            });
+        }
+        group.finish();
+    }
+}
+
+// ── A0: decay/ — harrekki decay-candidate read shapes ─────────────────────────
+//
+// "Entities untouched since T" is the harrekki decay-candidate shape
+// (docs/HARREKKI_CALLER_REQUIREMENTS.md P1 #6). Both variants return the same
+// 20% candidate set; the numbers gate the A3 range-pushdown promotion decision
+// (docs/APP_ADOPTION_GAP_PLAN.md candidates).
+
+fn bench_decay_candidate(c: &mut Criterion) {
+    let scales = query_scales();
+
+    // comparison_scan: attribute scan + in-memory `[(< ?t T)]` filter
+    {
+        let mut group = c.benchmark_group("decay/comparison_scan");
+        group.sample_size(10);
+        for &(label, n) in &scales {
+            group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
+                let db = helpers::populate_with_touch_timestamps(n);
+                let query = format!(
+                    "(query [:find ?e :where [?e :touched/at ?t] [(< ?t {})]])",
+                    helpers::DECAY_THRESHOLD
+                );
+                b.iter(|| db.execute(&query).unwrap());
+            });
+        }
+        group.finish();
+    }
+
+    // not_join: "no touch at or after T" via negation over the same facts.
+    // Explicitly capped at 10K even in full mode: the shape is superlinear
+    // (12 ms at 1K → 891 ms at 10K, measured 2026-07-11), so 100K/1M runs
+    // cost minutes-to-hours per iteration without adding decision
+    // information. The cap itself is the evidence — record it in
+    // BENCHMARKS.md, do not silently extend.
+    {
+        let mut group = c.benchmark_group("decay/not_join");
+        group.sample_size(10);
+        for &(label, n) in scales.iter().filter(|&&(_, n)| n <= 10_000) {
+            group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
+                let db = helpers::populate_with_touch_timestamps(n);
+                let query = format!(
+                    "(query [:find ?e :where [?e :touched/at ?t] (not-join [?e] [?e :touched/at ?t2] [(>= ?t2 {})])])",
+                    helpers::DECAY_THRESHOLD
+                );
+                b.iter(|| db.execute(&query).unwrap());
             });
         }
         group.finish();
@@ -1657,6 +1725,7 @@ criterion_group!(
     bench_insert_file,
     bench_query,
     bench_time_travel,
+    bench_decay_candidate,
     bench_recursion,
     bench_negation,
     bench_disjunction,

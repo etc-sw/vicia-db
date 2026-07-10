@@ -8,7 +8,7 @@ v1.1.x shipped several query and storage path changes that affect benchmark numb
 - **Backend mutex fix** (#279, v1.1.1): `CommittedFactLoaderImpl::resolve` was holding the backend mutex across `PageCache::get_or_load`, serialising concurrent readers even on cache hits. Fixed by deferring mutex acquisition to `read_page` (cache misses only).
 - **Per-resolve overhead fix** (#281, v1.1.1): #279 introduced `Arc::clone` per `resolve()` call. With 10k+ FactRefs per query iteration, this caused measurable single-threaded regressions (+22% on `point_attribute/10k`). Fixed by pre-building `MutexStorageBackend` once per `CommittedFactLoaderImpl` instance.
 
-Numbers updated below reflect the Bencher CI baseline (ubuntu-latest runner) where noted. Local re-measurement on the i7 machine will follow.
+Numbers updated below reflect the Bencher CI baseline (ubuntu-latest runner) where noted. The Query Latency and Time-Travel tables were fully re-measured 2026-07-11 on the A0 environment (see Environment), replacing the last v0.8.0-era 100K/1M rows.
 
 **Live benchmark history**: [https://bencher.dev/perf/minigraf/plots](https://bencher.dev/perf/minigraf/plots)
 
@@ -24,6 +24,21 @@ Benchmark results for Minigraf. Core query benchmarks were updated in v0.13.1 (P
 | Rust | 1.94.0 |
 | Profile | `release` (`opt-level = 3`, `lto = "thin"`, `panic = "abort"`) |
 | Swap | None |
+
+Sections marked "A0 environment" (Query Latency, Time-Travel, and the A0
+caller-shaped suites, all measured 2026-07-11) used a different machine:
+
+| Property | Value (A0 environment) |
+|---|---|
+| CPU | AMD Ryzen 7 7800X3D (8 cores / 16 threads) |
+| RAM | 32 GB |
+| OS | Linux 6.6 (WSL2) |
+| Rust | 1.96.0-nightly |
+| Browser | Chrome for Testing 150 (headless) |
+
+Cross-machine comparisons between the two environments are indicative only;
+within-table scale-to-scale shape is the evidence, not absolute deltas
+against older i7 rows.
 
 Benchmarks were run with [Criterion 0.8](https://bheisler.github.io/criterion.rs/book/). Each benchmark group is described below.
 
@@ -103,30 +118,44 @@ Retraction throughput matches batch insert throughput (~130–148 K facts/sec) a
 
 ## Query Latency
 
-Measures single-query latency against databases pre-loaded with 1K / 10K / 100K / 1M facts.
+Measures single-query latency against in-memory databases pre-loaded with
+1K / 10K / 100K / 1M facts. Full table re-measured 2026-07-11 on the A0
+environment (see Environment) with `MINIGRAF_BENCH_MODE=full`; criterion
+median of 10 samples. This supersedes the earlier mixed-origin table whose
+100K/1M cells were v0.8.0-era (pre-selective-lookup: `point_entity` 266 ms /
+4.33 s at 100K/1M).
 
 | Benchmark | 1K | 10K | 100K | 1M |
 |---|---|---|---|---|
-| `point_entity` (query by entity + attribute) | 1.26 ms | **8.6 ms** | 266 ms | 4.33 s |
-| `point_attribute` (query by attribute only) | 2.5 ms† | 24 ms† | 258 ms | 4.29 s |
-| `join_3pattern` (3-clause join) | 6.7 ms† | 75 ms† | 857 ms | 12.93 s |
+| `point_entity` (query by entity + attribute) | 3.8 µs | 3.8 µs | 3.9 µs | 4.1 µs |
+| `point_attribute` (query by attribute only) | 1.5 ms | 14.9 ms | 150 ms | 485 ms |
+| `join_3pattern` (3-clause join) | 4.1 ms | 48.8 ms | 259 ms | 920 ms |
 
-† Updated to v1.1.1 Bencher CI baseline (ubuntu-latest runner). Local i7 re-run pending.
-
-`point_entity` 1K/10K: local i7, last measured v0.13.1 (Phase 7.4 — snapshot fix, -61.5% vs pre-fix 22 ms). `point_attribute` and `join_3pattern` 1K/10K: Bencher CI baseline (v1.1.1, post-#208/#281). 100K and 1M: unchanged from v0.8.0, local i7.
-
-Query performance scales linearly with dataset size. The query executor resolves committed facts via the on-disk B+tree range scan and page cache, then filters in memory. Starting from Phase 7.4, the non-rules query path no longer rebuilds in-memory EAVT/AEVT/AVET/VAET indexes on each call — facts are passed as a pre-filtered `Arc<[Fact]>` slice. Starting from v1.1.0 (#208), patterns with a bound entity or attribute use selective B+tree index lookups (EAVT/AEVT/AVET) — O(k) where k = matching facts — instead of a full page scan. `point_attribute` at 10K is now slower than the v0.8.0 baseline because it calls `resolve()` once per FactRef (N = 10K calls) rather than streaming all pages sequentially; the selective path is faster for sparse queries but higher-overhead at full-attribute scans.
+`point_entity` is now flat across scales — O(k) where k = matching facts —
+because patterns with a bound entity or attribute use selective B+tree index
+lookups (EAVT/AEVT/AVET) since v1.1.0 (#208) instead of a full page scan.
+`point_attribute` and `join_3pattern` return result sets proportional to N,
+so they remain linear: the cost is result materialization, not the lookup.
+Starting from Phase 7.4, the non-rules query path no longer rebuilds
+in-memory EAVT/AEVT/AVET/VAET indexes on each call — facts are passed as a
+pre-filtered `Arc<[Fact]>` slice.
 
 ---
 
 ## Time-Travel Query Latency
 
+Re-measured 2026-07-11 (A0 environment, same run as Query Latency).
+Supersedes the v0.8.0-era table (`as_of_counter` 276 ms / 4.49 s at
+100K/1M).
+
 | Benchmark | 1K | 10K | 100K | 1M |
 |---|---|---|---|---|
-| `as_of_counter` (`:as-of` by tx counter) | 1.27 ms | 16.2 ms | 276 ms | 4.49 s |
-| `valid_at` (`:valid-at` timestamp) | 1.27 ms | 16.0 ms | 272 ms | 4.47 s |
+| `as_of_counter` (`:as-of` by tx counter) | 4.2 µs | 4.2 µs | 4.3 µs | 4.5 µs |
+| `valid_at` (`:valid-at` timestamp) | 4.5 µs | 4.6 µs | 4.7 µs | 4.8 µs |
 
-Time-travel queries have the same cost profile as plain queries — temporal filtering adds negligible overhead.
+Entity-bound time travel is flat across scales: the selective index path
+(v1.1.0 #208, Q1-B as-of pushdown) applies to temporal reads as well, and
+temporal filtering adds well under a microsecond over the plain point read.
 
 ---
 
@@ -437,6 +466,87 @@ fact-log/recompact ordering. Candidate fact pages and sorted EAVT/AEVT/AVET/VAET
 entry buffers still remain O(total facts). The reported max RSS is for the whole
 ignored test process, including 1M fixture setup; the table's wall time is
 measured only around `recompact_visible_delta()`.
+
+---
+
+## A0: Caller-Shaped Evidence Suites (2026-07-11)
+
+Evidence gate for the app-adoption line (`docs/APP_ADOPTION_GAP_PLAN.md`,
+slice A0). Three suites shaped after the vetch-app and harrekki caller
+requirement documents. All numbers: A0 environment (see Environment).
+
+### Vetch Cadence Replay
+
+`benches/vetch_cadence_benchmark.rs` — interleaved capture (new 4-fact card)
+→ edit (retract + assert geometry) → receipt batch (5 `:bench/ref` facts) →
+agent-brief reads (current + as-of point queries) → per-slice checkpoint, on
+a checkpointed base. Run: `cargo bench --bench vetch_cadence_benchmark`
+(full: 1M base, 100 slices) or `-- smoke` (10K base, 20 slices).
+
+| Op (per slice) | full 1M p50 | full 1M p95 | smoke 10K p50 | smoke 10K p95 |
+|---|---|---|---|---|
+| capture (transact, 4 facts) | 2.02 ms | 2.29 ms | 1.97 ms | 2.25 ms |
+| edit (retract + transact) | 1.89 ms | 2.15 ms | 1.89 ms | 2.04 ms |
+| receipt (transact, 5 refs) | 0.96 ms | 1.13 ms | 0.93 ms | 1.14 ms |
+| brief read, current | 0.055 ms | 0.065 ms | 0.045 ms | 0.095 ms |
+| brief read, as-of | 0.034 ms | 0.045 ms | 0.028 ms | 0.044 ms |
+| checkpoint | 3.43 ms | 5.25 ms | 2.01 ms | 2.96 ms |
+
+File growth over the 100 full-mode slices: 1,228,800 bytes (300 pages) on a
+407 MB base. Every op is independent of base size — the interactive Vetch
+cadence at 1M facts costs the same as at 10K, and per-slice checkpoint stays
+in the T7A delta-publish range (~5 ms p95).
+
+### Decay-Candidate Query Cost (harrekki)
+
+`decay/` groups in `benches/minigraf_bench.rs` — "entities untouched since
+T" (harrekki caller doc P1 #6): N entities with one `:touched/at` integer
+each, 20% below the threshold. Run: `MINIGRAF_BENCH_MODE=full cargo bench
+--bench minigraf_bench -- "decay/"`. Criterion median.
+
+| Shape | 1K | 10K | 100K | 1M |
+|---|---|---|---|---|
+| `comparison_scan` — `[?e :touched/at ?t] [(< ?t T)]` | 1.6 ms | 16.1 ms | 164 ms | 407 ms |
+| `not_join` — `(not-join [?e] [?e :touched/at ?t2] [(>= ?t2 T)])` | 12.0 ms | 864 ms | capped | capped |
+
+`comparison_scan` is a full attribute scan plus in-memory filter (no index
+pushdown for range predicates — gap G3): linear, 407 ms at 1M. Acceptable
+for idle-window decay sweeps; not for per-tick reads. This is the A3
+promotion evidence. `not_join` is superlinear (12 ms → 864 ms for 10×
+facts) and explicitly capped at 10K in the bench — extending to 100K/1M
+costs minutes-to-hours per iteration without adding decision information.
+Use the comparison shape for decay candidates; do not use negation.
+
+### Browser Open at Scale
+
+`examples/browser/bench.html` + `bench-driver.cjs` — measures
+`BrowserDb.open()` latency and JS-heap growth against imported fixtures.
+Browser open currently loads **all** IndexedDB pages into memory; these
+numbers quantify that shape (Vetch Gate E precondition).
+
+Runner: build the wasm pkg (`wasm-pack build --target web --out-dir
+minigraf-wasm -- --features browser`), generate fixtures (`cargo run
+--release --example generate_bench_fixture -- 1000000 <out.graph>`), serve
+the repo root (`python3 -m http.server 8123`), then
+`CHROME_PATH=<chrome> NODE_PATH=<dir with puppeteer> node
+examples/browser/bench-driver.cjs /target/bench-fixtures/bench-1m.graph 3`.
+The driver imports once, then measures open in a fresh browser per run
+(shared user-data-dir keeps IndexedDB; fresh renderer keeps the heap
+baseline clean). Chrome for Testing 150, headless,
+`--enable-precise-memory-info`.
+
+| Fixture | File size | import (fetch+IDB) | open | first query | JS heap growth on open |
+|---|---|---|---|---|---|
+| 100K facts | 40.1 MB | 1.0 s | 384–409 ms | 3.5 ms | +41.6 MB |
+| 1M facts | 407 MB | 10.5 s | 3.19–3.24 s | 3.2–4.1 ms | +420 MB |
+
+Open latency and heap growth are linear in file size — the browser holds
+the whole graph in renderer memory. A 1M-fact authority graph costs ~3.2 s
+startup and ~420 MB resident per tab: workable on desktop, but the numbers
+say browser-side scale beyond that needs the page-on-demand read path noted
+in the Vetch caller requirements, not a bigger tab budget. Heap figures are
+`performance.memory.usedJSHeapSize` deltas (renderer JS heap; wasm linear
+memory accounting may vary by Chrome version).
 
 ---
 
