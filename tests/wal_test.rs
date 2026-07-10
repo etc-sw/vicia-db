@@ -807,3 +807,72 @@ fn test_legacy_file_opens_and_upgrades_to_current_on_checkpoint() {
         "last_checkpointed_tx_count must be set after checkpoint on legacy upgrade"
     );
 }
+
+// ── 12. tx_counter restoration with a header-only WAL (found by A7 harness) ──
+
+/// A crash can leave a WAL sidecar containing only its 32-byte header — the
+/// writer was killed after lazily creating the file but before the first
+/// entry append was durable. Reopening must keep the tx counter at the
+/// committed watermark: a counter reset to the in-memory maximum (0) hands
+/// the next write an already-committed tx_count, and that write's WAL entry
+/// is then skipped by the `tx_count <= last_checkpointed` dedup rule on the
+/// following replay — a lost acknowledged transaction.
+#[test]
+fn test_header_only_wal_preserves_tx_counter_and_acked_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("headeronly.graph");
+    let wal_path = wal_path_for(&db_path);
+
+    // Session 1: three committed transactions, explicit checkpoint retires the WAL.
+    {
+        let db = Minigraf::open(&db_path).unwrap();
+        db.execute("(transact [[:a :n 1]])").unwrap();
+        db.execute("(transact [[:b :n 2]])").unwrap();
+        db.execute("(transact [[:c :n 3]])").unwrap();
+        db.checkpoint().unwrap();
+        std::mem::forget(db); // crash: skip Drop's close checkpoint
+    }
+    assert!(!wal_path.exists(), "checkpoint must retire the WAL");
+
+    // The crash window: a WAL file holding only the MWAL header, no entries.
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&wal_path).unwrap();
+        f.write_all(b"MWAL").unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&[0u8; 24]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    // Session 2: reopen; the counter must hold the committed watermark.
+    {
+        let db = Minigraf::open_with_options(
+            &db_path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.current_tx_count(),
+            3,
+            "tx counter must not reset below the committed watermark"
+        );
+        db.execute("(transact [[:d :n 4]])").unwrap();
+        assert_eq!(
+            db.current_tx_count(),
+            4,
+            "new write must extend, not reuse, tx_counts"
+        );
+        std::mem::forget(db); // crash again: the acked write lives only in the WAL
+    }
+
+    // Session 3: the acknowledged write must replay.
+    let db = Minigraf::open(&db_path).unwrap();
+    let n = count_results(db.execute("(query [:find ?v :where [:d :n ?v]])").unwrap());
+    assert_eq!(
+        n, 1,
+        "acknowledged write must survive replay after a header-only-WAL open"
+    );
+}

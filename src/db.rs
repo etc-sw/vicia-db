@@ -518,8 +518,18 @@ impl Minigraf {
             }
         }
 
-        // Re-synchronise tx_counter to the maximum tx_count across all facts
+        // Re-synchronise tx_counter to the maximum tx_count across the
+        // replayed facts. Committed facts live on disk, not in memory, so the
+        // in-memory maximum alone can under-count: a crash can leave a WAL
+        // with zero replayable entries (header-only file from a torn first
+        // append, or a checkpoint/delete race), and a counter lowered below
+        // the committed watermark would hand out already-committed tx_counts
+        // whose WAL entries the next replay then skips — losing acknowledged
+        // writes. Never go below `last_checkpointed`.
         fact_storage.restore_tx_counter()?;
+        if fact_storage.current_tx_count() < last_checkpointed {
+            fact_storage.restore_tx_counter_from(last_checkpointed);
+        }
 
         Ok(replayed)
     }
