@@ -748,6 +748,65 @@ until a maintenance story lands.
 
 ---
 
+## A5-4: Browser Atomic Compact Maintenance (2026-07-11)
+
+The A5 wall now has a browser-native maintenance path. At the existing delta
+soft/hard threshold, `BrowserDb.runIdleMaintenance()` builds a fresh contiguous
+graph from the full-history log, atomically replaces all IndexedDB page records,
+and swaps the live handle only after commit. Foreground `execute()` still never
+runs recompact.
+
+Runner: build the browser package, serve the repository, then run
+`bench-driver.cjs maintained-growth <cycles> <factsPerCycle> <sampleEvery>
+<maintenanceEvery> <fixture|empty>`. The recorded 100K run used Chrome for
+Testing 150, 4,100 ten-fact commits, and maintenance every 1,025 commits. The
+100K imported base was 9,778 pages / 38.2 MB. Each maintenance call observed
+exactly the soft-threshold `schedule_idle_maintenance` write advice.
+
+| Cycle | Logical facts | Pages before | Pages after | Reclaimed | Maintenance |
+|---:|---:|---:|---:|---:|---:|
+| 1,025 | 110,250 | 12,650 | 10,550 | 2,100 / 8.2 MB | 2,684.3 ms |
+| 2,050 | 120,500 | 13,433 | 11,326 | 2,107 / 8.2 MB | 3,055.3 ms |
+| 3,075 | 130,750 | 14,209 | 12,101 | 2,108 / 8.2 MB | 2,524.4 ms |
+| 4,100 | 141,000 | 14,984 | 12,876 | 2,108 / 8.2 MB | 4,176.5 ms |
+
+`idbCount == header.page_count` held before and after every replacement, and
+the post-maintenance image grew by about 775 pages per additional 10,250 facts:
+physical page records now track logical history rather than lineage-square
+manifest accumulation.
+
+Write latency also resets after each fold. Pre-maintenance 512-commit windows
+reached `33.9–43.1 ms` p95; the next post-maintenance windows returned to
+`18.8–21.3 ms` p95. An empty-base run independently reclaimed
+`8,063→1,549`, `4,428→2,322`, and `5,201→3,097` pages; its first maintenance
+probe at commit 1,024 correctly no-opped because the first write created the
+base and only 1,023 delta segments existed.
+
+Correctness/failure evidence is separate from timing: the 19-test browser WASM
+suite preserves Ref assertion/retraction history, valid-time reads, exact tx
+watermark, export/reopen, mutation exclusion, rejected-write rollback, poison
+containment, and atomic maintenance failure.
+
+`bench-driver.cjs worker-smoke` additionally ran the generated package in a
+real module `DedicatedWorker` under Chrome 150. With `typeof window ===
+"undefined"`, IndexedDB open, a published write (`tx_count = 1`), query, and a
+below-threshold maintenance no-op all succeeded. This is a repeatable worker
+deployment smoke; the 1M bounded-open/memory measurement remains separate.
+
+Gate verdict:
+
+- **Passed:** repeated browser page-record reclaim, write-latency reset,
+  threshold advice, full-history identity, and atomic failure ordering.
+- **Caller constraint:** maintenance is O(total history) synchronous WASM work
+  (`2.5–4.2 s` at 110K–141K facts) and atomic replacement temporarily needs old
+  plus candidate quota. Run it in the BrowserDb worker, never the UI thread.
+- **Still open for Gate E:** the current open path loads every IndexedDB page.
+  The prior 1M result (~3.2 s, ~420 MB per tab) remains the bounded-memory
+  blocker. Do not infer 1M browser authority readiness from the 100K maintenance
+  pass.
+
+---
+
 ## Concurrency (In-Memory)
 
 All threads operate concurrently. Throughput = aggregate ops/sec across all threads (v0.20.1).

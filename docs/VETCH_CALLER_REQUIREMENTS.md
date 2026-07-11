@@ -49,8 +49,8 @@ database roadmap alone:
 ## Current Vetch Use
 
 The default quiet-surface store uses `viciaBackedCanvasPersistence`, backed by
-`@minigraf/browser` 1.2.1. The adapter opens the IndexedDB database
-`vetch.quiet-surface.authority.v1` and writes Datalog facts for canvas command
+Vetch's local `@vicia-db/browser` build. The adapter opens the IndexedDB database
+`vetch.quiet-surface.authority.v2` and writes Datalog facts for canvas command
 events, cards, source references, edges, spaces, and manual groups.
 
 The integration has already proved useful primitives:
@@ -224,12 +224,13 @@ checkpoint in receipt/slice/import batches, and recompact only during idle,
 background, startup, shutdown, or explicit maintenance windows. Maintenance
 failure must not erase already durable writes.
 
-The browser binding needs an equivalent operational story. Today browser
-`execute()` is write-through to IndexedDB and exposes `checkpoint()`, but it
-does not expose the native maintenance outcome/advice contract. Before a large
-browser graph becomes authoritative, Vetch needs either semantic parity or a
-documented browser-specific policy proving bounded foreground latency, file
-growth, reopen, and recovery.
+The browser binding now exposes `runIdleMaintenance()`: it consumes the same
+delta threshold policy, builds a fresh full-history image, atomically replaces
+IndexedDB, and returns outcome/advice plus page counts. The 100K repeated-growth
+gate proves page-record reclaim and write-latency reset. This closes the
+maintenance-surface gap, not the full browser gate: maintenance is O(total
+history), must run in a dedicated BrowserDb worker, and the 1M open path still
+loads every IndexedDB page into memory.
 
 ### P1 — Efficient Product Reads
 

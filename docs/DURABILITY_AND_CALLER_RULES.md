@@ -2,7 +2,7 @@
 
 Per-backend durability semantics (gap G13) and the browser caller rules from
 slice A5 of `docs/APP_ADOPTION_GAP_PLAN.md`. This is the authority for what
-`execute` / `checkpoint` / `importGraph` guarantee **at the moment they
+`execute` / `checkpoint` / `importGraph` / `runIdleMaintenance` guarantee **at the moment they
 return**, per backend, and for the rules a browser caller must follow because
 of those semantics. The session-protocol view of the same facts (the
 `durability` field on result frames) is `docs/SESSION_PROTOCOL.md`
@@ -24,6 +24,7 @@ Backends covered:
 | --- | --- | --- |
 | `execute` (write) returns Ok | Facts are in the WAL (**fsynced**) and in memory. Survives kill -9 / power loss via replay. = `applied`. | All dirty pages committed in **one** IndexedDB readwrite transaction. Survives tab close and browser crash; **not** guaranteed against power loss / OS crash (see below). No WAL tier exists. |
 | `checkpoint()` returns Ok | Committed image durable (data synced before the header publish), WAL retired. = `published`. | Same flush as `execute`'s write-through; only needed after bulk operations. |
+| idle maintenance returns Ok | Pending writes are checkpointed first; threshold delta may be copy-on-write recompacted. | Threshold delta was either healthy (`noop`) or rebuilt as a fresh contiguous graph and atomically replaced in IndexedDB. |
 | Handle drop / tab close | Best-effort checkpoint on `Drop` (errors swallowed). Un-checkpointed WAL replays on next open. | Whatever the last committed IndexedDB transaction wrote. Nothing in flight survives partially (single tx). |
 | Crash mid-write | The in-flight entry has a bad CRC32 and is discarded on replay; every *acknowledged* write survives. | The in-flight IndexedDB transaction rolls back whole; reopen shows the previous consistent state. |
 
@@ -62,25 +63,39 @@ Backends covered:
   There is no browser equivalent of the native WAL fsync tier.
 - Mapping to the session-protocol classification: browser has **no
   `applied` tier** (no WAL) — a resolved `execute` is directly at
-  IndexedDB-committed, the browser's strongest available tier.
-  `maintenance_pending` is currently **unreachable**: the delta growth
-  thresholds are computed but nothing in the browser can act on them
-  (measured: `docs/BENCHMARKS.md` "A5: Browser IndexedDB Growth").
-- **Flush-failure rule (load-bearing)**: if a write `execute()` or
-  `checkpoint()` rejects on the IndexedDB flush, the in-memory handle is
-  *ahead* of durable state, and the unflushed pages have already left the
-  dirty set (`apply_write` drains `take_dirty()` before the await). A
-  *later successful* write on the same handle would commit a manifest that
-  references pages never durably written — torn durable state discovered
-  only at next open. **Discard the handle and reopen from IndexedDB after
-  any flush error.** Reads on the poisoned handle remain consistent
-  (memory is a superset); writes are what must stop.
+  IndexedDB-committed, the browser's strongest available tier. Successful
+  write JSON now includes `tx_id`, deterministic `tx_count`,
+  `durability = "published"`, `maintenance_pending`, and `advice`.
+
+| Browser write result | Meaning | Caller action |
+| --- | --- | --- |
+| `maintenance_pending = false`, `advice = "none"` | Delta growth is healthy. | Continue normal batching. |
+| `maintenance_pending = true`, `advice = "schedule_idle_maintenance"` | Soft threshold crossed. | Schedule `runIdleMaintenance()` in the next worker/idle window while retaining the Web Lock. |
+| `maintenance_pending = true`, `advice = "reduce_checkpoint_cadence"` | Hard threshold crossed. | Increase batch size/backoff and run maintenance before resuming the prior cadence. |
+| `durability = "noop"`, null `tx_id`/`tx_count` | A `forget` matched no open fact and consumed no transaction. | Treat as successful idempotent no-op; no maintenance action. |
+
+- **Flush-failure rule (load-bearing)**: a failed IndexedDB readwrite
+  transaction is followed by a reload of the previous durable page image.
+  If that reload succeeds, the rejected operation is absent from both live
+  queries and reopen, and the handle remains usable. If IndexedDB itself can
+  no longer be read (closed/broken connection), the handle becomes explicitly
+  poisoned: query, write, export, import, checkpoint, and maintenance reject
+  until the caller discards the handle and reopens. No later operation can
+  promote the uncertain in-memory image.
+- While a mutation is awaiting its IndexedDB outcome, that same handle rejects
+  queries and exports as well as other mutations. An unacknowledged write can
+  therefore never become an observable read or portable graph image before
+  the commit succeeds.
 - `importGraph` is atomic: the blob is validated and built into a
   replacement store first, the durable replacement commits as a single
   IndexedDB `clear`+`put` transaction, and only then does the live handle
   swap. On any failure (invalid blob, quota abort, IndexedDB error) both
   the queryable and durable state remain the old database. Locked by six
   wasm tests in `src/browser/`.
+- `runIdleMaintenance` follows the same durable-replace ordering as import:
+  build a fresh compact image from the complete fact log, commit one
+  IndexedDB `clear`+`put` transaction, then swap the live PFS. A rejected
+  replacement leaves the previous live and durable graph untouched.
 
 ## 2. Failure and corruption classification
 
@@ -97,10 +112,11 @@ errors are out of its scope — this table is the browser classification).
 | `execute` | Parse / execution error | both | Rejected — nothing applied, nothing flushed. |
 | `execute` | Fact exceeds `MAX_FACT_BYTES` (4080 B) | both | Rejected at serialization; store payloads externally, keep pointers (gap G4 policy). |
 | `execute` | WAL append fails (I/O) | native | Rejected — memory unchanged, database consistent. |
-| `execute` / `checkpoint` | IndexedDB flush fails (quota, I/O) | browser | Durable state = old; **handle poisoned for writes** — apply the flush-failure rule above. Quota aborts reject the promise (the transaction `onabort` hook) instead of hanging. |
+| `execute` / `checkpoint` | IndexedDB flush fails (quota, I/O) | browser | Durable state = old. Successful durable reload restores the live handle and rejects the operation; unreadable durable state poisons the whole handle until reopen. |
 | `checkpoint` | I/O failure | native | WAL retained, pending facts retained; safe to retry. Lock-poisoned errors indicate a panicked writer thread — treat the process as needing restart. |
 | `importGraph` | Empty blob / length not a `PAGE_SIZE` multiple / unparseable | browser | Rejected before any durable or live change. |
 | `importGraph` | IndexedDB replace fails | browser | The single replace transaction rolls back; memory and IndexedDB both still the old database. |
+| `runIdleMaintenance` | Compact build or IndexedDB replace fails | browser | Rejected; memory and IndexedDB both remain the previous graph. Retry in a later worker/idle window. |
 
 ## 3. Two value encodings — one canonical
 
@@ -151,22 +167,25 @@ Derived from the semantics above plus the A5 growth measurements
    Read-only tabs that never call `execute` with writes / `importGraph`
    can open without the lock, but see a snapshot loaded at open time.
 
-2. **Batch, then debounce.** Every write `execute()` appends a delta
-   segment and rewrites the manifest — cumulative IndexedDB growth is
-   quadratic in commit count and per-commit latency is linear in segment
-   count (~0.033 ms/segment; measured 2 ms → 137 ms p50 over 4,500
-   ten-fact commits, 123.6 MB of IndexedDB for ~1.8 MB of logical data).
-   Therefore: put multi-statement work in **one** `execute` (one
+2. **Batch, then debounce.** Between maintenance windows every write
+   `execute()` appends a delta segment and rewrites the manifest, so
+   per-commit latency rises with segment count. Therefore: put
+   multi-statement work in **one** `execute` (one
    `tx_count`, one segment, one IndexedDB transaction), and debounce
    high-frequency sources app-side — commit on gesture end, never per
-   frame (the gap-plan caller policy table).
+   frame. Successful write results expose `maintenance_pending` and `advice`;
+   use those fields instead of guessing from commit count.
 
-3. **Treat browser Vicia as read-mostly until a maintenance surface
-   lands.** There is currently **no reclaim path in the browser**: the
-   growth thresholds fire into a void, and `exportGraph` → `importGraph`
-   is a size identity, not a compaction (measured). Bulk data should enter
-   via `importGraph` of a natively maintained `.graph` file; live browser
-   writes should be bounded in count. Reopen cost tracks IndexedDB size,
-   not logical size — an unbounded write cadence degrades startup without
-   limit. This is the measured wall behind the A5 decision to defer
-   browser facade expansion.
+3. **Schedule browser maintenance in a worker.** Call
+   `runIdleMaintenance()` at startup/import/slice/idle boundaries while the
+   caller-owned Web Lock is held. It no-ops below threshold and atomically
+   reclaims superseded page records after soft/hard pressure. The rebuild is
+   O(total history), synchronous WASM work; run the writing BrowserDb inside
+   a dedicated worker so maintenance cannot block the main UI. The 100K
+   maintained-growth gate proves repeated reclaim and latency reset. The
+   binding now discovers IndexedDB through `globalThis`; the repeatable
+   `bench-driver.cjs worker-smoke` gate passes open/write/query/maintenance in
+   a real module DedicatedWorker. The
+   existing 1M full-load open shape (~420 MB per tab) remains a separate Gate
+   E blocker; do not claim browser authority readiness until the bounded-open
+   work is complete.

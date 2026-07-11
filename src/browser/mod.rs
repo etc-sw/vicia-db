@@ -8,6 +8,7 @@
 pub mod buffer;
 /// Async IndexedDB backend for browser WASM persistence.
 pub mod indexeddb;
+mod maintenance;
 
 use crate::browser::buffer::BrowserBufferBackend;
 use crate::browser::indexeddb::IndexedDbBackend;
@@ -17,6 +18,7 @@ use crate::query::datalog::functions::FunctionRegistry;
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
 use crate::query::datalog::types::DatalogCommand;
+use crate::storage::delta_growth::DeltaMaintenanceDecision;
 use crate::storage::persistent_facts::PersistentFactStorage;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -31,6 +33,22 @@ struct BrowserDbInner {
     pfs: PersistentFactStorage<BrowserBufferBackend>,
     /// `None` for in-memory databases (no IDB backing).
     idb: Option<IndexedDbBackend>,
+    /// Serialises async durability mutations on one handle. Vetch also owns a
+    /// cross-tab Web Lock; this guard closes same-handle overlap across await.
+    mutation_in_flight: bool,
+    /// Set when a write changed the live page image but its IndexedDB commit
+    /// failed. Queries and later writes must not expose or promote that image;
+    /// the only safe recovery is to discard the handle and reopen.
+    durability_poisoned: bool,
+    /// Set only when a failed IndexedDB page commit was followed by a
+    /// successful reload of the previous durable page image. The rejected
+    /// operation is then absent from both memory and IndexedDB, so the handle
+    /// remains usable after the Promise rejection.
+    mutation_failure_rolled_back: bool,
+    /// Becomes true only after the live transaction counter/fact/PFS state has
+    /// started advancing. A semantic error before this boundary is a normal
+    /// rejection, not a durability poison event.
+    mutation_advanced: bool,
 }
 
 /// Browser-only Minigraf database handle backed by IndexedDB.
@@ -62,6 +80,10 @@ impl BrowserDb {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 pfs,
                 idb: None,
+                mutation_in_flight: false,
+                durability_poisoned: false,
+                mutation_failure_rolled_back: false,
+                mutation_advanced: false,
             })),
         })
     }
@@ -87,6 +109,10 @@ impl BrowserDb {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 pfs,
                 idb: Some(idb),
+                mutation_in_flight: false,
+                durability_poisoned: false,
+                mutation_failure_rolled_back: false,
+                mutation_advanced: false,
             })),
         })
     }
@@ -95,12 +121,20 @@ impl BrowserDb {
     ///
     /// Returns a `Promise<string>` in JavaScript. The JSON shape is:
     /// - Query: `{"variables": [...], "results": [[...], ...]}`
-    /// - Transact: `{"transacted": <tx_id>}`
-    /// - Retract: `{"retracted": <tx_id>}`
-    /// - Forget: `{"forgotten": <count>, "tx_id": <tx_id or null>}`
+    /// - Transact: `{"transacted": <tx_id>, "tx_id": <tx_id>, "tx_count": <n>, ...}`
+    /// - Retract: `{"retracted": <tx_id>, "tx_id": <tx_id>, "tx_count": <n>, ...}`
+    /// - Forget: `{"forgotten": <count>, "tx_id": <tx_id or null>, ...}`
     /// - Rule: `{"ok": true}`
+    ///
+    /// Successful mutations also report `durability` (`"published"` for
+    /// IndexedDB and `"memory"` for in-memory handles),
+    /// `maintenance_pending`, and `advice`. Advice is one of `"none"`,
+    /// `"schedule_idle_maintenance"`, or `"reduce_checkpoint_cadence"`.
+    /// A no-match forget reports `durability: "noop"`, `advice: "none"`,
+    /// and null transaction fields.
     #[wasm_bindgen(js_name = execute)]
     pub async fn execute(&self, datalog: String) -> Result<String, JsValue> {
+        self.ensure_usable()?;
         let cmd = parse_datalog_command(&datalog).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // Peek at the discriminant before consuming `cmd`.
@@ -124,14 +158,25 @@ impl BrowserDb {
             DatalogCommand::Transact(tx) => {
                 let facts = crate::db::Minigraf::materialize_transaction(&tx)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                self.apply_write(facts, false).await
+                self.begin_mutation()?;
+                let result = self.apply_write(facts, false).await;
+                self.finish_mutation(result.is_err());
+                result
             }
             DatalogCommand::Retract(tx) => {
                 let facts = crate::db::Minigraf::materialize_retraction(&tx)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                self.apply_write(facts, true).await
+                self.begin_mutation()?;
+                let result = self.apply_write(facts, true).await;
+                self.finish_mutation(result.is_err());
+                result
             }
-            DatalogCommand::Forget(spec) => self.execute_forget(spec).await,
+            DatalogCommand::Forget(spec) => {
+                self.begin_mutation()?;
+                let result = self.execute_forget(spec).await;
+                self.finish_mutation(result.is_err());
+                result
+            }
             // Handled above; unreachable but required for exhaustiveness.
             DatalogCommand::Query(_) | DatalogCommand::Rule(_) => unreachable!(),
         }
@@ -170,10 +215,19 @@ impl BrowserDb {
 
             // Nothing matched: no tx_count consumed, nothing to flush.
             if facts.is_empty() {
-                return Ok(r#"{"forgotten":0,"tx_id":null}"#.to_string());
+                return Ok(serde_json::json!({
+                    "forgotten": 0,
+                    "tx_id": serde_json::Value::Null,
+                    "tx_count": serde_json::Value::Null,
+                    "durability": "noop",
+                    "maintenance_pending": false,
+                    "advice": "none",
+                })
+                .to_string());
             }
 
             let tx_count = inner.fact_storage.allocate_tx_count();
+            inner.mutation_advanced = true;
             let tx_id = now;
 
             for mut fact in facts {
@@ -191,17 +245,26 @@ impl BrowserDb {
                 .save()
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            let dirty_ids = inner.pfs.with_backend_mut(|b| b.take_dirty());
-            let dirty_pages: Vec<(u64, Vec<u8>)> = dirty_ids
-                .into_iter()
-                .filter_map(|id| {
-                    inner
-                        .pfs
-                        .with_backend(|b| b.read_page_raw(id).ok().map(|d| (id, d)))
-                })
-                .collect();
+            let dirty_pages = take_dirty_pages(&mut inner.pfs)?;
 
-            let json = format!(r#"{{"forgotten":{},"tx_id":{}}}"#, count, tx_id);
+            let decision = inner.pfs.delta_maintenance_decision();
+            let durability = if inner.idb.is_some() {
+                "published"
+            } else {
+                "memory"
+            };
+            let json = serde_json::json!({
+                "forgotten": count,
+                "tx_id": tx_id,
+                "tx_count": tx_count,
+                "durability": durability,
+                "maintenance_pending": !matches!(
+                    decision,
+                    DeltaMaintenanceDecision::ContinueDeltaAppend
+                ),
+                "advice": browser_write_advice(decision),
+            })
+            .to_string();
 
             (dirty_pages, json)
         };
@@ -209,10 +272,14 @@ impl BrowserDb {
 
         // ── Async section: flush to IDB (no RefCell borrow held) ─────────────
         if !dirty_pages.is_empty() {
-            let has_idb = self.inner.borrow().idb.is_some();
-            if has_idb {
-                let idb = self.inner.borrow().idb.as_ref().unwrap().clone_handle();
-                idb.write_pages(dirty_pages).await?;
+            let idb = self
+                .inner
+                .borrow()
+                .idb
+                .as_ref()
+                .map(IndexedDbBackend::clone_handle);
+            if let Some(idb) = idb {
+                self.flush_dirty_pages_or_restore(idb, dirty_pages).await?;
             }
         }
 
@@ -226,29 +293,51 @@ impl BrowserDb {
     /// `checkpoint()` is only needed after explicit bulk ops.
     /// No-op for in-memory databases.
     pub async fn checkpoint(&self) -> Result<(), JsValue> {
+        self.begin_mutation()?;
+        let result = self.checkpoint_inner().await;
+        self.finish_mutation(result.is_err());
+        result
+    }
+
+    async fn checkpoint_inner(&self) -> Result<(), JsValue> {
         let (dirty_pages, has_idb) = {
             let mut inner = self.inner.borrow_mut();
+            inner.mutation_advanced = true;
             inner
                 .pfs
                 .save()
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
-            let dirty_ids = inner.pfs.with_backend_mut(|b| b.take_dirty());
-            let pages: Vec<(u64, Vec<u8>)> = dirty_ids
-                .into_iter()
-                .filter_map(|id| {
-                    inner
-                        .pfs
-                        .with_backend(|b| b.read_page_raw(id).ok().map(|d| (id, d)))
-                })
-                .collect();
+            let pages = take_dirty_pages(&mut inner.pfs)?;
             (pages, inner.idb.is_some())
         };
 
         if has_idb && !dirty_pages.is_empty() {
             let idb = self.inner.borrow().idb.as_ref().unwrap().clone_handle();
-            idb.write_pages(dirty_pages).await?;
+            self.flush_dirty_pages_or_restore(idb, dirty_pages).await?;
         }
         Ok(())
+    }
+
+    /// Reclaim superseded browser pages during a caller-scheduled idle window.
+    ///
+    /// When the existing delta-growth policy crosses its soft or hard
+    /// threshold, this builds a fresh contiguous `.graph` image from the full
+    /// append-only fact log, atomically replaces the IndexedDB page set, and
+    /// only then swaps the live handle. It never runs from foreground
+    /// `execute()` or `checkpoint()`.
+    ///
+    /// The returned JSON uses the native maintenance vocabulary:
+    /// `checkpoint`, `delta`, and `advice`, plus before/after page counts.
+    /// In-memory databases and healthy delta lineages return a no-op.
+    #[wasm_bindgen(js_name = runIdleMaintenance)]
+    pub async fn run_idle_maintenance(&self) -> Result<String, JsValue> {
+        self.begin_mutation()?;
+        let result = maintenance::run_idle_maintenance(self, false).await;
+        // The replacement transaction is atomic and the live swap happens
+        // after it commits. A rejected maintenance attempt leaves the old
+        // memory and old IndexedDB image aligned, so it does not poison.
+        self.finish_mutation(false);
+        result
     }
 
     /// Serialise the current database to a portable `.graph` blob.
@@ -260,6 +349,7 @@ impl BrowserDb {
     /// no WAL entries are missing from the main file.
     #[wasm_bindgen(js_name = exportGraph)]
     pub fn export_graph(&self) -> Result<js_sys::Uint8Array, JsValue> {
+        self.ensure_usable()?;
         let inner = self.inner.borrow();
         let page_count = inner
             .pfs
@@ -286,10 +376,23 @@ impl BrowserDb {
     /// On any error (invalid blob, IndexedDB failure) neither the queryable
     /// state nor the durable state is modified.
     ///
-    /// Calling `execute()` while an import is in flight is undefined behaviour;
-    /// single-writer discipline is caller policy.
+    /// Every operation through this handle is rejected while import is in
+    /// flight, so no query or export can observe an unacknowledged state.
+    /// Cross-handle and cross-tab exclusion remains caller policy; Vetch
+    /// should hold its per-database Web Lock for the writing handle's full
+    /// lifetime so a stale second handle cannot publish after replacement.
     #[wasm_bindgen(js_name = importGraph)]
     pub async fn import_graph(&self, data: js_sys::Uint8Array) -> Result<(), JsValue> {
+        self.begin_mutation()?;
+        let result = self.import_graph_inner(data).await;
+        // Import builds and durably replaces before swapping live state, so a
+        // rejected import leaves both sides aligned and does not poison the
+        // handle.
+        self.finish_mutation(false);
+        result
+    }
+
+    async fn import_graph_inner(&self, data: js_sys::Uint8Array) -> Result<(), JsValue> {
         let bytes = data.to_vec();
         if bytes.is_empty() {
             return Err(JsValue::from_str(
@@ -343,6 +446,87 @@ impl BrowserDb {
 }
 
 impl BrowserDb {
+    fn ensure_usable(&self) -> Result<(), JsValue> {
+        let inner = self.inner.borrow();
+        if inner.durability_poisoned {
+            return Err(JsValue::from_str(
+                "BrowserDb durability state is uncertain after a failed write; discard this handle and reopen",
+            ));
+        }
+        if inner.mutation_in_flight {
+            return Err(JsValue::from_str(
+                "BrowserDb mutation is awaiting durability; await it before querying or exporting from this handle",
+            ));
+        }
+        Ok(())
+    }
+
+    fn begin_mutation(&self) -> Result<(), JsValue> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.durability_poisoned {
+            return Err(JsValue::from_str(
+                "BrowserDb durability state is uncertain after a failed write; discard this handle and reopen",
+            ));
+        }
+        if inner.mutation_in_flight {
+            return Err(JsValue::from_str(
+                "BrowserDb mutation already in progress; await it before starting another write, checkpoint, import, or maintenance call",
+            ));
+        }
+        inner.mutation_in_flight = true;
+        inner.mutation_failure_rolled_back = false;
+        inner.mutation_advanced = false;
+        Ok(())
+    }
+
+    fn finish_mutation(&self, failed: bool) {
+        let mut inner = self.inner.borrow_mut();
+        inner.mutation_in_flight = false;
+        inner.durability_poisoned |=
+            failed && inner.mutation_advanced && !inner.mutation_failure_rolled_back;
+        inner.mutation_failure_rolled_back = false;
+        inner.mutation_advanced = false;
+    }
+
+    async fn flush_dirty_pages_or_restore(
+        &self,
+        idb: IndexedDbBackend,
+        pages: Vec<(u64, Vec<u8>)>,
+    ) -> Result<(), JsValue> {
+        let write_error = match idb.write_pages(pages).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+
+        // IndexedDB readwrite transactions are atomic. If the failed commit
+        // can still be read, reconstruct the live PFS from that previous
+        // durable image before rejecting the operation. This makes quota and
+        // transaction-abort failures rejected-before-application from the
+        // caller's next observable state.
+        let durable_pages = idb.load_all_pages().await.map_err(|recovery_error| {
+            JsValue::from_str(&format!(
+                "IndexedDB write failed and durable-state reload also failed: write={}; reload={}",
+                js_value_message(&write_error),
+                js_value_message(&recovery_error),
+            ))
+        })?;
+        let buffer = BrowserBufferBackend::load_pages(durable_pages);
+        let restored = PersistentFactStorage::new(buffer, 256).map_err(|recovery_error| {
+            JsValue::from_str(&format!(
+                "IndexedDB write failed and previous durable graph could not be reopened: write={}; reopen={recovery_error}",
+                js_value_message(&write_error),
+            ))
+        })?;
+        let restored_storage = restored.storage().clone();
+
+        let mut inner = self.inner.borrow_mut();
+        inner.pfs = restored;
+        inner.fact_storage = restored_storage;
+        inner.mutation_failure_rolled_back = true;
+        drop(inner);
+        Err(write_error)
+    }
+
     /// Apply a batch of pre-materialized facts to the in-memory store and
     /// flush dirty pages to IndexedDB (if present).
     ///
@@ -360,6 +544,7 @@ impl BrowserDb {
         let (dirty_pages, result_json) = {
             let mut inner = self.inner.borrow_mut();
 
+            inner.mutation_advanced = true;
             let tx_count = inner.fact_storage.allocate_tx_count();
             let tx_id = tx_id_now();
 
@@ -389,32 +574,45 @@ impl BrowserDb {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
             // Collect dirty pages as owned Vec<(u64, Vec<u8>)> — no borrows escape
-            let dirty_ids = inner.pfs.with_backend_mut(|b| b.take_dirty());
-            let dirty_pages: Vec<(u64, Vec<u8>)> = dirty_ids
-                .into_iter()
-                .filter_map(|id| {
-                    inner
-                        .pfs
-                        .with_backend(|b| b.read_page_raw(id).ok().map(|d| (id, d)))
-                })
-                .collect();
+            let dirty_pages = take_dirty_pages(&mut inner.pfs)?;
 
-            let json = if is_retract {
-                format!(r#"{{"retracted":{}}}"#, tx_id)
+            let decision = inner.pfs.delta_maintenance_decision();
+            let durability = if inner.idb.is_some() {
+                "published"
             } else {
-                format!(r#"{{"transacted":{}}}"#, tx_id)
+                "memory"
             };
+            let mut json = serde_json::json!({
+                "tx_id": tx_id,
+                "tx_count": tx_count,
+                "durability": durability,
+                "maintenance_pending": !matches!(
+                    decision,
+                    DeltaMaintenanceDecision::ContinueDeltaAppend
+                ),
+                "advice": browser_write_advice(decision),
+            });
+            let result_key = if is_retract {
+                "retracted"
+            } else {
+                "transacted"
+            };
+            json[result_key] = serde_json::json!(tx_id);
 
-            (dirty_pages, json)
+            (dirty_pages, json.to_string())
         };
         // ── Borrow dropped here ───────────────────────────────────────────────
 
         // ── Async section: flush to IDB (no RefCell borrow held) ─────────────
         if !dirty_pages.is_empty() {
-            let has_idb = self.inner.borrow().idb.is_some();
-            if has_idb {
-                let idb = self.inner.borrow().idb.as_ref().unwrap().clone_handle();
-                idb.write_pages(dirty_pages).await?;
+            let idb = self
+                .inner
+                .borrow()
+                .idb
+                .as_ref()
+                .map(IndexedDbBackend::clone_handle);
+            if let Some(idb) = idb {
+                self.flush_dirty_pages_or_restore(idb, dirty_pages).await?;
             }
         }
 
@@ -423,6 +621,36 @@ impl BrowserDb {
 }
 
 // ── JSON serialisation helpers (free functions, not exported to WASM) ────────
+
+fn browser_write_advice(decision: DeltaMaintenanceDecision) -> &'static str {
+    match decision {
+        DeltaMaintenanceDecision::ContinueDeltaAppend => "none",
+        DeltaMaintenanceDecision::ScheduleBackgroundRecompact => "schedule_idle_maintenance",
+        DeltaMaintenanceDecision::MaintenanceBackpressure => "reduce_checkpoint_cadence",
+    }
+}
+
+fn take_dirty_pages(
+    pfs: &mut PersistentFactStorage<BrowserBufferBackend>,
+) -> Result<Vec<(u64, Vec<u8>)>, JsValue> {
+    let dirty_ids = pfs.with_backend_mut(|backend| backend.take_dirty());
+    dirty_ids
+        .into_iter()
+        .map(|id| {
+            pfs.with_backend(|backend| backend.read_page_raw(id))
+                .map(|data| (id, data))
+                .map_err(|error| {
+                    JsValue::from_str(&format!("failed to read dirty browser page {id}: {error}"))
+                })
+        })
+        .collect()
+}
+
+fn js_value_message(value: &JsValue) -> String {
+    value
+        .as_string()
+        .unwrap_or_else(|| "non-string JavaScript error".to_string())
+}
 
 fn query_result_to_json(result: QueryResult) -> String {
     use serde_json::{Value as JVal, json};
@@ -820,6 +1048,341 @@ mod tests {
             blob_pages * crate::storage::PAGE_SIZE,
             "export after reopen must not include stale pages"
         );
+    }
+
+    #[wasm_bindgen_test]
+    async fn idle_maintenance_reclaims_pages_and_preserves_temporal_ref_history() {
+        let db_name = format!("minigraf-test-maintenance-{}", js_sys::Date::now());
+        let source = "00000000-0000-0000-0000-0000000000a1";
+        let target = "00000000-0000-0000-0000-0000000000b2";
+        let db = BrowserDb::open(&db_name).await.expect("open");
+
+        db.execute(format!(
+            "(transact {{:valid-from \"2026-01-01\"}} [[#uuid \"{source}\" :edge/to #uuid \"{target}\"] [#uuid \"{target}\" :name \"target\"]])"
+        ))
+        .await
+        .expect("base transact");
+        for index in 0..12 {
+            db.execute(format!("(transact [[:event/{index} :seq {index}]])"))
+                .await
+                .expect("delta transact");
+        }
+        db.execute(format!(
+            "(forget {{:valid-to \"2026-06-01\"}} [[#uuid \"{source}\" :edge/to #uuid \"{target}\"]])"
+        ))
+        .await
+        .expect("forget edge");
+
+        let idb = IndexedDbBackend::open(&db_name).await.expect("idb handle");
+        let before_pages = idb.load_all_pages().await.expect("pages before").len();
+        let before_tx = db.inner.borrow().fact_storage.current_tx_count();
+
+        db.begin_mutation().expect("maintenance guard");
+        let result = maintenance::run_idle_maintenance(&db, true).await;
+        db.finish_mutation(false);
+        let result = result.expect("forced maintenance");
+        let outcome: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(outcome["delta"], "recompacted");
+        let after_pages = idb.load_all_pages().await.expect("pages after").len();
+        assert!(
+            after_pages < before_pages,
+            "compact replacement must remove superseded lineage pages"
+        );
+        assert_eq!(outcome["after_pages"].as_u64().unwrap(), after_pages as u64);
+        assert_eq!(db.inner.borrow().fact_storage.current_tx_count(), before_tx);
+        let export = db.export_graph().expect("export compact graph");
+        assert_eq!(
+            export.byte_length() as usize,
+            after_pages * crate::storage::PAGE_SIZE,
+            "export and IndexedDB must contain the same contiguous page image"
+        );
+
+        let current = db
+            .execute(format!(
+                "(query [:find ?to :where [#uuid \"{source}\" :edge/to ?to]])"
+            ))
+            .await
+            .expect("current ref query");
+        let current: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert_eq!(current["results"].as_array().unwrap().len(), 0);
+        let history = db
+            .execute(format!(
+                "(query [:find ?to :valid-at \"2026-03-01\" :where [#uuid \"{source}\" :edge/to ?to]])"
+            ))
+            .await
+            .expect("historical ref query");
+        let history: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert_eq!(history["results"].as_array().unwrap().len(), 1);
+
+        let second = db.run_idle_maintenance().await.expect("second maintenance");
+        let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(second["delta"], "noop");
+        drop(db);
+
+        let reopened = BrowserDb::open(&db_name).await.expect("reopen");
+        assert_eq!(
+            reopened.inner.borrow().fact_storage.current_tx_count(),
+            before_tx
+        );
+        let reopened_history = reopened
+            .execute(format!(
+                "(query [:find ?to :valid-at \"2026-03-01\" :where [#uuid \"{source}\" :edge/to ?to]])"
+            ))
+            .await
+            .expect("history after reopen");
+        let reopened_history: serde_json::Value = serde_json::from_str(&reopened_history).unwrap();
+        assert_eq!(reopened_history["results"].as_array().unwrap().len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn failed_idle_maintenance_preserves_live_and_durable_state() {
+        let db_name = format!("minigraf-test-maintenance-fail-{}", js_sys::Date::now());
+        let db = BrowserDb::open(&db_name).await.expect("open");
+        db.execute(r#"(transact [[:stable :marker "old"]])"#.to_string())
+            .await
+            .expect("base transact");
+        db.execute(r#"(transact [[:stable :seq 2]])"#.to_string())
+            .await
+            .expect("delta transact");
+
+        db.inner
+            .borrow()
+            .idb
+            .as_ref()
+            .unwrap()
+            .fail_next_replace_for_test();
+        db.begin_mutation().expect("maintenance guard");
+        let result = maintenance::run_idle_maintenance(&db, true).await;
+        db.finish_mutation(false);
+        assert!(
+            result.is_err(),
+            "an enqueue failure after clear and one put must abort maintenance"
+        );
+
+        let live = db
+            .execute(r#"(query [:find ?m :where [:stable :marker ?m]])"#.to_string())
+            .await
+            .expect("live old state");
+        let live: serde_json::Value = serde_json::from_str(&live).unwrap();
+        assert_eq!(live["results"].as_array().unwrap().len(), 1);
+        drop(db);
+
+        let reopened = BrowserDb::open(&db_name).await.expect("reopen old state");
+        let durable = reopened
+            .execute(r#"(query [:find ?m :where [:stable :marker ?m]])"#.to_string())
+            .await
+            .expect("durable old state");
+        let durable: serde_json::Value = serde_json::from_str(&durable).unwrap();
+        assert_eq!(durable["results"].as_array().unwrap().len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_mutation_guard_and_poison_state_are_enforced() {
+        let db = BrowserDb::open_in_memory().expect("open");
+        db.begin_mutation().expect("first mutation guard");
+        let overlap = db
+            .execute(r#"(transact [[:overlap :v 1]])"#.to_string())
+            .await;
+        assert!(overlap.is_err(), "overlapping mutation must be rejected");
+        assert!(
+            db.execute(r#"(query [:find ?v :where [:overlap :v ?v]])"#.to_string())
+                .await
+                .is_err(),
+            "queries must not observe a mutation awaiting durability"
+        );
+        assert!(
+            db.export_graph().is_err(),
+            "exports must not promote a mutation awaiting durability"
+        );
+        db.finish_mutation(false);
+
+        db.execute(r#"(transact [[:person :name "Alice"]])"#.to_string())
+            .await
+            .expect("seed semantic-error query");
+        let semantic_error = db
+            .execute(
+                r#"(forget [:find ?name ?a ?v :where [?e :name ?name] [?e ?a ?v]])"#.to_string(),
+            )
+            .await;
+        assert!(
+            semantic_error.is_err(),
+            "invalid forget result shape must be rejected"
+        );
+        assert!(
+            db.execute(r#"(query [:find ?v :where [:overlap :v ?v]])"#.to_string())
+                .await
+                .is_ok(),
+            "pre-write semantic failures must not poison the handle"
+        );
+        assert!(
+            db.export_graph().is_ok(),
+            "pre-write semantic failures must not block export"
+        );
+
+        db.begin_mutation().expect("poisoning mutation guard");
+        db.inner.borrow_mut().mutation_advanced = true;
+        db.finish_mutation(true);
+        assert!(
+            db.execute(r#"(query [:find ?v :where [:overlap :v ?v]])"#.to_string())
+                .await
+                .is_err(),
+            "poisoned handles must reject queries"
+        );
+        assert!(
+            db.run_idle_maintenance().await.is_err(),
+            "poisoned handles must reject maintenance"
+        );
+        assert!(
+            db.export_graph().is_err(),
+            "poisoned handles must reject export"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn failed_incremental_write_poisoning_prevents_torn_state_promotion() {
+        let db_name = format!("minigraf-test-write-poison-{}", js_sys::Date::now());
+        let db = BrowserDb::open(&db_name).await.expect("open");
+        db.execute(r#"(transact [[:stable :marker "durable"]])"#.to_string())
+            .await
+            .expect("durable base");
+
+        db.inner.borrow().idb.as_ref().unwrap().db.close();
+        let failed = db
+            .execute(r#"(transact [[:uncertain :marker "must-not-promote"]])"#.to_string())
+            .await;
+        assert!(failed.is_err(), "closed IDB must reject the write");
+        assert!(
+            db.execute(r#"(query [:find ?m :where [:stable :marker ?m]])"#.to_string())
+                .await
+                .is_err(),
+            "the advanced in-memory image must not remain queryable"
+        );
+        assert!(db.run_idle_maintenance().await.is_err());
+        assert!(db.export_graph().is_err());
+        drop(db);
+
+        let reopened = BrowserDb::open(&db_name)
+            .await
+            .expect("reopen durable image");
+        let stable = reopened
+            .execute(r#"(query [:find ?m :where [:stable :marker ?m]])"#.to_string())
+            .await
+            .expect("stable query");
+        let stable: serde_json::Value = serde_json::from_str(&stable).unwrap();
+        assert_eq!(stable["results"].as_array().unwrap().len(), 1);
+        let uncertain = reopened
+            .execute(r#"(query [:find ?m :where [:uncertain :marker ?m]])"#.to_string())
+            .await
+            .expect("uncertain query");
+        let uncertain: serde_json::Value = serde_json::from_str(&uncertain).unwrap();
+        assert_eq!(
+            uncertain["results"].as_array().unwrap().len(),
+            0,
+            "a rejected write must be absent after reopen"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn aborted_incremental_write_restores_previous_live_state() {
+        let db_name = format!("minigraf-test-write-rollback-{}", js_sys::Date::now());
+        let db = BrowserDb::open(&db_name).await.expect("open");
+        db.execute(r#"(transact [[:stable :marker "durable"]])"#.to_string())
+            .await
+            .expect("durable base");
+        db.inner
+            .borrow()
+            .idb
+            .as_ref()
+            .unwrap()
+            .fail_next_write_for_test();
+
+        let failed = db
+            .execute(r#"(transact [[:rejected :marker "absent"]])"#.to_string())
+            .await;
+        assert!(failed.is_err(), "injected IDB abort must reject the write");
+
+        let stable = db
+            .execute(r#"(query [:find ?m :where [:stable :marker ?m]])"#.to_string())
+            .await
+            .expect("restored stable query");
+        let stable: serde_json::Value = serde_json::from_str(&stable).unwrap();
+        assert_eq!(stable["results"].as_array().unwrap().len(), 1);
+        let rejected = db
+            .execute(r#"(query [:find ?m :where [:rejected :marker ?m]])"#.to_string())
+            .await
+            .expect("restored rejected query");
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(
+            rejected["results"].as_array().unwrap().len(),
+            0,
+            "rejected write must be absent from restored live state"
+        );
+
+        db.execute(r#"(transact [[:after :marker "works"]])"#.to_string())
+            .await
+            .expect("write after rollback");
+        drop(db);
+        let reopened = BrowserDb::open(&db_name).await.expect("reopen");
+        let after = reopened
+            .execute(r#"(query [:find ?m :where [:after :marker ?m]])"#.to_string())
+            .await
+            .expect("after query");
+        let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(after["results"].as_array().unwrap().len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_write_results_report_order_and_durability() {
+        let db_name = format!("minigraf-test-write-result-{}", js_sys::Date::now());
+        let db = BrowserDb::open(&db_name).await.expect("open");
+        let first = db
+            .execute(r#"(transact [[:ordered :value 1]])"#.to_string())
+            .await
+            .expect("first write");
+        let second = db
+            .execute(r#"(transact [[:ordered :value 2]])"#.to_string())
+            .await
+            .expect("second write");
+        let retracted = db
+            .execute(r#"(retract [[:ordered :value 1]])"#.to_string())
+            .await
+            .expect("retract");
+        let forgotten = db
+            .execute(r#"(forget [[:ordered :value 2]])"#.to_string())
+            .await
+            .expect("matched forget");
+        let noop = db
+            .execute(r#"(forget [[:missing :value 9]])"#.to_string())
+            .await
+            .expect("no-match forget");
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+        let retracted: serde_json::Value = serde_json::from_str(&retracted).unwrap();
+        let forgotten: serde_json::Value = serde_json::from_str(&forgotten).unwrap();
+        let noop: serde_json::Value = serde_json::from_str(&noop).unwrap();
+
+        assert_eq!(first["tx_count"], 1);
+        assert_eq!(second["tx_count"], 2);
+        assert_eq!(retracted["tx_count"], 3);
+        assert_eq!(forgotten["tx_count"], 4);
+        assert_eq!(first["durability"], "published");
+        assert_eq!(second["durability"], "published");
+        assert_eq!(retracted["durability"], "published");
+        assert_eq!(forgotten["durability"], "published");
+        assert_eq!(first["maintenance_pending"], false);
+        assert_eq!(second["maintenance_pending"], false);
+        assert!(first["transacted"].is_u64());
+        assert_eq!(first["transacted"], first["tx_id"]);
+        assert_eq!(second["transacted"], second["tx_id"]);
+        assert_eq!(retracted["retracted"], retracted["tx_id"]);
+        assert_eq!(forgotten["forgotten"], 1);
+        assert!(forgotten["tx_id"].is_u64());
+        assert_eq!(noop["forgotten"], 0);
+        assert!(noop["tx_id"].is_null());
+        assert!(noop["tx_count"].is_null());
+        assert_eq!(noop["durability"], "noop");
+        assert_eq!(noop["maintenance_pending"], false);
+        assert_eq!(noop["advice"], "none");
     }
 
     #[wasm_bindgen_test]

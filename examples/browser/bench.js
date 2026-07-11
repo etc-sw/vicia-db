@@ -146,6 +146,67 @@ window.benchGrowth = async (cycles, factsPerCycle, sampleEvery) => {
   return show(JSON.stringify(samples));
 };
 
+// Repeat the growth workload while invoking the real browser maintenance
+// surface at caller-owned idle boundaries. Each maintenance sample captures
+// the physical page count immediately before and after atomic replacement and
+// the time spent rebuilding the full-history image.
+window.benchMaintainedGrowth = async (
+  cycles,
+  factsPerCycle,
+  sampleEvery,
+  maintenanceEvery,
+) => {
+  await initPromise;
+  growthDb = await BrowserDb.open(DB_NAME);
+  const samples = [];
+  const maintenances = [];
+  const t0 = performance.now();
+  let windowExecMs = [];
+
+  for (let i = 1; i <= cycles; i++) {
+    let tuples = "";
+    for (let j = 0; j < factsPerCycle; j++) {
+      tuples += `[:m${i}-${j} :n ${i * factsPerCycle + j}] `;
+    }
+    const e0 = performance.now();
+    const writeResult = JSON.parse(
+      await growthDb.execute(`(transact [${tuples}])`),
+    );
+    windowExecMs.push(performance.now() - e0);
+
+    if (i % maintenanceEvery === 0) {
+      const before = await growthSample(i, performance.now() - t0, windowExecMs);
+      const m0 = performance.now();
+      const outcome = JSON.parse(await growthDb.runIdleMaintenance());
+      const maintenanceMs = performance.now() - m0;
+      const after = await growthSample(i, performance.now() - t0, []);
+      const entry = {
+        cycle: i,
+        maintenanceMs: Math.round(maintenanceMs * 1000) / 1000,
+        writeAdvice: writeResult.advice,
+        outcome,
+        before,
+        after,
+      };
+      maintenances.push(entry);
+      console.log(`maintenance: ${JSON.stringify(entry)}`);
+      windowExecMs = [];
+    } else if (i % sampleEvery === 0 || i === cycles) {
+      const sample = await growthSample(
+        i,
+        performance.now() - t0,
+        windowExecMs,
+      );
+      samples.push(sample);
+      console.log(`maintained-growth: ${JSON.stringify(sample)}`);
+      windowExecMs = [];
+    }
+  }
+
+  lastGrowthQuery = `(query [:find ?v :where [:m${cycles}-0 :n ?v]])`;
+  return show(JSON.stringify({ samples, maintenances }));
+};
+
 // exportGraph -> importGraph round-trip on the live growth handle, sampling
 // before/after. Expected result: identical size — export serialises the full
 // 0..page_count range including superseded pages, so the round-trip is NOT a

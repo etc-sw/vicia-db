@@ -617,23 +617,68 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         Ok(segment)
     }
 
-    #[allow(dead_code)]
-    fn save_full_rebuild_from_visible_facts(&mut self) -> Result<CheckpointOutcome> {
-        let all_facts = self.storage.get_all_facts()?;
-        let (fact_pages, fact_refs) = pack_facts(&all_facts, 1)?;
+    /// Build a compact, contiguous copy of the complete visible fact log on a
+    /// fresh backend.
+    ///
+    /// The source is streamed into packed pages and the four index-entry
+    /// buffers; it is never materialized as an additional `Vec<Fact>`. Every
+    /// full-history identity field is preserved because facts are copied
+    /// verbatim. This is the browser physical-reclaim primitive: the caller
+    /// can atomically replace IndexedDB with the returned page image, then swap
+    /// the live handle only after that durable replacement succeeds.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn build_compact_copy<C: StorageBackend + 'static>(
+        &self,
+        backend: C,
+        page_cache_capacity: usize,
+    ) -> Result<PersistentFactStorage<C>> {
+        let checkpoint_tx_count = self.storage.current_tx_count();
+        let source = self.storage.clone();
+        let mut candidate = PersistentFactStorage::new(backend, page_cache_capacity)?;
+        candidate.write_fresh_base_from_source(checkpoint_tx_count, |visit| {
+            source.for_each_fact(visit)
+        })?;
+        Ok(candidate)
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn write_fresh_base_from_source(
+        &mut self,
+        checkpoint_tx_count: u64,
+        source: impl FnOnce(&mut dyn FnMut(Fact) -> Result<()>) -> Result<()>,
+    ) -> Result<()> {
+        {
+            let backend = self
+                .backend
+                .lock()
+                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+            if !backend.is_new() || backend.page_count()? != 0 {
+                anyhow::bail!("Compact copy destination backend must be empty");
+            }
+        }
+
+        let mut packer = PackedFactPacker::new(1);
+        let mut index_entries = new_index_entries_with_capacity(0);
+        let mut node_count = 0u64;
+        source(&mut |fact| {
+            let fact_ref = packer.push(&fact)?;
+            push_index_entries_for_fact(&mut index_entries, &fact, fact_ref);
+            node_count = node_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
+            Ok(())
+        })?;
+
+        let fact_pages = packer.finish();
         let num_fact_pages = u64::try_from(fact_pages.len())
             .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
-        let (eavt_entries, aevt_entries, avet_entries, vaet_entries) =
-            build_sorted_index_entries(&all_facts, &fact_refs);
-        let node_count = u64::try_from(all_facts.len())
-            .map_err(|_| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
-        let checkpoint_tx_count = self.storage.current_tx_count();
+        sort_index_entries(&mut index_entries);
+        let (eavt_entries, aevt_entries, avet_entries, vaet_entries) = index_entries;
 
         let mut backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        self.page_cache.invalidate_from(1);
         for (i, page_data) in fact_pages.iter().enumerate() {
             let page_offset =
                 u64::try_from(i).map_err(|_| anyhow::anyhow!("page index {i} exceeds u64::MAX"))?;
@@ -645,7 +690,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         let index_start = 1u64
             .checked_add(num_fact_pages)
-            .ok_or_else(|| anyhow::anyhow!("page count overflow computing index_start"))?;
+            .ok_or_else(|| anyhow::anyhow!("page count overflow computing index start"))?;
         let (eavt_root, next1) = build_btree(
             btree_entries(eavt_entries.into_iter())?.into_iter(),
             &mut *backend,
@@ -700,10 +745,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .store(num_fact_pages, Ordering::SeqCst);
         self.committed_fact_page_start.store(1, Ordering::SeqCst);
         self.last_checkpointed_tx_count = checkpoint_tx_count;
+        self.storage.restore_tx_counter_from(checkpoint_tx_count);
         self.dirty = false;
         self.wire_committed_readers(&header, Vec::new())?;
         self.storage.post_checkpoint_clear();
-        Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
+        Ok(())
     }
 
     fn write_recompact_candidate_from_visible_facts(&mut self) -> Result<RecompactCandidate> {
@@ -3016,28 +3062,9 @@ mod tests {
             PersistedManifestSelection::Use { .. }
         ));
 
-        let mut rebuild_storage =
-            PersistentFactStorage::new(MemoryBackend::new(), 256).expect("storage should create");
-        rebuild_storage
-            .storage()
-            .load_fact(base_fact)
-            .expect("base fact should load");
-        rebuild_storage.storage().restore_tx_counter_from(1);
-        rebuild_storage.mark_dirty();
-        rebuild_storage.save().expect("base checkpoint should save");
-        rebuild_storage
-            .storage()
-            .load_fact(edge_fact)
-            .expect("edge fact should load");
-        rebuild_storage
-            .storage()
-            .load_fact(target_fact)
-            .expect("target fact should load");
-        rebuild_storage.storage().restore_tx_counter_from(2);
-        rebuild_storage.mark_dirty();
-        rebuild_storage
-            .save_full_rebuild_from_visible_facts()
-            .expect("full rebuild should save");
+        let rebuild_storage = delta_storage
+            .build_compact_copy(MemoryBackend::new(), 256)
+            .expect("compact copy should build");
 
         assert_eq!(
             fact_projection(delta_storage.storage()).expect("delta facts should load"),
@@ -3148,6 +3175,40 @@ mod tests {
 
     fn storage_with_visible_ref_delta() -> Result<PersistentFactStorage<MemoryBackend>> {
         storage_with_visible_ref_delta_on(MemoryBackend::new())
+    }
+
+    #[test]
+    fn test_compact_copy_is_contiguous_and_preserves_history_and_watermark() -> Result<()> {
+        let storage = storage_with_visible_ref_delta()?;
+        let before = fact_projection(storage.storage())?;
+        storage.storage().restore_tx_counter_from(9);
+
+        let compact = storage.build_compact_copy(MemoryBackend::new(), 256)?;
+        assert!(matches!(
+            compact.delta_manifest_selection(),
+            PersistedManifestSelection::NoDeltaManifest
+        ));
+        assert_eq!(
+            compact.committed_fact_page_start.load(Ordering::SeqCst),
+            1,
+            "fresh compact images must start at page 1"
+        );
+        assert_eq!(
+            compact.storage().current_tx_count(),
+            9,
+            "a watermark newer than the last fact must survive compaction"
+        );
+        assert_eq!(
+            before,
+            fact_projection(compact.storage())?,
+            "compact copy must preserve every full-history identity field"
+        );
+
+        let backend = compact.into_backend()?;
+        let reopened = PersistentFactStorage::new(backend, 256)?;
+        assert_eq!(reopened.storage().current_tx_count(), 9);
+        assert_eq!(before, fact_projection(reopened.storage())?);
+        Ok(())
     }
 
     #[test]

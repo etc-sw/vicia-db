@@ -3,7 +3,7 @@
 Current line: merged on `main`. Use a fresh worktree and slice branch for new
 storage cleanup, rename, benchmark, or public API work.
 
-Status: overall execution plan as of 2026-06-07. T7C is measured, T8A
+Status: overall execution plan as of 2026-07-11. T7C is measured, T8A
 multi-segment manifest publish is implemented on the current line, T8B mini benchmark
 has passed, T8C full matrix is measured, T9A threshold policy is documented,
 T9B private threshold metrics pass, T9C-A adds a private explicit recompact
@@ -23,6 +23,10 @@ still private, automatic/background scheduling remains a caller-policy decision,
 and maintenance is not wired into foreground `checkpoint()`. Q3-B records the
 Vetch caller contract for when to invoke the hook, how to interpret outcomes,
 and how to retry visible maintenance errors.
+Post-Q3 adoption evidence has also landed A5-4 browser atomic compact
+maintenance: BrowserDb applies the threshold policy from a caller-owned
+worker/idle window and atomically replaces IndexedDB with a fresh contiguous
+image so obsolete page records are actually reclaimed.
 This document is the single high-level plan for the Vetch-driven Minigraf /
 Vicia DB delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
@@ -55,8 +59,8 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/REFACTORING_AND_ALGORITHM_PLAN.md` | Original R0-R6 cleanup, benchmark, and gate plan. Records Gate 1 and Gate 2 decisions. |
 | `docs/DELTA_INDEX_REFERENCE_SURVEY.md` | Reference DB survey. Extracts portable invariants from GrafeoDB, Fjall, and redb without adopting them as dependencies. |
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
-| `docs/MAINTENANCE_API_CONTRACT.md` | Q3-B caller contract for `run_idle_maintenance()`: safe windows, outcome semantics, retry/error policy, and Vetch scheduling guidance. |
-| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, Q2-A, and Q2-B. |
+| `docs/MAINTENANCE_API_CONTRACT.md` | Q3-B/A5-4 caller contract for native and browser idle maintenance: safe windows, outcome semantics, retry/error policy, and Vetch worker scheduling. |
+| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, Q2-A, Q2-B, and A5-4. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
 | `docs/VICIA_DB_RENAME_PLAN.md` | Staged Vicia DB successor rename plan, compatibility policy, attribution checklist, and `vicia-db-decision-gate` skill shape. |
 
@@ -121,10 +125,11 @@ on a 1M base, formatted as-of p95 drops from `1,257.698-1,499.003 ms` to
 `0.013-0.026 ms`.
 
 The next step is therefore not another checkpoint algorithm change and not a new
-public receipt API. After Q3-B, Vetch should validate the maintenance caller
-contract in a real daemon or application loop. Only then should Minigraf/Vicia
-choose between deeper bounded-memory recompact work, file-space reclamation, or
-a narrower recent fact-log reader.
+public receipt API. A5-4 supplied the browser caller evidence and page-record
+reclaim that Q3-B left outside native core. The remaining browser storage
+blocker is the measured 1M full-load open/memory shape; native work proceeds
+separately through A9 linearized backup. Deeper browser work must target
+bounded/page-on-demand open rather than another delta algorithm.
 
 ## Evidence Trail
 
@@ -154,6 +159,7 @@ the result of progressively narrower gates:
 | Q2-B | `write_recompact_candidate_from_visible_facts()` streams visible facts through `FactStorage::for_each_fact()` instead of materializing a committed `Vec<Fact>` first. | Recompact input has a better memory shape, but candidate pages and index-entry buffers remain O(total facts). |
 | Q3-A | Public `run_idle_maintenance()` exposes checkpoint/delta/advice outcome while keeping raw recompact private. | Vetch can schedule maintenance without owning storage internals. |
 | Q3-B | `docs/MAINTENANCE_API_CONTRACT.md` records caller windows, outcome semantics, error handling, and Vetch scheduling policy. | Vetch can validate maintenance adoption without another Vicia storage algorithm change. |
+| A5-4 | Four 100K-base browser soft-threshold cycles atomically replaced compact images, reclaimed about 2.1K pages each, reset write latency, and a module DedicatedWorker passed open/write/query/maintenance. | The maintenance and worker deployment boundaries pass in real Chrome; bounded 1M open/memory and parity evidence remain Gate E work. |
 
 ## Philosophy Fit
 

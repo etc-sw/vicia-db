@@ -3,8 +3,12 @@
 //! This is NOT a `StorageBackend` implementor — it is async-only.
 //! Called directly by `BrowserDb` after synchronous `PersistentFactStorage::save()`.
 
-use js_sys::{Array, Promise, Uint8Array};
+use js_sys::{Array, Promise, Reflect, Uint8Array};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashMap;
+#[cfg(test)]
+use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
@@ -77,6 +81,10 @@ fn transaction_to_promise(tx: &IdbTransaction) -> Promise {
 pub struct IndexedDbBackend {
     pub(crate) db: IdbDatabase,
     pub(crate) store_name: String,
+    #[cfg(test)]
+    fail_next_write: Rc<Cell<bool>>,
+    #[cfg(test)]
+    fail_next_replace: Rc<Cell<bool>>,
 }
 
 impl IndexedDbBackend {
@@ -85,10 +93,15 @@ impl IndexedDbBackend {
     /// If the object store does not exist, it is created in `onupgradeneeded`.
     /// `db_name` is used as both the database name and the object store name.
     pub async fn open(db_name: &str) -> Result<Self, JsValue> {
-        let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window object"))?;
-        let idb_factory = window
-            .indexed_db()?
-            .ok_or_else(|| JsValue::from_str("IndexedDB not available"))?;
+        // `globalThis.indexedDB` exists in both Window and WorkerGlobalScope.
+        // Avoid `web_sys::window()` so Vetch can run O(total-history) open and
+        // maintenance work in a dedicated worker instead of blocking its UI.
+        let global = js_sys::global();
+        let indexed_db = Reflect::get(&global, &JsValue::from_str("indexedDB"))?;
+        if indexed_db.is_null() || indexed_db.is_undefined() {
+            return Err(JsValue::from_str("IndexedDB not available"));
+        }
+        let idb_factory: web_sys::IdbFactory = indexed_db.dyn_into()?;
 
         let store_name = db_name.to_string();
         let store_name_upgrade = store_name.clone();
@@ -112,7 +125,14 @@ impl IndexedDbBackend {
         JsFuture::from(request_to_promise(open_request.as_ref())).await?;
 
         let db: IdbDatabase = open_request.result()?.dyn_into()?;
-        Ok(Self { db, store_name })
+        Ok(Self {
+            db,
+            store_name,
+            #[cfg(test)]
+            fail_next_write: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            fail_next_replace: Rc::new(Cell::new(false)),
+        })
     }
 
     /// Load all pages from IndexedDB into a `HashMap<page_id, bytes>`.
@@ -126,12 +146,14 @@ impl IndexedDbBackend {
             .transaction_with_str_and_mode(&self.store_name, IdbTransactionMode::Readonly)?;
         let store = tx.object_store(&self.store_name)?;
 
+        // Queue both requests while the transaction is active. Awaiting the
+        // first request before creating the second can let some engines mark
+        // the transaction inactive between Promise continuations.
         let keys_req = store.get_all_keys()?;
-        let keys_val = JsFuture::from(request_to_promise(keys_req.as_ref())).await?;
-        let keys_arr: Array = keys_val.dyn_into()?;
-
         let vals_req = store.get_all()?;
+        let keys_val = JsFuture::from(request_to_promise(keys_req.as_ref())).await?;
         let vals_val = JsFuture::from(request_to_promise(vals_req.as_ref())).await?;
+        let keys_arr: Array = keys_val.dyn_into()?;
         let vals_arr: Array = vals_val.dyn_into()?;
 
         let mut pages = HashMap::with_capacity(keys_arr.length() as usize);
@@ -153,7 +175,21 @@ impl IndexedDbBackend {
         Self {
             db: self.db.clone(),
             store_name: self.store_name.clone(),
+            #[cfg(test)]
+            fail_next_write: self.fail_next_write.clone(),
+            #[cfg(test)]
+            fail_next_replace: self.fail_next_replace.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_write_for_test(&self) {
+        self.fail_next_write.set(true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_replace_for_test(&self) {
+        self.fail_next_replace.set(true);
     }
 
     /// Write a batch of pages to IndexedDB in a single `readwrite` transaction.
@@ -172,10 +208,25 @@ impl IndexedDbBackend {
             .transaction_with_str_and_mode(&self.store_name, IdbTransactionMode::Readwrite)?;
         let store = tx.object_store(&self.store_name)?;
 
-        for (page_id, data) in &pages {
-            let key = JsValue::from_f64(*page_id as f64);
-            let arr = Uint8Array::from(data.as_slice());
-            store.put_with_key(&arr, &key)?;
+        let queued = (|| -> Result<(), JsValue> {
+            for (page_id, data) in &pages {
+                let key = JsValue::from_f64(*page_id as f64);
+                let arr = Uint8Array::from(data.as_slice());
+                store.put_with_key(&arr, &key)?;
+                #[cfg(test)]
+                if self.fail_next_write.replace(false) {
+                    return Err(JsValue::from_str(
+                        "injected IndexedDB write enqueue failure",
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = queued {
+            // A synchronous error after earlier puts were queued must not let
+            // that prefix auto-commit after this Rust future returns.
+            let _ = tx.abort();
+            return Err(error);
         }
 
         // Wait for the transaction to commit. The IDB transaction commits
@@ -202,11 +253,26 @@ impl IndexedDbBackend {
             .transaction_with_str_and_mode(&self.store_name, IdbTransactionMode::Readwrite)?;
         let store = tx.object_store(&self.store_name)?;
 
-        store.clear()?;
-        for (page_id, data) in &pages {
-            let key = JsValue::from_f64(*page_id as f64);
-            let arr = Uint8Array::from(data.as_slice());
-            store.put_with_key(&arr, &key)?;
+        let queued = (|| -> Result<(), JsValue> {
+            store.clear()?;
+            for (page_id, data) in &pages {
+                let key = JsValue::from_f64(*page_id as f64);
+                let arr = Uint8Array::from(data.as_slice());
+                store.put_with_key(&arr, &key)?;
+                #[cfg(test)]
+                if self.fail_next_replace.replace(false) {
+                    return Err(JsValue::from_str(
+                        "injected IndexedDB replacement enqueue failure",
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = queued {
+            // In particular, never allow `clear()` plus a successfully queued
+            // prefix to commit as a partial replacement.
+            let _ = tx.abort();
+            return Err(error);
         }
 
         JsFuture::from(transaction_to_promise(&tx)).await?;

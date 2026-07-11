@@ -1,9 +1,10 @@
 # Maintenance API Contract
 
-Status: Q3-B contract for Vetch/Vicia embedder adoption.
+Status: Q3-B native contract plus A5-4 browser atomic compact maintenance.
 
-`Minigraf::run_idle_maintenance()` is the only public maintenance hook in this
-line. It exists so an embedding application can move recompact work out of
+`Minigraf::run_idle_maintenance()` and browser
+`BrowserDb.runIdleMaintenance()` are the public maintenance hooks in this
+line. They exist so an embedding application can move recompact work out of
 foreground receipt capture without depending on `PersistentFactStorage`,
 `CheckpointOutcome`, or raw recompact internals.
 
@@ -13,12 +14,19 @@ public `recompact()` API.
 
 ## Scope
 
-The maintenance hook may:
+The native maintenance hook may:
 
 - checkpoint pending WAL-backed writes
 - fold visible delta segments into a fresh copy-on-write base when private
   threshold policy says maintenance is needed
 - return caller advice about checkpoint cadence pressure
+
+The browser hook may:
+
+- no-op while selected delta growth remains below threshold
+- stream the complete fact log into a fresh contiguous graph image at threshold
+- atomically replace IndexedDB before swapping the live handle
+- return native-compatible outcome vocabulary plus before/after page counts
 
 The maintenance hook must not:
 
@@ -27,8 +35,13 @@ The maintenance hook must not:
 - define Vetch replay eligibility or strict-before event boundaries
 - make recompact bounded-memory; Q2-B only removed one intermediate decoded
   fact buffer
-- reclaim old ignored pages; file-space reclamation remains a separate future
-  phase
+- reclaim old ignored pages on the native file backend; native file-space
+  reclamation remains a separate future phase
+
+Browser maintenance intentionally does reclaim obsolete IndexedDB records.
+Native copy-on-write recompact cannot do this because it appends its new base
+after old pages; BrowserDb instead builds a fresh page-1 image and commits one
+atomic `clear`+`put` replacement.
 
 ## Caller Windows
 
@@ -47,6 +60,12 @@ Do not call the hook while a `WriteTransaction` is active on the same thread.
 The API rejects that case to avoid deadlock. Cross-thread callers serialize
 behind the normal write lock.
 
+For BrowserDb, keep the writer and maintenance inside a dedicated worker and
+hold the caller-owned Web Lock across the handle lifetime. The same-handle
+guard rejects every read, export, or second mutation while a durability
+mutation is in flight; cross-handle and cross-tab writer ownership remains
+Vetch policy.
+
 ## Outcome Semantics
 
 `run_idle_maintenance()` returns `Result<MaintenanceOutcome>`.
@@ -63,6 +82,22 @@ behind the normal write lock.
 `ReduceCheckpointCadence` can co-occur with `delta = Recompacted`. Advice
 describes the pre-maintenance delta state that triggered the fold, not
 necessarily the post-call state.
+
+`BrowserDb.runIdleMaintenance()` resolves to JSON with lower-case equivalents:
+
+```json
+{
+  "checkpoint": "noop",
+  "delta": "noop|recompacted",
+  "advice": "none|reduce_checkpoint_cadence",
+  "before_pages": 14984,
+  "after_pages": 12876
+}
+```
+
+Browser writes are already write-through, so normal browser maintenance reports
+`checkpoint = "noop"`. Replacement failure changes neither the live handle nor
+IndexedDB and can be retried later.
 
 ## Error Semantics
 
@@ -95,6 +130,8 @@ Recommended Vetch policy:
    schedule another idle maintenance pass.
 5. If maintenance returns an error, keep capture available, record the error,
    and retry from a later idle tick.
+6. In the browser, run the O(total-history) rebuild in a worker and reserve
+   quota headroom for the old and candidate images during atomic replacement.
 
 Forbidden policy:
 
@@ -117,6 +154,18 @@ The Q3-A implementation pins this contract with focused coverage:
 - foreground `checkpoint()` does not run hidden recompact
 - fault-injected phase-2 recompact failure preserves the previous visible delta
   and reopen ignores unpublished candidate pages
+
+The A5-4 browser implementation additionally pins:
+
+- compact copies preserve all history identity fields, Ref values,
+  retractions, and a tx watermark newer than the last fact
+- replacement removes stale page records and exports one contiguous image
+- current and valid-time history survive replacement and reopen
+- replacement failure preserves the previous live and durable graph
+- same-handle reads, exports, and second mutations cannot overlap maintenance
+- unreadable failed-write handles cannot promote uncertain memory through
+  maintenance or export
+- four 100K-base soft-threshold cycles reclaim pages and reset write latency
 
 Future caller integration should add Vetch-side evidence for:
 
