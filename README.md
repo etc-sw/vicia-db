@@ -26,6 +26,29 @@ rename plan, compatibility policy, and attribution checklist.
 See [docs/MAINTENANCE_API_CONTRACT.md](docs/MAINTENANCE_API_CONTRACT.md) for
 the `run_idle_maintenance()` caller contract.
 
+## Local Vetch browser sync
+
+Vicia's browser binding lives in `bindings/browser` and uses the same package
+identity planned for npm: `@vicia-db/browser`. Build the current checkout and
+atomically sync it into the sibling Vetch checkout with:
+
+```bash
+just sync
+```
+
+To target a Vetch worktree explicitly:
+
+```bash
+just sync /absolute/path/to/vetch-worktree
+```
+
+The synced package includes `vicia-build.json` with the exact source commit,
+dirty-state flag, wasm hash, and wasm-pack version. Vetch consumes it through a
+`link:` dependency, so replacing the package directory takes effect without
+overwriting `node_modules` or changing imports. The same binding shim is the
+future public-package build surface; npm publication only replaces Vetch's
+dependency locator.
+
 ## Vision
 
 Minigraf is a **single-file embedded graph database** that lets you:

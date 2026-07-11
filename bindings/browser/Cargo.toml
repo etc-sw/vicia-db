@@ -1,0 +1,21 @@
+[package]
+name = "browser"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Vicia DB browser WebAssembly package shim"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/etc-sw/vicia-db"
+
+[lib]
+name = "vicia_db_browser"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vicia_db = { package = "minigraf", path = "../.." }
+
+[features]
+browser = ["vicia_db/browser"]
+
+[workspace]
+members = ["."]
