@@ -3,18 +3,21 @@
 //! Role:
 //! - Convert measured delta pressure into a fresh compact graph image and an
 //!   atomic IndexedDB replacement.
+//!
 //! Owns:
 //! - Full-history-preserving compact-copy construction, replacement ordering,
 //!   and browser maintenance outcome framing.
+//!
 //! Does not own:
 //! - Foreground write cadence, Vetch scheduling, cross-tab Web Locks, or
 //!   product retention policy.
+//!
 //! Allowed dependencies:
 //! - BrowserDb state, BrowserBufferBackend, IndexedDbBackend, and the existing
 //!   storage delta decision.
 
-use super::BrowserDb;
 use super::buffer::BrowserBufferBackend;
+use super::{BrowserDb, configure_sparse_authority};
 use crate::storage::delta_growth::DeltaMaintenanceDecision;
 use wasm_bindgen::JsValue;
 
@@ -42,6 +45,12 @@ pub(super) async fn run_idle_maintenance(db: &BrowserDb, force: bool) -> Result<
         ));
     }
 
+    // Paged selective reads stay bounded, but compaction is the explicit
+    // O(total-history) worker operation. Resolve the complete base fact range
+    // before entering the synchronous streaming writer; retrying a partially
+    // built candidate page-by-page would be quadratic and could duplicate work.
+    db.prefetch_full_scan_pages().await?;
+
     // Build separately from the live page image. Any packing/index error
     // leaves the current handle and IndexedDB untouched.
     let (mut candidate, candidate_storage, compact_pages, idb) = {
@@ -62,14 +71,25 @@ pub(super) async fn run_idle_maintenance(db: &BrowserDb, force: bool) -> Result<
 
     let after_pages = u64::try_from(compact_pages.len())
         .map_err(|_| JsValue::from_str("compact page count exceeds u64::MAX"))?;
+    let paged = db.inner.borrow().open_mode.is_paged();
+    if paged {
+        candidate.with_backend_mut(|backend| {
+            backend.take_dirty();
+        });
+        configure_sparse_authority(&mut candidate)?;
+        candidate.with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
+    }
     idb.replace_all_pages(compact_pages).await?;
-    candidate.with_backend_mut(|backend| {
-        backend.take_dirty();
-    });
+    if !paged {
+        candidate.with_backend_mut(|backend| {
+            backend.take_dirty();
+        });
+    }
 
     let mut inner = db.inner.borrow_mut();
     inner.pfs = candidate;
     inner.fact_storage = candidate_storage;
+    inner.paged = paged;
     drop(inner);
 
     Ok(maintenance_json(

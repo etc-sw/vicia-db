@@ -3,7 +3,7 @@
 Current line: merged on `main`. Use a fresh worktree and slice branch for new
 storage cleanup, rename, benchmark, or public API work.
 
-Status: overall execution plan as of 2026-07-11. T7C is measured, T8A
+Status: overall execution plan as of 2026-07-12. T7C is measured, T8A
 multi-segment manifest publish is implemented on the current line, T8B mini benchmark
 has passed, T8C full matrix is measured, T9A threshold policy is documented,
 T9B private threshold metrics pass, T9C-A adds a private explicit recompact
@@ -27,6 +27,10 @@ Post-Q3 adoption evidence has also landed A5-4 browser atomic compact
 maintenance: BrowserDb applies the threshold policy from a caller-owned
 worker/idle window and atomically replaces IndexedDB with a fresh contiguous
 image so obsolete page records are actually reclaimed.
+A5-6c adds the bounded `BrowserDb.openPaged()` source and verified asynchronous
+export while retaining eager `open()` compatibility. Its 1M matrix and Vetch
+adapter adoption remain acceptance work rather than another storage-format
+slice.
 This document is the single high-level plan for the Vetch-driven Minigraf /
 Vicia DB delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
@@ -66,7 +70,8 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 
 ## Decision Summary
 
-Minigraf should keep the v10 in-file delta-index direction. T9 threshold and
+Minigraf should keep the in-file delta-index direction introduced by v10 and
+now carried forward inside the v11 integrity format. T9 threshold and
 recompact policy, Q1-B agent-brief as-of pushdown, Q2-A export allocation
 cleanup, Q2-B private recompact input streaming, Q3-A public idle maintenance,
 and Q3-B maintenance caller contract are complete. Q2-B confirms the current
@@ -126,10 +131,12 @@ on a 1M base, formatted as-of p95 drops from `1,257.698-1,499.003 ms` to
 
 The next step is therefore not another checkpoint algorithm change and not a new
 public receipt API. A5-4 supplied the browser caller evidence and page-record
-reclaim that Q3-B left outside native core. The remaining browser storage
-blocker is the measured 1M full-load open/memory shape; native work proceeds
-separately through the now-landed A9 linearized backup. Deeper browser work must target
-bounded/page-on-demand open rather than another delta algorithm.
+reclaim that Q3-B left outside native core. A5-6c then supplied the
+generation-aware page-on-demand open path without breaking eager callers.
+Native work proceeds separately through the now-landed A9 linearized backup.
+The remaining browser acceptance work is to measure the 1M sparse
+open/query/growth/maintenance shape and adopt that exact API in Vetch, not to
+change the delta algorithm again.
 
 ## Evidence Trail
 
@@ -163,6 +170,7 @@ the result of progressively narrower gates:
 | A5-5 | Native- and Chrome-generated v10 fixtures run through both consumers with exact tagged temporal/ref results and one shared slot/manifest/segment/truncation/tail corruption corpus. | Semantic, portability, and recovery-policy parity pass; page-local base integrity and bounded browser reads remain coupled Gate E work. |
 | A5-6a | Query access planning is a deterministic internal boundary; selective index/fact I/O failures propagate instead of triggering a full scan, and declared fact ranges reject wrong-type pages. | Sparse browser reads can distinguish an explicit full-scan plan from a failed selective read without hiding corruption. |
 | A5-6b | File format v11 adds an in-file, generation/page-id-bound checksum catalog for every immutable base fact/index page; v10 migrates catalog-first/page0-last and BrowserDb durably commits that migration before returning. | Page-local corruption detection and the verified committed-read/export/backup boundary pass; sparse IndexedDB paging and the 1M bounded-memory matrix remain Gate E work. |
+| A5-6c | `BrowserDb.openPaged()` bootstraps bounded v11 metadata, demand-fetches verified pages, preserves sparse residency across writes/rollback/import/maintenance, and pairs with `exportGraphAsync()`; exact page-0 bytes are the cross-handle authority with no added schema key. | Sparse implementation work passes structurally while eager `open()` remains compatible; the 1M measured matrix and Vetch adapter adoption remain Gate E work. |
 
 ## Philosophy Fit
 

@@ -97,7 +97,10 @@ SQLite's success comes from a clear philosophy: be a library, not a server. Be s
 - Easy to backup: copy one file
 - Easy to share: email, USB drive, version control (for small DBs)
 - Easy to delete: remove one file
-- WASM: Store in browser's IndexedDB as single blob
+- WASM: Store numeric 4KB page records in IndexedDB while preserving one
+  logical, byte-exact `.graph` image as the export/import portability boundary.
+  Page 0 remains the exact image authority; no browser-only schema/metadata key
+  may redefine the file.
 
 **Anti-pattern**: Multiple files, directories, or complex file structures that are hard to manage.
 

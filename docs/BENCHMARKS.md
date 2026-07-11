@@ -521,8 +521,9 @@ Use the comparison shape for decay candidates; do not use negation.
 
 `examples/browser/bench.html` + `bench-driver.cjs` — measures
 `BrowserDb.open()` latency and JS-heap growth against imported fixtures.
-Browser open currently loads **all** IndexedDB pages into memory; these
-numbers quantify that shape (Vetch Gate E precondition).
+This eager compatibility API loads **all** IndexedDB pages into memory; these
+numbers quantify that shape (Vetch Gate E baseline). They are not measurements
+of the newer `BrowserDb.openPaged()` path.
 
 Runner: build the wasm pkg (`wasm-pack build --target web --out-dir
 minigraf-wasm -- --features browser`), generate fixtures (`cargo run
@@ -683,7 +684,8 @@ bad-magic headers remain hard errors.
 ## A5: Browser IndexedDB Growth (2026-07-11)
 
 Long-running write growth of the browser backend (`BrowserDb`), measured for
-the A5 parity-evidence gate (`docs/APP_ADOPTION_GAP_PLAN.md`). Every browser
+the A5 parity-evidence gate (`docs/APP_ADOPTION_GAP_PLAN.md`). This is the
+pre-A5-4 maintenance snapshot. At the time, every browser
 write `execute()` runs `save()`, which appends a delta segment and rewrites
 the manifest; `save()` never consults the delta growth thresholds, and the
 recompact path (`run_idle_delta_maintenance`) has no browser surface — so
@@ -739,12 +741,10 @@ Findings:
   memory (single-digit MB while the page buffer holds the full page set);
   the reopen heap figures are the reliable resident-cost signal.
 
-Gate conclusion: browser Vicia write cadence is **not bounded**. Without a
-maintenance surface (or a native-fold-then-import path), IndexedDB and
-reopen cost grow without limit under exactly the cadence Vetch plans. This
-is the measured wall the A5 scope defers facade expansion on; caller policy
-must treat browser Vicia as read-mostly (bulk import + bounded writes)
-until a maintenance story lands.
+Gate conclusion at this snapshot: browser Vicia write cadence was **not
+bounded**. Without a maintenance surface, IndexedDB and reopen cost grew
+without limit under exactly the cadence Vetch plans. This measurement promoted
+A5-4 rather than remaining the current operating policy.
 
 ---
 
@@ -782,7 +782,7 @@ reached `33.9–43.1 ms` p95; the next post-maintenance windows returned to
 probe at commit 1,024 correctly no-opped because the first write created the
 base and only 1,023 delta segments existed.
 
-Correctness/failure evidence is separate from timing: the 23-test browser WASM
+Correctness/failure evidence is separate from timing: the then-23-test browser WASM
 suite preserves Ref assertion/retraction history, valid-time reads, exact tx
 watermark, export/reopen, mutation exclusion, rejected-write rollback, poison
 containment, and atomic maintenance failure.
@@ -800,10 +800,11 @@ Gate verdict:
 - **Caller constraint:** maintenance is O(total history) synchronous WASM work
   (`2.5–4.2 s` at 110K–141K facts) and atomic replacement temporarily needs old
   plus candidate quota. Run it in the BrowserDb worker, never the UI thread.
-- **Still open for Gate E:** the current open path loads every IndexedDB page.
-  The prior 1M result (~3.2 s, ~420 MB per tab) remains the bounded-memory
-  blocker. The 1M maintenance peak-memory shape is also unmeasured. Do not infer
-  1M browser authority readiness from the 100K maintenance pass.
+- **Still open for Gate E:** eager `BrowserDb.open()` loads every IndexedDB
+  page. `openPaged()` now supplies the bounded implementation path, but its 1M
+  startup/query/growth matrix and the 1M maintenance peak-memory shape are
+  unmeasured. Do not infer 1M browser authority readiness from the eager
+  baseline or the 100K maintenance pass.
 
 ### A5-5: Gate E Tagged Portability and Corruption Matrix
 
@@ -862,10 +863,43 @@ Evidence run on 2026-07-11:
   appends a COW base while preserving duplicate rows, v9 scoped retractions,
   and every old non-header page.
 
-This is not the 1M Gate E performance verdict. BrowserDb still calls
-`load_all_pages()` into a flat in-memory buffer at open; the next slice must
-replace that source with generation-aware on-demand IndexedDB paging and rerun
-the full 1M startup/query/growth/maintenance peak-memory matrix.
+This was not the 1M Gate E performance verdict. At A5-6b, BrowserDb still
+called `load_all_pages()` into a flat in-memory buffer at open. A5-6c below
+adds the generation-aware on-demand source; the full 1M
+startup/query/growth/maintenance peak-memory matrix still must be rerun on it.
+
+### A5-6c: Generation-Aware Sparse IndexedDB Paging
+
+Implementation evidence as of 2026-07-12; this section intentionally records
+structure and correctness, not 1M performance numbers:
+
+- `BrowserDb.openPaged()` reads page 0, the bounded v11 integrity catalog and
+  manifest metadata, and the selected segment ranges. It does not call the
+  eager full-store loader for a complete v11 image and leaves base fact/index
+  pages non-resident until a deterministic query access plan demands them.
+- Cold selective reads batch exact IndexedDB ranges; warm repeats reuse the
+  fixed-size resident cache. A missing, malformed, or checksum-invalid demanded
+  page fails closed. Explicit full scans may stage the declared base fact range
+  and release clean staging afterward rather than silently turning a selective
+  failure into a scan.
+- Independent handles pin exact page-0 bytes. Each sparse read/write observes
+  page 0 in the same IndexedDB transaction and rejects stale authority instead
+  of mixing generations. No schema/metadata key was introduced; numeric page 0
+  remains the compare-and-swap authority understood by existing packages.
+- Writes and `forget` resolve required pages before mutation. Failed durable
+  writes restore the prior sparse authority without `load_all_pages()`;
+  successful writes, import, complete v10 migration, and forced maintenance
+  converge back to sparse residency.
+- `exportGraphAsync()` walks the complete published prefix, verifies immutable
+  base pages against the v11 catalog, and rejects an authority change instead
+  of combining old and new pages. Synchronous `exportGraph()` remains available
+  for eager and in-memory handles.
+- All 55 browser-WASM structural tests pass in the final real-Chrome run.
+
+Gate status: the page-on-demand implementation exists, but no new 1M numbers
+are recorded here. The cold-open/query/warm-repeat/write/growth/export matrix,
+maintenance peak memory, and Vetch adapter adoption of `openPaged()` remain
+required before Gate E can close.
 
 ---
 

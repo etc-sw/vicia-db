@@ -10,18 +10,22 @@ pub mod buffer;
 pub mod indexeddb;
 mod maintenance;
 
-use crate::browser::buffer::BrowserBufferBackend;
+use crate::browser::buffer::{BrowserBufferBackend, page_not_resident_id};
 use crate::browser::indexeddb::IndexedDbBackend;
 use crate::graph::FactStorage;
 use crate::json_value::to_tagged_json;
+use crate::query::datalog::access_plan::QueryAccessPlan;
 use crate::query::datalog::executor::{DatalogExecutor, QueryResult};
 use crate::query::datalog::functions::FunctionRegistry;
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
-use crate::query::datalog::types::DatalogCommand;
+use crate::query::datalog::types::{DatalogCommand, ForgetSource};
 use crate::storage::delta_growth::DeltaMaintenanceDecision;
-use crate::storage::persistent_facts::PersistentFactStorage;
+use crate::storage::persistent_facts::{
+    BrowserPageRange, BrowserV11BootstrapPlan, PersistentFactStorage,
+};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use wasm_bindgen::prelude::*;
@@ -50,7 +54,40 @@ struct BrowserDbInner {
     /// started advancing. A semantic error before this boundary is a normal
     /// rejection, not a durability poison event.
     mutation_advanced: bool,
+    /// `true` for the bounded page-on-demand compatibility path. The legacy
+    /// `open()` wrapper uses the same sparse core but prefetches the complete
+    /// published image and keeps synchronous `exportGraph()` compatible.
+    paged: bool,
+    /// Caller-selected open contract. Unlike `paged`, this remains `Paged`
+    /// while an imported physically truncated legacy recovery image is held
+    /// eagerly/read-only, so a later clean import or maintenance repair can
+    /// return to the requested bounded path.
+    open_mode: BrowserOpenMode,
+    /// A paged read may await IndexedDB between deterministic sync retries.
+    /// Exclude mutation/import/maintenance during that gap so no operation can
+    /// observe or publish a half-resolved read snapshot.
+    paged_read_in_flight: bool,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserOpenMode {
+    EagerCompatibility,
+    Paged,
+}
+
+struct PreparedBrowserForget {
+    facts: Vec<crate::graph::types::Fact>,
+    count: usize,
+    tx_id: crate::graph::types::TxId,
+}
+
+impl BrowserOpenMode {
+    fn is_paged(self) -> bool {
+        matches!(self, Self::Paged)
+    }
+}
+
+const BROWSER_IDB_BATCH_PAGES: u64 = 256;
 
 /// Browser-only Minigraf database handle backed by IndexedDB.
 ///
@@ -69,7 +106,10 @@ impl BrowserDb {
     /// Data is lost when the page is closed. Use `BrowserDb.open()` for persistence.
     #[wasm_bindgen(js_name = openInMemory)]
     pub fn open_in_memory() -> Result<BrowserDb, JsValue> {
-        let buffer = BrowserBufferBackend::new();
+        let page0 =
+            crate::storage::header_extension::build_header_page(crate::storage::FileHeader::new())
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let buffer = BrowserBufferBackend::load_pages(HashMap::from([(0, page0)]));
         let pfs = PersistentFactStorage::new(buffer, 256)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let fact_storage = pfs.storage().clone();
@@ -85,6 +125,9 @@ impl BrowserDb {
                 durability_poisoned: false,
                 mutation_failure_rolled_back: false,
                 mutation_advanced: false,
+                paged: false,
+                open_mode: BrowserOpenMode::EagerCompatibility,
+                paged_read_in_flight: false,
             })),
         })
     }
@@ -96,31 +139,37 @@ impl BrowserDb {
     #[wasm_bindgen(js_name = open)]
     pub async fn open(db_name: &str) -> Result<BrowserDb, JsValue> {
         let idb = IndexedDbBackend::open(db_name).await?;
-        Self::open_from_idb(idb).await
+        Self::open_from_idb_mode(idb, BrowserOpenMode::EagerCompatibility).await
+    }
+
+    /// Open a persistent database with generation-checked, page-on-demand
+    /// IndexedDB reads.
+    ///
+    /// This is the bounded Vetch authority path. Immutable base fact/index
+    /// pages are fetched only when a query touches them and retained by the
+    /// core's fixed-size page cache. `exportGraphAsync()` is the matching
+    /// portability API; synchronous `exportGraph()` remains for in-memory and
+    /// eager-compatibility handles.
+    #[wasm_bindgen(js_name = openPaged)]
+    pub async fn open_paged(db_name: &str) -> Result<BrowserDb, JsValue> {
+        let idb = IndexedDbBackend::open(db_name).await?;
+        Self::open_from_idb_mode(idb, BrowserOpenMode::Paged).await
     }
 
     async fn open_from_idb(idb: IndexedDbBackend) -> Result<BrowserDb, JsValue> {
-        let existing = idb.load_all_pages().await?;
-        let existing_page_count = u64::try_from(existing.len())
-            .map_err(|_| JsValue::from_str("IndexedDB page count exceeds u64"))?;
+        Self::open_from_idb_mode(idb, BrowserOpenMode::EagerCompatibility).await
+    }
 
-        let buffer = BrowserBufferBackend::load_pages(existing);
-        let mut pfs = PersistentFactStorage::new(buffer, 256)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let declared_page_count = pfs
-            .with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let migration_pages = take_dirty_pages(&mut pfs)?;
-        if !migration_pages.is_empty() {
-            // Data/catalog pages and page 0 become durable in one IndexedDB
-            // transaction before the migrated handle can escape.
-            if declared_page_count < existing_page_count {
-                let published_pages = pfs.with_backend(BrowserBufferBackend::all_pages);
-                idb.replace_all_pages(published_pages).await?;
-            } else {
-                idb.write_pages(migration_pages).await?;
-            }
-        }
+    #[cfg(test)]
+    async fn open_paged_from_idb(idb: IndexedDbBackend) -> Result<BrowserDb, JsValue> {
+        Self::open_from_idb_mode(idb, BrowserOpenMode::Paged).await
+    }
+
+    async fn open_from_idb_mode(
+        idb: IndexedDbBackend,
+        mode: BrowserOpenMode,
+    ) -> Result<BrowserDb, JsValue> {
+        let (pfs, paged) = open_persistent_storage(&idb, mode).await?;
         let fact_storage = pfs.storage().clone();
 
         Ok(BrowserDb {
@@ -134,6 +183,9 @@ impl BrowserDb {
                 durability_poisoned: false,
                 mutation_failure_rolled_back: false,
                 mutation_advanced: false,
+                paged,
+                open_mode: mode,
+                paged_read_in_flight: false,
             })),
         })
     }
@@ -162,17 +214,12 @@ impl BrowserDb {
         let is_read = matches!(cmd, DatalogCommand::Query(_) | DatalogCommand::Rule(_));
 
         if is_read {
-            let result = {
-                let inner = self.inner.borrow();
-                DatalogExecutor::new_with_rules_and_functions(
-                    inner.fact_storage.clone(),
-                    inner.rules.clone(),
-                    inner.functions.clone(),
-                )
-                .execute(cmd)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?
-            };
-            return Ok(query_result_to_json(result));
+            let guarded = self.begin_paged_read()?;
+            let result = self.execute_read_command(cmd).await;
+            if guarded {
+                self.finish_paged_read();
+            }
+            return result.map(query_result_to_json);
         }
 
         match cmd {
@@ -193,8 +240,9 @@ impl BrowserDb {
                 result
             }
             DatalogCommand::Forget(spec) => {
+                let prepared = self.prepare_forget(&spec).await?;
                 self.begin_mutation()?;
-                let result = self.execute_forget(spec).await;
+                let result = self.execute_prepared_forget(prepared).await;
                 self.finish_mutation(result.is_err());
                 result
             }
@@ -203,39 +251,82 @@ impl BrowserDb {
         }
     }
 
-    /// Bulk valid-time closure: resolve the triples, materialize the
-    /// retract + truncated re-assert pairs, and apply them as one transaction
-    /// (single `tx_count`), then flush dirty pages to IndexedDB.
-    async fn execute_forget(
+    /// Resolve every page needed by a forget before the mutation boundary.
+    /// Retrying after `tx_count` allocation could apply one semantic command
+    /// twice, so paged I/O is complete before `begin_mutation()` returns.
+    async fn prepare_forget(
         &self,
-        spec: crate::query::datalog::types::ForgetSpec,
-    ) -> Result<String, JsValue> {
+        spec: &crate::query::datalog::types::ForgetSpec,
+    ) -> Result<PreparedBrowserForget, JsValue> {
         use crate::graph::types::tx_id_now;
 
+        let guarded = self.begin_paged_read()?;
+        let result = self.prepare_forget_with_paging(spec, tx_id_now()).await;
+        if guarded {
+            self.finish_paged_read();
+        }
+        result
+    }
+
+    async fn prepare_forget_with_paging(
+        &self,
+        spec: &crate::query::datalog::types::ForgetSpec,
+        tx_id: crate::graph::types::TxId,
+    ) -> Result<PreparedBrowserForget, JsValue> {
+        if matches!(
+            &spec.source,
+            ForgetSource::Query(query) if QueryAccessPlan::for_query(query).is_full_scan()
+        ) {
+            self.prefetch_full_scan_pages().await?;
+        }
+
+        let closure_time = spec.valid_to.unwrap_or_else(|| tx_id.cast_signed());
+        loop {
+            let prepared: anyhow::Result<_> = {
+                let inner = self.inner.borrow();
+                let executor = DatalogExecutor::new_with_rules_and_functions(
+                    inner.fact_storage.clone(),
+                    inner.rules.clone(),
+                    inner.functions.clone(),
+                );
+                crate::db::Minigraf::resolve_forget_triples(spec, &executor, closure_time).and_then(
+                    |triples| {
+                        crate::db::Minigraf::materialize_closure(
+                            &inner.fact_storage,
+                            &triples,
+                            closure_time,
+                        )
+                    },
+                )
+            };
+            match prepared {
+                Ok((facts, count)) => {
+                    return Ok(PreparedBrowserForget {
+                        facts,
+                        count,
+                        tx_id,
+                    });
+                }
+                Err(error) => match page_not_resident_id(&error) {
+                    Some(page_id) => self.fetch_and_stage_page(page_id).await?,
+                    None => return Err(JsValue::from_str(&error.to_string())),
+                },
+            }
+        }
+    }
+
+    /// Apply a fully resolved bulk valid-time closure as one transaction, then
+    /// publish its dirty page set atomically to IndexedDB.
+    async fn execute_prepared_forget(
+        &self,
+        prepared: PreparedBrowserForget,
+    ) -> Result<String, JsValue> {
         // ── Sync section: hold borrow, do ALL sync work, collect owned data ──
         let (dirty_pages, result_json) = {
             let mut inner = self.inner.borrow_mut();
 
-            let now = tx_id_now();
-            let closure_time = spec.valid_to.unwrap_or_else(|| now.cast_signed());
-
-            let executor = DatalogExecutor::new_with_rules_and_functions(
-                inner.fact_storage.clone(),
-                inner.rules.clone(),
-                inner.functions.clone(),
-            );
-            let triples =
-                crate::db::Minigraf::resolve_forget_triples(&spec, &executor, closure_time)
-                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
-            let (facts, count) = crate::db::Minigraf::materialize_closure(
-                &inner.fact_storage,
-                &triples,
-                closure_time,
-            )
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
             // Nothing matched: no tx_count consumed, nothing to flush.
-            if facts.is_empty() {
+            if prepared.facts.is_empty() {
                 return Ok(serde_json::json!({
                     "forgotten": 0,
                     "tx_id": serde_json::Value::Null,
@@ -249,9 +340,9 @@ impl BrowserDb {
 
             let tx_count = inner.fact_storage.allocate_tx_count();
             inner.mutation_advanced = true;
-            let tx_id = now;
+            let tx_id = prepared.tx_id;
 
-            for mut fact in facts {
+            for mut fact in prepared.facts {
                 fact.tx_id = tx_id;
                 fact.tx_count = tx_count;
                 inner
@@ -267,6 +358,9 @@ impl BrowserDb {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
             let dirty_pages = take_dirty_pages(&mut inner.pfs)?;
+            if inner.paged {
+                configure_sparse_authority(&mut inner.pfs)?;
+            }
 
             let decision = inner.pfs.delta_maintenance_decision();
             let durability = if inner.idb.is_some() {
@@ -275,7 +369,7 @@ impl BrowserDb {
                 "memory"
             };
             let json = serde_json::json!({
-                "forgotten": count,
+                "forgotten": prepared.count,
                 "tx_id": tx_id,
                 "tx_count": tx_count,
                 "durability": durability,
@@ -304,6 +398,8 @@ impl BrowserDb {
             }
         }
 
+        self.evict_sparse_staging();
+
         Ok(result_json)
     }
 
@@ -329,13 +425,23 @@ impl BrowserDb {
                 .save()
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let pages = take_dirty_pages(&mut inner.pfs)?;
+            if inner.paged {
+                configure_sparse_authority(&mut inner.pfs)?;
+            }
             (pages, inner.idb.is_some())
         };
 
         if has_idb && !dirty_pages.is_empty() {
-            let idb = self.inner.borrow().idb.as_ref().unwrap().clone_handle();
+            let idb = self
+                .inner
+                .borrow()
+                .idb
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("checkpoint IndexedDB handle is missing"))?
+                .clone_handle();
             self.flush_dirty_pages_or_restore(idb, dirty_pages).await?;
         }
+        self.evict_sparse_staging();
         Ok(())
     }
 
@@ -358,6 +464,7 @@ impl BrowserDb {
         // after it commits. A rejected maintenance attempt leaves the old
         // memory and old IndexedDB image aligned, so it does not poison.
         self.finish_mutation(false);
+        self.evict_sparse_staging();
         result
     }
 
@@ -372,19 +479,92 @@ impl BrowserDb {
     pub fn export_graph(&self) -> Result<js_sys::Uint8Array, JsValue> {
         self.ensure_usable()?;
         let inner = self.inner.borrow();
-        let page_count = inner
+        let page_count_u64 = inner
             .pfs
             .with_backend(BrowserBufferBackend::exportable_page_count)
-            .map_err(|e| JsValue::from_str(&e.to_string()))? as usize;
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let page_count = usize::try_from(page_count_u64)
+            .map_err(|_| JsValue::from_str("published page count exceeds addressable memory"))?;
+        let capacity = page_count
+            .checked_mul(crate::storage::PAGE_SIZE)
+            .ok_or_else(|| JsValue::from_str("published graph size exceeds addressable memory"))?;
 
-        let mut blob = Vec::with_capacity(page_count * crate::storage::PAGE_SIZE);
-        for id in 0..page_count as u64 {
+        let mut blob = Vec::with_capacity(capacity);
+        for id in 0..page_count_u64 {
             let page = inner
                 .pfs
                 .read_published_page(id)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             blob.extend_from_slice(&page);
         }
+        Ok(js_sys::Uint8Array::from(blob.as_slice()))
+    }
+
+    /// Asynchronously serialise the current published image without requiring
+    /// every IndexedDB page to remain resident in WebAssembly memory.
+    ///
+    /// Each immutable base page passes through the loaded v11 generation/page
+    /// checksum catalog. If another handle publishes a newer image while this
+    /// paged handle is reading, the pinned page-0 authority rejects the export
+    /// instead of mixing generations.
+    #[wasm_bindgen(js_name = exportGraphAsync)]
+    pub async fn export_graph_async(&self) -> Result<js_sys::Uint8Array, JsValue> {
+        self.ensure_usable()?;
+        let paged = self.inner.borrow().paged;
+        if !paged {
+            return self.export_graph();
+        }
+
+        let guarded = self.begin_paged_read()?;
+        let result = self.export_graph_from_idb().await;
+        if guarded {
+            self.finish_paged_read();
+        }
+        result
+    }
+
+    async fn export_graph_from_idb(&self) -> Result<js_sys::Uint8Array, JsValue> {
+        let (idb, mut verifier) = {
+            let inner = self.inner.borrow();
+            let verifier = inner
+                .pfs
+                .begin_browser_export_verification()
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            let idb = inner
+                .idb
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("paged export is missing its IndexedDB source"))?
+                .clone_handle();
+            (idb, verifier)
+        };
+        let page_count = verifier.published_page_count();
+
+        let capacity = usize::try_from(page_count)
+            .ok()
+            .and_then(|count| count.checked_mul(crate::storage::PAGE_SIZE))
+            .ok_or_else(|| JsValue::from_str("published graph size exceeds addressable memory"))?;
+        let mut blob = Vec::with_capacity(capacity);
+        let mut start = 0u64;
+        while start < page_count {
+            let count = (page_count - start).min(BROWSER_IDB_BATCH_PAGES);
+            let pages = idb.load_page_range(start, count).await?;
+            {
+                let inner = self.inner.borrow();
+                inner
+                    .pfs
+                    .verify_browser_export_batch(&mut verifier, &pages)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            }
+            for (_, page) in pages {
+                blob.extend_from_slice(&page);
+            }
+            start = start
+                .checked_add(count)
+                .ok_or_else(|| JsValue::from_str("published graph page range overflow"))?;
+        }
+        verifier
+            .finish()
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         Ok(js_sys::Uint8Array::from(blob.as_slice()))
     }
 
@@ -428,12 +608,14 @@ impl BrowserDb {
         // selected state with no valid predecessor still fails below.
         let complete_len = bytes.len() - (bytes.len() % crate::storage::PAGE_SIZE);
 
-        let mut pages = std::collections::HashMap::new();
-        for (i, chunk) in bytes[..complete_len]
-            .chunks(crate::storage::PAGE_SIZE)
-            .enumerate()
-        {
-            pages.insert(i as u64, chunk.to_vec());
+        let mut pages = HashMap::new();
+        let complete_bytes = bytes
+            .get(..complete_len)
+            .ok_or_else(|| JsValue::from_str("import complete-page range is invalid"))?;
+        for (i, chunk) in complete_bytes.chunks(crate::storage::PAGE_SIZE).enumerate() {
+            let page_id =
+                u64::try_from(i).map_err(|_| JsValue::from_str("import page id exceeds u64"))?;
+            pages.insert(page_id, chunk.to_vec());
         }
 
         // Build the replacement storage locally — no live state is touched yet,
@@ -454,6 +636,36 @@ impl BrowserDb {
             b.take_dirty();
         });
 
+        let open_mode = self.inner.borrow().open_mode;
+        let imported_version = new_pfs
+            .with_backend(|backend| backend.read_page_raw(0))
+            .and_then(|page0| crate::storage::FileHeader::from_bytes(&page0))
+            .map_err(|error| JsValue::from_str(&error.to_string()))?
+            .version;
+        let new_paged = if open_mode.is_paged()
+            && imported_version == crate::storage::FORMAT_VERSION
+        {
+            configure_sparse_authority(&mut new_pfs)?;
+            new_pfs.with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
+            true
+        } else if open_mode.is_paged()
+            && imported_version
+                == crate::storage::header_extension::LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
+        {
+            // A physically truncated v10 image may legitimately recover the
+            // previous manifest but cannot gain v11 per-page integrity without
+            // filling published holes. Preserve that exact read-only recovery
+            // state eagerly; a later clean import/maintenance can return this
+            // handle to sparse mode because `open_mode` remains Paged.
+            false
+        } else if open_mode.is_paged() {
+            return Err(JsValue::from_str(&format!(
+                "openPaged import cannot represent recovered format v{imported_version} as bounded authority",
+            )));
+        } else {
+            false
+        };
+
         // Durable replace commits BEFORE the live handle switches. If it fails,
         // the single IDB transaction rolls back and the live state was never
         // touched, so memory and IndexedDB stay consistent on the old database.
@@ -470,6 +682,7 @@ impl BrowserDb {
         let mut inner = self.inner.borrow_mut();
         inner.pfs = new_pfs;
         inner.fact_storage = new_fact_storage;
+        inner.paged = new_paged;
         Ok(())
     }
 }
@@ -487,7 +700,41 @@ impl BrowserDb {
                 "BrowserDb mutation is awaiting durability; await it before querying or exporting from this handle",
             ));
         }
+        if inner.paged_read_in_flight {
+            return Err(JsValue::from_str(
+                "BrowserDb paged read is awaiting IndexedDB; await it before starting another operation on this handle",
+            ));
+        }
         Ok(())
+    }
+
+    /// Mark an async paged read in flight. Eager/in-memory reads stay entirely
+    /// synchronous and need no guard because JavaScript cannot interleave them.
+    fn begin_paged_read(&self) -> Result<bool, JsValue> {
+        let mut inner = self.inner.borrow_mut();
+        if !inner.paged {
+            return Ok(false);
+        }
+        if inner.durability_poisoned {
+            return Err(JsValue::from_str(
+                "BrowserDb durability state is uncertain after a failed write; discard this handle and reopen",
+            ));
+        }
+        if inner.mutation_in_flight || inner.paged_read_in_flight {
+            return Err(JsValue::from_str(
+                "BrowserDb operation already in progress; await it before starting a paged read",
+            ));
+        }
+        inner.paged_read_in_flight = true;
+        Ok(true)
+    }
+
+    fn finish_paged_read(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.paged_read_in_flight = false;
+        inner
+            .pfs
+            .with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
     }
 
     fn begin_mutation(&self) -> Result<(), JsValue> {
@@ -500,6 +747,11 @@ impl BrowserDb {
         if inner.mutation_in_flight {
             return Err(JsValue::from_str(
                 "BrowserDb mutation already in progress; await it before starting another write, checkpoint, import, or maintenance call",
+            ));
+        }
+        if inner.paged_read_in_flight {
+            return Err(JsValue::from_str(
+                "BrowserDb paged read is awaiting IndexedDB; await it before starting a mutation",
             ));
         }
         inner.mutation_in_flight = true;
@@ -517,6 +769,117 @@ impl BrowserDb {
         inner.mutation_advanced = false;
     }
 
+    async fn execute_read_command(&self, command: DatalogCommand) -> Result<QueryResult, JsValue> {
+        if matches!(
+            &command,
+            DatalogCommand::Query(query) if QueryAccessPlan::for_query(query).is_full_scan()
+        ) {
+            self.prefetch_full_scan_pages().await?;
+        }
+
+        let mut requested = HashSet::new();
+        loop {
+            let result = {
+                let inner = self.inner.borrow();
+                DatalogExecutor::new_with_rules_and_functions(
+                    inner.fact_storage.clone(),
+                    inner.rules.clone(),
+                    inner.functions.clone(),
+                )
+                .execute(command.clone())
+            };
+            match result {
+                Ok(result) => return Ok(result),
+                Err(error) => match page_not_resident_id(&error) {
+                    Some(page_id) => {
+                        if !requested.insert(page_id) {
+                            return Err(JsValue::from_str(&format!(
+                                "paged query requested page {page_id} again after it was staged"
+                            )));
+                        }
+                        self.fetch_and_stage_page(page_id).await?;
+                    }
+                    None => return Err(JsValue::from_str(&error.to_string())),
+                },
+            }
+        }
+    }
+
+    async fn fetch_and_stage_page(&self, page_id: u64) -> Result<(), JsValue> {
+        let idb = self
+            .inner
+            .borrow()
+            .idb
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("paged read is missing its IndexedDB source"))?
+            .clone_handle();
+        let page = idb.load_page(page_id).await?;
+        self.verify_and_stage_pages(vec![(page_id, page)])
+    }
+
+    fn verify_and_stage_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> Result<(), JsValue> {
+        {
+            let inner = self.inner.borrow();
+            for (page_id, page) in &pages {
+                inner
+                    .pfs
+                    .verify_browser_fetched_page(*page_id, page)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            }
+        }
+        self.inner
+            .borrow_mut()
+            .pfs
+            .with_backend_mut(|backend| backend.stage_clean_pages(pages))
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    async fn prefetch_full_scan_pages(&self) -> Result<(), JsValue> {
+        let (idb, range) = {
+            let inner = self.inner.borrow();
+            if !inner.paged {
+                return Ok(());
+            }
+            let logical_page_count = inner
+                .pfs
+                .with_backend(BrowserBufferBackend::page_count_raw)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            if logical_page_count == 0 {
+                return Ok(());
+            }
+            let range = inner
+                .pfs
+                .browser_base_fact_range()
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            let idb = inner
+                .idb
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("paged scan is missing its IndexedDB source"))?
+                .clone_handle();
+            (idb, range)
+        };
+
+        let mut start = range.start_page();
+        while start < range.end_page() {
+            let count = (range.end_page() - start).min(BROWSER_IDB_BATCH_PAGES);
+            let pages = idb.load_page_range(start, count).await?;
+            self.verify_and_stage_pages(pages)?;
+            start = start
+                .checked_add(count)
+                .ok_or_else(|| JsValue::from_str("full-scan page range overflow"))?;
+        }
+        Ok(())
+    }
+
+    fn evict_sparse_staging(&self) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.paged {
+            inner
+                .pfs
+                .with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
+        }
+    }
+
     async fn flush_dirty_pages_or_restore(
         &self,
         idb: IndexedDbBackend,
@@ -527,31 +890,18 @@ impl BrowserDb {
             Err(error) => error,
         };
 
-        // IndexedDB readwrite transactions are atomic. If the failed commit
-        // can still be read, reconstruct the live PFS from that previous
-        // durable image before rejecting the operation. This makes quota and
-        // transaction-abort failures rejected-before-application from the
-        // caller's next observable state.
-        let durable_pages = idb.load_all_pages().await.map_err(|recovery_error| {
-            JsValue::from_str(&format!(
-                "IndexedDB write failed and durable-state reload also failed: write={}; reload={}",
-                js_value_message(&write_error),
-                js_value_message(&recovery_error),
-            ))
-        })?;
-        let buffer = BrowserBufferBackend::load_pages(durable_pages);
-        let mut restored = PersistentFactStorage::new(buffer, 256).map_err(|recovery_error| {
-            JsValue::from_str(&format!(
-                "IndexedDB write failed and previous durable graph could not be reopened: write={}; reopen={recovery_error}",
-                js_value_message(&write_error),
-            ))
-        })?;
-        restored
-            .with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
+        // IndexedDB readwrite transactions are atomic. Reopen the previous
+        // durable image through the same mode as the live handle. The paged
+        // path deliberately reloads only v11 authority metadata, so a rejected
+        // write on a 1M graph cannot regress to an O(total) recovery copy.
+        let mode = self.inner.borrow().open_mode;
+        let (restored, restored_paged) = open_persistent_storage(&idb, mode)
+            .await
             .map_err(|recovery_error| {
                 JsValue::from_str(&format!(
-                    "IndexedDB write failed and previous durable prefix was invalid: write={}; reopen={recovery_error}",
+                    "IndexedDB write failed and previous durable graph could not be reopened: write={}; reopen={}",
                     js_value_message(&write_error),
+                    js_value_message(&recovery_error),
                 ))
             })?;
         let restored_storage = restored.storage().clone();
@@ -559,6 +909,7 @@ impl BrowserDb {
         let mut inner = self.inner.borrow_mut();
         inner.pfs = restored;
         inner.fact_storage = restored_storage;
+        inner.paged = restored_paged;
         inner.mutation_failure_rolled_back = true;
         drop(inner);
         Err(write_error)
@@ -591,7 +942,7 @@ impl BrowserDb {
                     f.tx_id = tx_id;
                     f.tx_count = tx_count;
                     if f.valid_from == VALID_FROM_USE_TX_TIME {
-                        f.valid_from = tx_id as i64;
+                        f.valid_from = tx_id.cast_signed();
                     }
                     f
                 })
@@ -609,9 +960,11 @@ impl BrowserDb {
                 .pfs
                 .save()
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
             // Collect dirty pages as owned Vec<(u64, Vec<u8>)> — no borrows escape
             let dirty_pages = take_dirty_pages(&mut inner.pfs)?;
+            if inner.paged {
+                configure_sparse_authority(&mut inner.pfs)?;
+            }
 
             let decision = inner.pfs.delta_maintenance_decision();
             let durability = if inner.idb.is_some() {
@@ -634,7 +987,10 @@ impl BrowserDb {
             } else {
                 "transacted"
             };
-            json[result_key] = serde_json::json!(tx_id);
+            let object = json
+                .as_object_mut()
+                .ok_or_else(|| JsValue::from_str("browser write result is not a JSON object"))?;
+            object.insert(result_key.to_string(), serde_json::json!(tx_id));
 
             (dirty_pages, json.to_string())
         };
@@ -653,8 +1009,282 @@ impl BrowserDb {
             }
         }
 
+        self.evict_sparse_staging();
+
         Ok(result_json)
     }
+}
+
+async fn open_persistent_storage(
+    idb: &IndexedDbBackend,
+    mode: BrowserOpenMode,
+) -> Result<(PersistentFactStorage<BrowserBufferBackend>, bool), JsValue> {
+    let Some(page0) = idb.load_page_if_present(0).await? else {
+        let numeric_pages = idb.count_numeric_pages().await?;
+        if numeric_pages != 0 {
+            return Err(JsValue::from_str(
+                "IndexedDB contains page records but published page 0 is missing",
+            ));
+        }
+        let page0 =
+            crate::storage::header_extension::build_header_page(crate::storage::FileHeader::new())
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        idb.replace_all_pages(vec![(0, page0.clone())]).await?;
+        let buffer = if mode.is_paged() {
+            BrowserBufferBackend::load_sparse_pages(
+                HashMap::from([(0, page0)]),
+                1,
+                HashSet::from([0]),
+            )
+        } else {
+            Ok(BrowserBufferBackend::load_pages(HashMap::from([(
+                0, page0,
+            )])))
+        }
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let pfs = PersistentFactStorage::new(buffer, 256)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        return Ok((pfs, mode.is_paged()));
+    };
+
+    let header = crate::storage::FileHeader::from_bytes(&page0)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if header.version == crate::storage::FORMAT_VERSION {
+        match open_v11_sparse_storage(idb, page0).await {
+            Ok(mut pfs) => {
+                if mode == BrowserOpenMode::EagerCompatibility {
+                    prefetch_eager_compatibility_pages(idb, &mut pfs).await?;
+                }
+                return Ok((pfs, mode.is_paged()));
+            }
+            Err(error) if mode == BrowserOpenMode::EagerCompatibility => {
+                // Preserve the published eager API for unusual but valid
+                // metadata footprints outside the bounded paged policy. Both
+                // paths still construct the same PersistentFactStorage core.
+                let _ = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    open_eager_or_migrate_storage(idb, mode).await
+}
+
+async fn open_v11_sparse_storage(
+    idb: &IndexedDbBackend,
+    page0: Vec<u8>,
+) -> Result<PersistentFactStorage<BrowserBufferBackend>, JsValue> {
+    let plan = BrowserV11BootstrapPlan::from_page0(&page0)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut pages = HashMap::from([(0u64, page0)]);
+    let mut pinned = HashSet::from([0u64]);
+
+    for range in plan.required_ranges() {
+        let loaded = load_required_range(idb, *range).await?;
+        insert_bootstrap_pages(&mut pages, &mut pinned, loaded);
+    }
+    for candidate in plan.manifest_candidates() {
+        if let Some(loaded) = load_optional_range(idb, candidate.manifest_range()).await? {
+            insert_bootstrap_pages(&mut pages, &mut pinned, loaded);
+        }
+    }
+
+    let mut backend =
+        BrowserBufferBackend::load_sparse_pages(pages, plan.published_page_count(), pinned)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let resident_plan = plan
+        .plan_resident_metadata(&backend)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+    for range in resident_plan.candidate_segment_ranges() {
+        if let Some(loaded) = load_optional_range(idb, range).await? {
+            for (page_id, page) in &loaded {
+                resident_plan
+                    .verify_fetched_published_page(*page_id, page)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            }
+            backend
+                .stage_clean_pages(loaded)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        }
+    }
+
+    let pins = authority_pin_ids(&plan, &resident_plan, &backend);
+    backend
+        .replace_pinned_pages(pins)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    PersistentFactStorage::new(backend, 256).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+async fn open_eager_or_migrate_storage(
+    idb: &IndexedDbBackend,
+    mode: BrowserOpenMode,
+) -> Result<(PersistentFactStorage<BrowserBufferBackend>, bool), JsValue> {
+    let existing = idb.load_all_pages().await?;
+    let existing_page_count = u64::try_from(existing.len())
+        .map_err(|_| JsValue::from_str("IndexedDB page count exceeds u64"))?;
+    let buffer = BrowserBufferBackend::load_pages(existing);
+    let mut pfs = PersistentFactStorage::new(buffer, 256)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let declared_page_count = pfs
+        .with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let migration_pages = take_dirty_pages(&mut pfs)?;
+    if !migration_pages.is_empty() {
+        if declared_page_count < existing_page_count {
+            let published_pages = pfs.with_backend(BrowserBufferBackend::all_pages);
+            idb.replace_all_pages(published_pages).await?;
+        } else {
+            idb.write_pages(migration_pages).await?;
+        }
+    }
+
+    let became_sparse = if mode.is_paged() {
+        configure_sparse_authority(&mut pfs).map_err(|error| {
+            JsValue::from_str(&format!(
+                "openPaged cannot silently fall back to eager residency: {}",
+                js_value_message(&error),
+            ))
+        })?;
+        pfs.with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
+        true
+    } else {
+        false
+    };
+    Ok((pfs, became_sparse))
+}
+
+async fn prefetch_eager_compatibility_pages(
+    idb: &IndexedDbBackend,
+    pfs: &mut PersistentFactStorage<BrowserBufferBackend>,
+) -> Result<(), JsValue> {
+    let published_page_count = pfs
+        .browser_published_page_count()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let present = idb.load_all_pages().await?;
+    let complete_pages = present.into_iter().filter(|(page_id, page)| {
+        *page_id < published_page_count && page.len() == crate::storage::PAGE_SIZE
+    });
+    pfs.with_backend_mut(|backend| backend.stage_clean_pages(complete_pages))
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+async fn load_required_range(
+    idb: &IndexedDbBackend,
+    range: BrowserPageRange,
+) -> Result<Vec<(u64, Vec<u8>)>, JsValue> {
+    let mut loaded = Vec::new();
+    let mut start = range.start_page();
+    while start < range.end_page() {
+        let count = (range.end_page() - start).min(BROWSER_IDB_BATCH_PAGES);
+        loaded.extend(idb.load_page_range(start, count).await?);
+        start = start
+            .checked_add(count)
+            .ok_or_else(|| JsValue::from_str("required browser page range overflow"))?;
+    }
+    Ok(loaded)
+}
+
+async fn load_optional_range(
+    idb: &IndexedDbBackend,
+    range: BrowserPageRange,
+) -> Result<Option<Vec<(u64, Vec<u8>)>>, JsValue> {
+    let mut loaded = Vec::new();
+    let mut start = range.start_page();
+    while start < range.end_page() {
+        let count = (range.end_page() - start).min(BROWSER_IDB_BATCH_PAGES);
+        let Some(chunk) = idb.load_page_range_if_complete(start, count).await? else {
+            return Ok(None);
+        };
+        loaded.extend(chunk);
+        start = start
+            .checked_add(count)
+            .ok_or_else(|| JsValue::from_str("optional browser page range overflow"))?;
+    }
+    Ok(Some(loaded))
+}
+
+fn insert_bootstrap_pages(
+    pages: &mut HashMap<u64, Vec<u8>>,
+    pinned: &mut HashSet<u64>,
+    loaded: Vec<(u64, Vec<u8>)>,
+) {
+    for (page_id, page) in loaded {
+        pages.insert(page_id, page);
+        pinned.insert(page_id);
+    }
+}
+
+fn authority_pin_ids(
+    plan: &BrowserV11BootstrapPlan,
+    resident_plan: &crate::storage::persistent_facts::BrowserV11ResidentPlan,
+    backend: &BrowserBufferBackend,
+) -> HashSet<u64> {
+    let mut pins = HashSet::from([0u64]);
+    for range in plan.required_ranges() {
+        insert_resident_range_ids(&mut pins, *range, backend);
+    }
+    for candidate in resident_plan.manifest_candidates() {
+        insert_resident_range_ids(&mut pins, candidate.manifest_range(), backend);
+        for range in candidate.segment_ranges() {
+            insert_resident_range_ids(&mut pins, *range, backend);
+        }
+    }
+    pins
+}
+
+fn insert_resident_range_ids(
+    pins: &mut HashSet<u64>,
+    range: BrowserPageRange,
+    backend: &BrowserBufferBackend,
+) {
+    for page_id in range.start_page()..range.end_page() {
+        if backend.is_page_resident(page_id) {
+            pins.insert(page_id);
+        }
+    }
+}
+
+fn configure_sparse_authority(
+    pfs: &mut PersistentFactStorage<BrowserBufferBackend>,
+) -> Result<(), JsValue> {
+    let logical_page_count = pfs
+        .with_backend(BrowserBufferBackend::page_count_raw)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if logical_page_count == 0 {
+        return Ok(());
+    }
+    let page0 = pfs
+        .with_backend(|backend| backend.read_page_raw(0))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let plan = BrowserV11BootstrapPlan::from_page0(&page0)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let selected_manifest = pfs
+        .browser_selected_manifest_identity()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let pins = pfs.with_backend(|backend| {
+        let resident_plan = plan.plan_resident_metadata(backend)?;
+        if let Some((selected_slot, selected_generation)) = selected_manifest
+            && !resident_plan.manifest_candidates().iter().any(|candidate| {
+                candidate.slot() == selected_slot
+                    && candidate.generation() == selected_generation
+            })
+        {
+            anyhow::bail!(
+                "Bounded browser planner does not retain the manifest lineage selected by the persistent loader"
+            );
+        }
+        Ok::<_, anyhow::Error>(authority_pin_ids(&plan, &resident_plan, backend))
+    });
+    let pins = pins.map_err(|error| JsValue::from_str(&error.to_string()))?;
+    pfs.with_backend_mut(|backend| {
+        if backend.is_sparse() {
+            backend.replace_pinned_pages(pins)
+        } else {
+            backend.configure_sparse_residency(pins).map(|_| ())
+        }
+    })
+    .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 // ── JSON serialisation helpers (free functions, not exported to WASM) ────────
@@ -739,6 +1369,27 @@ mod tests {
             .collect()
     }
 
+    async fn build_sparse_v11_fixture(fact_count: usize) -> Vec<u8> {
+        let source = BrowserDb::open_in_memory().expect("open sparse fixture source");
+        let mut tuples = Vec::with_capacity(fact_count);
+        for index in 0..fact_count {
+            let entity = if index == fact_count / 2 {
+                ":sparse/target".to_string()
+            } else {
+                format!(":sparse/e{index}")
+            };
+            tuples.push(format!("[{entity} :sparse/value {index}]"));
+        }
+        source
+            .execute(format!("(transact [{}])", tuples.join(" ")))
+            .await
+            .expect("write sparse fixture facts");
+        source
+            .export_graph()
+            .expect("export sparse fixture")
+            .to_vec()
+    }
+
     fn page_map_version(pages: &std::collections::HashMap<u64, Vec<u8>>) -> u32 {
         let page0 = pages.get(&0).expect("page map must contain page 0");
         u32::from_le_bytes(page0[4..8].try_into().unwrap())
@@ -816,6 +1467,509 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn paged_open_and_selective_query_are_bounded_and_warm() {
+        let bytes = build_sparse_v11_fixture(400).await;
+        let plan = BrowserV11BootstrapPlan::from_page0(&bytes[..crate::storage::PAGE_SIZE])
+            .expect("plan sparse fixture");
+        assert!(
+            plan.base_covered_range().page_count() > 4,
+            "fixture needs multiple immutable base pages"
+        );
+
+        let db_name = format!("vicia-paged-selective-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open paged seed IDB");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed paged fixture");
+        idb.reset_read_counters_for_test();
+
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open paged fixture");
+        let open_counts = idb.read_counters_for_test();
+        assert_eq!(open_counts.full_store_reads, 0);
+        {
+            let inner = db.inner.borrow();
+            assert!(inner.paged);
+            inner.pfs.with_backend(|backend| {
+                assert!(backend.is_sparse());
+                assert!(
+                    backend.resident_page_count()
+                        < usize::try_from(plan.published_page_count()).unwrap(),
+                    "paged open must not retain the complete graph"
+                );
+                for page_id in
+                    plan.base_covered_range().start_page()..plan.base_covered_range().end_page()
+                {
+                    assert!(
+                        !backend.is_page_resident(page_id),
+                        "paged open must not fetch immutable base page {page_id}"
+                    );
+                }
+            });
+        }
+
+        let query = "(query [:find ?v :where [:sparse/target :sparse/value ?v]])";
+        let cold = db
+            .execute(query.to_string())
+            .await
+            .expect("cold selective paged query");
+        let cold: serde_json::Value = serde_json::from_str(&cold).expect("cold query JSON");
+        assert_eq!(cold["results"], serde_json::json!([[200]]));
+        let cold_counts = idb.read_counters_for_test();
+        assert!(
+            cold_counts.pages_returned > open_counts.pages_returned,
+            "cold selective query must fetch its index/fact pages"
+        );
+        assert_eq!(cold_counts.full_store_reads, 0);
+
+        let warm = db
+            .execute(query.to_string())
+            .await
+            .expect("warm selective paged query");
+        let warm: serde_json::Value = serde_json::from_str(&warm).expect("warm query JSON");
+        assert_eq!(warm, cold);
+        let warm_counts = idb.read_counters_for_test();
+        assert_eq!(
+            warm_counts.pages_returned, cold_counts.pages_returned,
+            "warm repeat must be served by the bounded core page cache"
+        );
+        let inner = db.inner.borrow();
+        inner.pfs.with_backend(|backend| {
+            assert_eq!(
+                backend.resident_page_count(),
+                backend.pinned_page_count(),
+                "operation staging pages must be released after the query"
+            );
+        });
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_query_detects_lazy_base_corruption_and_async_export_is_exact() {
+        let bytes = build_sparse_v11_fixture(300).await;
+        let plan = BrowserV11BootstrapPlan::from_page0(&bytes[..crate::storage::PAGE_SIZE])
+            .expect("plan corruption fixture");
+        let fact_page = plan.base_fact_range().start_page();
+        let mut corrupted = bytes.clone();
+        let byte_offset = usize::try_from(fact_page)
+            .expect("fact page fits usize")
+            .checked_mul(crate::storage::PAGE_SIZE)
+            .and_then(|offset| offset.checked_add(crate::storage::PAGE_SIZE - 1))
+            .expect("fact page byte offset");
+        corrupted[byte_offset] ^= 0x01;
+
+        let corrupt_name = format!("vicia-paged-corrupt-{}", js_sys::Date::now());
+        let corrupt_idb = IndexedDbBackend::open(&corrupt_name)
+            .await
+            .expect("open corrupt seed");
+        corrupt_idb
+            .replace_all_pages(fixture_pages(&corrupted))
+            .await
+            .expect("seed corrupt base page");
+        let corrupt_db = BrowserDb::open_paged_from_idb(corrupt_idb.clone_handle())
+            .await
+            .expect("catalog-only open must defer base-page verification");
+        let corrupt_query = corrupt_db
+            .execute("(query [:find ?v :where [:sparse/e0 :sparse/value ?v]])".to_string())
+            .await;
+        assert!(
+            corrupt_query.is_err(),
+            "first query touching the corrupt fact page must fail closed"
+        );
+        assert!(
+            corrupt_db.export_graph_async().await.is_err(),
+            "async export must reject a corrupt immutable base page"
+        );
+
+        let exact_name = format!("vicia-paged-export-{}", js_sys::Date::now());
+        let exact_idb = IndexedDbBackend::open(&exact_name)
+            .await
+            .expect("open exact seed");
+        exact_idb
+            .replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed exact graph");
+        exact_idb.reset_read_counters_for_test();
+        let exact_db = BrowserDb::open_paged_from_idb(exact_idb.clone_handle())
+            .await
+            .expect("open exact paged graph");
+        assert!(
+            exact_db.export_graph().is_err(),
+            "sync export must not pretend absent paged bytes are complete"
+        );
+        let exported = exact_db
+            .export_graph_async()
+            .await
+            .expect("async paged export")
+            .to_vec();
+        assert_eq!(exported, bytes);
+        assert_eq!(
+            exact_idb.read_counters_for_test().full_store_reads,
+            0,
+            "async export must use bounded range reads, not legacy get-all"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_async_export_rejects_post_open_selected_metadata_corruption() {
+        let base = build_sparse_v11_fixture(220).await;
+        let source = BrowserDb::open_in_memory().expect("open delta export source");
+        source
+            .import_graph(js_sys::Uint8Array::from(base.as_slice()))
+            .await
+            .expect("import base export fixture");
+        source
+            .execute("(transact [[:sparse/delta :value 999]])".to_string())
+            .await
+            .expect("append selected delta lineage");
+        let bytes = source
+            .export_graph()
+            .expect("export selected delta fixture")
+            .to_vec();
+
+        let db_name = format!("vicia-paged-export-metadata-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open metadata corruption seed");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed selected delta fixture");
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open selected delta fixture paged");
+        let authority_ranges = {
+            let inner = db.inner.borrow();
+            inner
+                .pfs
+                .begin_browser_export_verification()
+                .expect("plan export authority")
+                .exact_resident_ranges_for_test()
+                .to_vec()
+        };
+        assert!(
+            authority_ranges.len() >= 3,
+            "fixture must pin catalog, selected segment, and selected manifest ranges"
+        );
+
+        for range in authority_ranges {
+            let page_id = range.start_page();
+            let original = idb
+                .load_page(page_id)
+                .await
+                .expect("load selected authority page");
+            let mut corrupt = original.clone();
+            corrupt[crate::storage::PAGE_SIZE - 1] ^= 0x01;
+            idb.overwrite_page_without_authority_for_test(page_id, &corrupt)
+                .await
+                .expect("corrupt selected authority without page-0 publish");
+            let error = db
+                .export_graph_async()
+                .await
+                .expect_err("selected metadata corruption must fail export");
+            assert!(
+                js_value_message(&error).contains("authority page"),
+                "metadata corruption must fail at the selected authority boundary: {}",
+                js_value_message(&error)
+            );
+            idb.overwrite_page_without_authority_for_test(page_id, &original)
+                .await
+                .expect("restore selected authority page");
+        }
+
+        assert_eq!(
+            db.export_graph_async()
+                .await
+                .expect("restored authority exports")
+                .to_vec(),
+            bytes
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_failed_write_restores_sparse_authority_without_full_reload() {
+        let bytes = build_sparse_v11_fixture(250).await;
+        let db_name = format!("vicia-paged-write-abort-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open abort seed");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed abort graph");
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open paged abort graph");
+        idb.reset_read_counters_for_test();
+        idb.fail_next_write_for_test();
+
+        let rejected = db
+            .execute("(transact [[:sparse/rejected :value 999]])".to_string())
+            .await;
+        let rejected = rejected.expect_err("injected IDB abort must reject write");
+        assert!(
+            !js_value_message(&rejected).contains("could not be reopened"),
+            "paged rollback must reopen the old authority: {}",
+            js_value_message(&rejected)
+        );
+        assert!(
+            js_value_message(&rejected).contains("injected IndexedDB"),
+            "write must reach the injected IDB abort after sparse save preparation: {}",
+            js_value_message(&rejected)
+        );
+        let old = db
+            .execute("(query [:find ?v :where [:sparse/target :sparse/value ?v]])".to_string())
+            .await
+            .expect("restored old query");
+        let old: serde_json::Value = serde_json::from_str(&old).expect("old query JSON");
+        assert_eq!(old["results"], serde_json::json!([[125]]));
+        let rejected_fact = db
+            .execute("(query [:find ?v :where [:sparse/rejected :value ?v]])".to_string())
+            .await
+            .expect("query rejected fact");
+        let rejected_fact: serde_json::Value =
+            serde_json::from_str(&rejected_fact).expect("rejected query JSON");
+        assert_eq!(rejected_fact["results"], serde_json::json!([]));
+        assert_eq!(
+            idb.read_counters_for_test().full_store_reads,
+            0,
+            "paged rollback must reopen authority metadata without full-store reload"
+        );
+        let inner = db.inner.borrow();
+        assert!(!inner.durability_poisoned);
+        inner
+            .pfs
+            .with_backend(|backend| assert!(backend.is_sparse()));
+    }
+
+    #[wasm_bindgen_test]
+    async fn independent_paged_handle_rejects_newer_publication_before_replace_or_write() {
+        let db_name = format!("vicia-paged-stale-handle-{}", js_sys::Date::now());
+        let seed = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open stale-handle seed");
+        seed.execute("(transact [[:stable :value 1]])".to_string())
+            .await
+            .expect("publish initial graph");
+        let old_blob = seed
+            .export_graph_async()
+            .await
+            .expect("export initial graph");
+        drop(seed);
+
+        let stale = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open future stale handle");
+        let writer = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open independent writer");
+        writer
+            .execute("(transact [[:newer :value 2]])".to_string())
+            .await
+            .expect("publish newer graph");
+
+        let export_error = stale
+            .export_graph_async()
+            .await
+            .expect_err("stale async export must reject");
+        assert!(js_value_message(&export_error).contains("reopen"));
+        let import_error = stale
+            .import_graph(old_blob)
+            .await
+            .expect_err("stale replace must abort before clear");
+        assert!(js_value_message(&import_error).contains("reopen"));
+        let write_error = stale
+            .execute("(transact [[:stale :value 3]])".to_string())
+            .await
+            .expect_err("stale writer must not extend newer authority");
+        assert!(js_value_message(&write_error).contains("reopen"));
+
+        drop(stale);
+        drop(writer);
+        let reopened = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("reopen current authority");
+        let newer = reopened
+            .execute("(query [:find ?v :where [:newer :value ?v]])".to_string())
+            .await
+            .expect("query newer publication");
+        let newer: serde_json::Value = serde_json::from_str(&newer).expect("newer JSON");
+        assert_eq!(newer["results"], serde_json::json!([[2]]));
+        let stale_rows = reopened
+            .execute("(query [:find ?v :where [:stale :value ?v]])".to_string())
+            .await
+            .expect("query rejected stale publication");
+        let stale_rows: serde_json::Value = serde_json::from_str(&stale_rows).expect("stale JSON");
+        assert_eq!(stale_rows["results"], serde_json::json!([]));
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_import_converges_to_sparse_live_state() {
+        let bytes = build_sparse_v11_fixture(350).await;
+        let db_name = format!("vicia-paged-import-{}", js_sys::Date::now());
+        let db = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open empty paged import target");
+        db.import_graph(js_sys::Uint8Array::from(bytes.as_slice()))
+            .await
+            .expect("import into paged target");
+        {
+            let inner = db.inner.borrow();
+            inner.pfs.with_backend(|backend| {
+                assert!(backend.is_sparse());
+                assert_eq!(backend.resident_page_count(), backend.pinned_page_count());
+                assert!(
+                    u64::try_from(backend.resident_page_count()).unwrap()
+                        < backend.page_count_raw().unwrap(),
+                    "successful import must not retain the full input image"
+                );
+            });
+        }
+        let result = db
+            .execute("(query [:find ?v :where [:sparse/target :sparse/value ?v]])".to_string())
+            .await
+            .expect("lazy query after paged import");
+        let result: serde_json::Value = serde_json::from_str(&result).expect("import query JSON");
+        assert_eq!(result["results"], serde_json::json!([[175]]));
+        assert_eq!(
+            db.export_graph_async()
+                .await
+                .expect("async export after paged import")
+                .to_vec(),
+            bytes
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_successive_writes_and_forget_remain_atomic_after_reopen() {
+        let bytes = build_sparse_v11_fixture(220).await;
+        let db_name = format!("vicia-paged-writes-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open successive-write seed");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed successive-write graph");
+        let db = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open successive-write paged graph");
+
+        let write: serde_json::Value = serde_json::from_str(
+            &db.execute("(transact [[:paged/new :state :active]])".to_string())
+                .await
+                .expect("paged append"),
+        )
+        .expect("paged append JSON");
+        let write_tx = write["tx_count"].as_u64().expect("write tx_count");
+        let forget: serde_json::Value = serde_json::from_str(
+            &db.execute("(forget [[:paged/new :state :active]])".to_string())
+                .await
+                .expect("paged forget"),
+        )
+        .expect("paged forget JSON");
+        assert_eq!(forget["forgotten"], 1);
+        assert_eq!(forget["tx_count"].as_u64(), Some(write_tx + 1));
+
+        let current = db
+            .execute("(query [:find ?v :where [:paged/new :state ?v]])".to_string())
+            .await
+            .expect("current after forget");
+        let current: serde_json::Value = serde_json::from_str(&current).expect("current JSON");
+        assert_eq!(current["results"], serde_json::json!([]));
+        drop(db);
+
+        let reopened = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("reopen successive-write graph");
+        let historical = reopened
+            .execute(format!(
+                "(query [:find ?v :as-of {write_tx} :where [:paged/new :state ?v]])"
+            ))
+            .await
+            .expect("historical after reopen");
+        let historical: serde_json::Value =
+            serde_json::from_str(&historical).expect("historical JSON");
+        assert_eq!(
+            historical["results"],
+            serde_json::json!([[{"$kw": ":active"}]])
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_explicit_full_scan_releases_bulk_staging() {
+        let bytes = build_sparse_v11_fixture(180).await;
+        let db_name = format!("vicia-paged-full-scan-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open full-scan seed");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed full-scan graph");
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open full-scan paged graph");
+        idb.reset_read_counters_for_test();
+
+        let result = db
+            .execute("(query [:find ?e :where [?e ?a ?v]])".to_string())
+            .await
+            .expect("explicit full scan");
+        let result: serde_json::Value = serde_json::from_str(&result).expect("full scan JSON");
+        assert_eq!(result["results"].as_array().map(Vec::len), Some(180));
+        assert!(idb.read_counters_for_test().pages_returned > 0);
+        let inner = db.inner.borrow();
+        inner.pfs.with_backend(|backend| {
+            assert_eq!(backend.resident_page_count(), backend.pinned_page_count());
+        });
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_forced_maintenance_returns_to_sparse_residency() {
+        let bytes = build_sparse_v11_fixture(240).await;
+        let db_name = format!("vicia-paged-maintenance-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open maintenance seed");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed maintenance graph");
+        let db = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open paged maintenance graph");
+        for index in 0..4 {
+            db.execute(format!("(transact [[:paged/delta-{index} :n {index}]])"))
+                .await
+                .expect("append maintenance delta");
+        }
+
+        db.begin_mutation().expect("force maintenance guard");
+        let result = maintenance::run_idle_maintenance(&db, true).await;
+        db.finish_mutation(false);
+        db.evict_sparse_staging();
+        let result = result.expect("forced paged maintenance");
+        let result: serde_json::Value = serde_json::from_str(&result).expect("maintenance JSON");
+        assert_eq!(result["delta"], "recompacted");
+        {
+            let inner = db.inner.borrow();
+            inner.pfs.with_backend(|backend| {
+                assert!(backend.is_sparse());
+                assert_eq!(backend.resident_page_count(), backend.pinned_page_count());
+                assert!(
+                    u64::try_from(backend.resident_page_count()).unwrap()
+                        < backend.page_count_raw().unwrap()
+                );
+            });
+        }
+        let query = db
+            .execute("(query [:find ?n :where [:paged/delta-3 :n ?n]])".to_string())
+            .await
+            .expect("query after paged maintenance");
+        let query: serde_json::Value =
+            serde_json::from_str(&query).expect("maintenance query JSON");
+        assert_eq!(query["results"], serde_json::json!([[3]]));
+    }
+
+    #[wasm_bindgen_test]
     async fn gate_e_browser_consumer_matches_both_producers_and_round_trips() {
         let corpus = corpus();
         for source in [NATIVE_FIXTURE, BROWSER_FIXTURE] {
@@ -872,7 +2026,10 @@ mod tests {
             .expect("open must migrate and durably publish v11");
         let corpus = corpus();
         assert_browser_queries(&db, &corpus.queries).await;
-        let durable = seed
+        let durable_inspector = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("reopen migrated inspector");
+        let durable = durable_inspector
             .load_all_pages()
             .await
             .expect("load durable migrated pages");
@@ -889,11 +2046,47 @@ mod tests {
             .await
             .expect("durable v11 graph must reopen");
         assert_browser_queries(&reopened, &corpus.queries).await;
+        let second_open_inspector = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("reopen second-open inspector");
         assert_eq!(
-            seed.load_all_pages().await.expect("load second-open pages"),
+            second_open_inspector
+                .load_all_pages()
+                .await
+                .expect("load second-open pages"),
             durable,
             "second open must not remigrate, grow, or rewrite the v11 image"
         );
+    }
+
+    #[wasm_bindgen_test]
+    async fn open_paged_migrates_complete_v10_then_returns_sparse() {
+        let db_name = format!("vicia-open-paged-v10-migration-{}", js_sys::Date::now());
+        let seed = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open paged migration seed");
+        seed.replace_all_pages(fixture_pages(NATIVE_FIXTURE))
+            .await
+            .expect("seed complete v10 fixture");
+
+        let db = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("complete legacy image must migrate before sparse return");
+        {
+            let inner = db.inner.borrow();
+            assert!(inner.paged);
+            inner
+                .pfs
+                .with_backend(|backend| assert!(backend.is_sparse()));
+        }
+        assert_browser_queries(&db, &corpus().queries).await;
+        let durable = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("inspect paged migration")
+            .load_all_pages()
+            .await
+            .expect("load paged migration image");
+        assert_eq!(page_map_version(&durable), crate::storage::FORMAT_VERSION);
     }
 
     #[wasm_bindgen_test]
@@ -928,8 +2121,16 @@ mod tests {
             .expect("later normal open must still migrate the preserved v10 graph");
         let corpus = corpus();
         assert_browser_queries(&recovered, &corpus.queries).await;
+        let recovered_inspector = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("reopen recovered inspector");
         assert_eq!(
-            page_map_version(&idb.load_all_pages().await.expect("load recovered pages")),
+            page_map_version(
+                &recovered_inspector
+                    .load_all_pages()
+                    .await
+                    .expect("load recovered pages"),
+            ),
             crate::storage::FORMAT_VERSION
         );
     }
@@ -1059,6 +2260,66 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn paged_import_preserves_truncated_legacy_recovery_without_eager_open_downgrade() {
+        let corpus = corpus();
+        let previous_queries: Vec<QueryCase> = corpus
+            .queries
+            .iter()
+            .filter(|query| query.id != "current_retracted_edge_absent")
+            .cloned()
+            .collect();
+        let mut ordinal = 0u32;
+
+        for case in corpus
+            .corruptions
+            .iter()
+            .filter(|case| case.expected == "recover_previous" && !case.exportable)
+        {
+            ordinal += 1;
+            let mutated = apply_mutation(NATIVE_FIXTURE, &case.mutation)
+                .expect("truncated recovery mutation must apply");
+            let db_name = format!(
+                "vicia-paged-truncated-import-{}-{}-{ordinal}",
+                case.id,
+                js_sys::Date::now()
+            );
+            let db = BrowserDb::open_paged(&db_name)
+                .await
+                .expect("open paged recovery target");
+            db.import_graph(js_sys::Uint8Array::from(mutated.as_slice()))
+                .await
+                .expect("paged import must preserve the older recoverable lineage");
+
+            {
+                let inner = db.inner.borrow();
+                assert_eq!(inner.open_mode, BrowserOpenMode::Paged);
+                assert!(
+                    !inner.paged,
+                    "incomplete v10 recovery must remain eager/read-only, never sparse without integrity metadata"
+                );
+            }
+            assert_browser_queries(&db, &previous_queries).await;
+            let probe = case.probe.as_ref().expect("fallback case must carry probe");
+            assert_browser_probe(&db, probe, &case.id).await;
+            assert!(
+                db.export_graph_async().await.is_err(),
+                "a physically incomplete recovered image must remain non-exportable"
+            );
+            drop(db);
+
+            let eager = BrowserDb::open(&db_name)
+                .await
+                .expect("eager compatibility open must preserve legacy recovery");
+            assert_browser_probe(&eager, probe, &case.id).await;
+            drop(eager);
+            assert!(
+                BrowserDb::open_paged(&db_name).await.is_err(),
+                "bounded open must reject instead of silently retaining the entire incomplete legacy image"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
     async fn in_memory_transact_and_query() {
         let db = BrowserDb::open_in_memory().expect("open_in_memory");
         let transact_result = db
@@ -1076,6 +2337,35 @@ mod tests {
         let results = v["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], serde_json::Value::String("Alice".into()));
+    }
+
+    #[wasm_bindgen_test]
+    async fn empty_database_exports_a_canonical_round_trippable_graph() {
+        let memory = BrowserDb::open_in_memory().expect("open empty memory database");
+        let memory_blob = memory
+            .export_graph()
+            .expect("export canonical empty memory graph");
+        assert_eq!(memory_blob.length(), crate::storage::PAGE_SIZE as u32);
+        let memory_round_trip = BrowserDb::open_in_memory().expect("open memory round trip");
+        memory_round_trip
+            .import_graph(memory_blob)
+            .await
+            .expect("reimport canonical empty memory graph");
+
+        let db_name = format!("vicia-empty-paged-export-{}", js_sys::Date::now());
+        let paged = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open empty paged database");
+        let paged_blob = paged
+            .export_graph_async()
+            .await
+            .expect("export canonical empty paged graph");
+        assert_eq!(paged_blob.length(), crate::storage::PAGE_SIZE as u32);
+        let fresh = BrowserDb::open_in_memory().expect("open paged export consumer");
+        fresh
+            .import_graph(paged_blob)
+            .await
+            .expect("reimport canonical empty paged graph");
     }
 
     #[wasm_bindgen_test]
@@ -1376,7 +2666,14 @@ mod tests {
         db.import_graph(blob).await.expect("shrinking import");
 
         // Stale pages gone: IDB holds exactly the imported page set.
-        let count_after = idb.load_all_pages().await.expect("load after").len();
+        let after_inspector = IndexedDbBackend::open(db_name)
+            .await
+            .expect("reopen after import inspector");
+        let count_after = after_inspector
+            .load_all_pages()
+            .await
+            .expect("load after")
+            .len();
         assert_eq!(
             count_after, blob_pages,
             "IDB must hold exactly the imported pages"
@@ -1444,7 +2741,14 @@ mod tests {
         let result = result.expect("forced maintenance");
         let outcome: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(outcome["delta"], "recompacted");
-        let after_pages = idb.load_all_pages().await.expect("pages after").len();
+        let after_inspector = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("reopen after maintenance inspector");
+        let after_pages = after_inspector
+            .load_all_pages()
+            .await
+            .expect("pages after")
+            .len();
         assert!(
             after_pages < before_pages,
             "compact replacement must remove superseded lineage pages"

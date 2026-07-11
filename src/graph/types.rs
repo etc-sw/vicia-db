@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(not(all(target_arch = "wasm32", feature = "browser")))]
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -20,7 +21,8 @@ pub(crate) fn tx_id_now() -> TxId {
         // On WASM browser targets, `std::time::SystemTime::now()` panics.
         // Use `js_sys::Date::now()` which returns milliseconds since the Unix
         // epoch as an f64 (same precision as `Date.now()` in JavaScript).
-        js_sys::Date::now() as u64
+        let now = js_sys::Date::now();
+        browser_millis_to_tx_id(now)
     }
     #[cfg(not(all(target_arch = "wasm32", feature = "browser")))]
     {
@@ -31,6 +33,18 @@ pub(crate) fn tx_id_now() -> TxId {
                 .as_millis(),
         )
         .unwrap_or(u64::MAX)
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn browser_millis_to_tx_id(millis: f64) -> TxId {
+    if millis.is_finite() && millis >= 0.0 {
+        // Date.now() is an integer millisecond count and remains far below
+        // JavaScript's exact-integer ceiling for the lifetime of this format.
+        millis as u64
+    } else {
+        0
     }
 }
 

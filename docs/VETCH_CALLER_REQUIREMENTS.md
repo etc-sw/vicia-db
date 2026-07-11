@@ -3,7 +3,7 @@
 Status: product-caller requirements derived from the live Vetch integration and
 the current Vetch epistemic-state and Braindump-to-GO plans.
 
-Date: 2026-07-11
+Date: 2026-07-12
 
 ## Recommendation
 
@@ -52,6 +52,9 @@ The default quiet-surface store uses `viciaBackedCanvasPersistence`, backed by
 Vetch's local `@vicia-db/browser` build. The adapter opens the IndexedDB database
 `vetch.quiet-surface.authority.v2` and writes Datalog facts for canvas command
 events, cards, source references, edges, spaces, and manual groups.
+The Vicia package now exposes `BrowserDb.openPaged()`, but this Vetch adapter
+has not yet adopted that bounded path; package sync and caller smoke are a
+separate Vetch-side acceptance step.
 
 The integration has already proved useful primitives:
 
@@ -229,8 +232,9 @@ delta threshold policy, builds a fresh full-history image, atomically replaces
 IndexedDB, and returns outcome/advice plus page counts. The 100K repeated-growth
 gate proves page-record reclaim and write-latency reset. This closes the
 maintenance-surface gap, not the full browser gate: maintenance is O(total
-history), must run in a dedicated BrowserDb worker, and the 1M open path still
-loads every IndexedDB page into memory.
+history) and must run in a dedicated BrowserDb worker. `openPaged()` now avoids
+the eager full-image startup shape for v11, but the 1M open/query/growth and
+maintenance peak-memory matrix has not run on that path.
 
 ### P1 — Efficient Product Reads
 
@@ -261,10 +265,13 @@ allocation gate through Datalog.
 #### Bounded open and memory shape
 
 Desktop and browser open, current-space reconstruction, and agent-brief queries
-must remain usable at the expected 1M+ fact baseline. Browser open currently
-loads all IndexedDB pages into a memory-backed page backend; that memory and
-startup shape requires an explicit benchmark and, if it fails, a page-on-demand
-browser read path rather than a Vetch-side shadow database.
+must remain usable at the expected 1M+ fact baseline. `BrowserDb.open()` keeps
+the original eager behavior for compatibility. `BrowserDb.openPaged()` is the
+v11 page-on-demand path: it reads bounded authority/catalog/manifest metadata,
+fetches verified fact/index pages on deterministic query demand, and evicts
+clean staging through the existing fixed-size cache boundary. The remaining
+gate is measured 1M evidence on that exact path, not a Vetch-side shadow
+database.
 
 ### P1 — Portability and Operations
 
@@ -276,7 +283,9 @@ browser read path rather than a Vetch-side shadow database.
   open, execute, checkpoint, import, and maintenance failures.
 - Backup/restore must remain compatible with the single-file promise. Browser
   IndexedDB is an implementation detail; export/import is the portability
-  boundary.
+  boundary. Paged handles use `await exportGraphAsync()` so every published page
+  crosses the v11 verifier without requiring the full image to remain resident;
+  synchronous `exportGraph()` remains the eager/in-memory compatibility API.
 - Native live-writer rollback points use `backup_to` (or session `backup`),
   which returns the exact included `tx_count` only after the checkpointed
   destination is fsynced and atomically published. External
@@ -357,10 +366,13 @@ Vicia replaces the legacy load path.
 Status: tagged semantic parity, native↔browser portability, atomic rejection,
 manifest fallback, and the shared corruption corpus pass in the 2×2 Gate E
 matrix. File format v11 now adds generation-bound page-local base integrity,
-and BrowserDb durably commits v10 migration before returning (26
-headless-Chrome tests plus native consumers). Bounded 1M open and 1M
-maintenance peak-memory/growth evidence remain open, so Gate E as a whole
-remains open.
+and BrowserDb durably commits v10 migration before returning. A5-6c adds a
+generation-aware `openPaged()` path, asynchronous verified full export, exact
+page-0 authority checks across independent handles, sparse write rollback, and
+post-import/maintenance return to sparse residency. All 55 structural browser
+tests pass in the final headless-Chrome run. Bounded 1M open/query/growth and 1M
+maintenance peak-memory evidence remain open, and Vetch has not yet switched
+its adapter to `openPaged()`, so Gate E as a whole remains open.
 
 ## Recommended Work Order
 

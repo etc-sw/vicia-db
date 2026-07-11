@@ -2,7 +2,7 @@
 
 Per-backend durability semantics (gap G13) and the browser caller rules from
 slice A5 of `docs/APP_ADOPTION_GAP_PLAN.md`. This is the authority for what
-`execute` / `checkpoint` / `backup_to` / `importGraph` / `runIdleMaintenance` guarantee **at the moment they
+`execute` / `checkpoint` / `backup_to` / `exportGraphAsync` / `importGraph` / `runIdleMaintenance` guarantee **at the moment they
 return**, per backend, and for the rules a browser caller must follow because
 of those semantics. The session-protocol view of the same facts (the
 `durability` field on result frames) is `docs/SESSION_PROTOCOL.md`
@@ -12,8 +12,9 @@ Backends covered:
 
 - **Native file-backed** — `Minigraf::open("path.graph")`: single `.graph`
   file + WAL sidecar. What harrekki runs.
-- **Browser** — `BrowserDb.open(dbName)` (wasm): IndexedDB-backed,
-  write-through, no WAL. What Vetch would run.
+- **Browser** — eager-compatible `BrowserDb.open(dbName)` or bounded-v11
+  `BrowserDb.openPaged(dbName)` (wasm): IndexedDB-backed, write-through, no
+  WAL. Vetch should adopt the paged path after its package/caller gate.
 - In-memory databases (native `Minigraf::new()`, browser
   `BrowserDb.openInMemory()`) have **no durability**; nothing below
   applies to them.
@@ -104,8 +105,21 @@ Backends covered:
   wasm tests in `src/browser/`.
 - `runIdleMaintenance` follows the same durable-replace ordering as import:
   build a fresh compact image from the complete fact log, commit one
-  IndexedDB `clear`+`put` transaction, then swap the live PFS. A rejected
-  replacement leaves the previous live and durable graph untouched.
+  IndexedDB `clear`+`put` transaction, then swap the live PFS. Paged handles
+  return to sparse residency after the swap. A rejected replacement leaves
+  the previous live and durable graph untouched.
+- Every independent IndexedDB handle pins the exact page-0 bytes observed at
+  open. Sparse reads observe page 0 in the same readonly transaction as their
+  requested pages; writes and complete replacements compare page 0 before
+  queueing mutations in one readwrite transaction. A newer publication makes
+  the older handle fail with a reopen error instead of mixing generations.
+  Cheap clones share their own successful authority advances. Page 0 is the
+  compare-and-swap authority; no browser-only schema/metadata record exists.
+- `open()` eagerly retains the complete published image so synchronous
+  `exportGraph()` remains compatible. `openPaged()` starts from bounded v11
+  metadata and demand-loads verified pages. Its portability API is
+  `exportGraphAsync()`, which walks the complete published prefix through the
+  verifier without requiring every page to remain resident.
 
 ## 2. Failure and corruption classification
 
@@ -116,7 +130,7 @@ errors are out of its scope — this table is the browser classification).
 | --- | --- | --- | --- |
 | `open` | Lock held by a live process | native | No handle. `.graph.lock` sidecar is hard-link-atomic; stale locks (dead PID, empty artifact) are removed automatically (`FileLock::acquire`, `src/storage/backend/file.rs`). |
 | `open` | Header checksum mismatch / bad magic / unsupported version | both | No handle; detected **at open**, not lazily (`src/storage/persistent_facts.rs` load path). The file is not modified. Browser reaches the same validation via `PersistentFactStorage::new` over the loaded pages. |
-| `open` / first committed read | v11 catalog/descriptor corruption, or a base fact/index page checksum mismatch | both | Catalog metadata corruption rejects open without rewriting the image. Base pages are verified lazily against their generation and absolute page id, so bounded open can succeed and the first read touching a corrupt page returns an error. Browser export and native backup use the same verified boundary. CRC32 detects accidental corruption; it does not authenticate hostile bytes. |
+| `open` / `openPaged` / first committed read | v11 catalog/descriptor corruption, or a base fact/index page checksum mismatch | both | Catalog metadata corruption rejects open without rewriting the image. Base pages are verified lazily against their generation and absolute page id, so `openPaged` can succeed and the first read touching a corrupt page returns an error; eager `open` may encounter the same error during prefetch. Browser asynchronous export and native backup use the same verified boundary. CRC32 detects accidental corruption; it does not authenticate hostile bytes. |
 | `open` | Automatic v10→v11 migration cannot commit | browser | No handle. Catalog pages and page 0 share one IndexedDB transaction; abort preserves the exact v10 image for retry. |
 | `open` | Non-empty file shorter than one page | native | No handle and no rewrite. A zero-byte path remains an intentional new-database creation surface; 1–4095 bytes are a visible truncation error. |
 | `open` / `importGraph` | Newest slot, manifest, or segment is corrupt while the previous manifest is valid | both | Opens on the previous complete manifest. The shared Gate E corpus verifies that base plus both earlier deltas remain visible and only the newest retraction is absent. |
@@ -124,6 +138,7 @@ errors are out of its scope — this table is the browser classification).
 | `open` | WAL header invalid | native | No handle; the main file is untouched. |
 | `open` | WAL entry CRC mismatch | native | Opens; replay **stops silently at the first bad entry** (`src/wal.rs` replay loop). Only never-acknowledged work is absent. |
 | `open` | IndexedDB unavailable / blocked | browser | No handle; nothing modified. |
+| paged read / write / import / maintenance / export | Another independent handle published a different page 0 | browser | The stale operation rejects with a reopen error before returning mixed-generation data or committing bytes. Already resident old pages remain one old snapshot; a later IndexedDB demand cannot cross into the new image. Discard and reopen the handle. |
 | `execute` | Parse / execution error | both | Rejected — nothing applied, nothing flushed. |
 | `execute` | Fact exceeds `MAX_FACT_BYTES` (4080 B) | both | Rejected at serialization; store payloads externally, keep pointers (gap G4 policy). |
 | `execute` | WAL append fails (I/O) | native | Rejected — memory unchanged, database consistent. |
@@ -132,6 +147,7 @@ errors are out of its scope — this table is the browser classification).
 | `importGraph` | Blob shorter than page 0 / unparseable with no valid predecessor | browser | Rejected before any durable or live change. A trailing partial page is treated like native open: only complete pages enter recovery, so an interrupted newest candidate may fall back to the previous manifest. A physically missing page inside the declared prefix keeps `exportGraph` unavailable until a clean repair/maintenance image exists. |
 | `importGraph` | IndexedDB replace fails | browser | The single replace transaction rolls back; memory and IndexedDB both still the old database. |
 | `runIdleMaintenance` | Compact build or IndexedDB replace fails | browser | Rejected; memory and IndexedDB both remain the previous graph. Retry in a later worker/idle window. |
+| `exportGraph` | Called on a sparse handle without a fully resident published prefix | browser | Rejects visibly; call `await exportGraphAsync()` for the supported verified sparse export. No durable state changes. |
 
 ## 3. Canonical value encoding
 
@@ -162,22 +178,26 @@ Derived from the semantics above plus the A5 growth measurements
 
 1. **One writer per DB name, via Web Locks.** There is no browser analogue
    of the native `.graph.lock`; two tabs opening the same DB name are two
-   independent in-memory stores write-through-flushing into one IndexedDB
-   store — last flush wins, manifests interleave, corruption follows.
-   `BrowserDb` does not (and by design will not) coordinate this;
-   single-writer discipline is caller policy. Wrap every writing handle's
+   independent in-memory stores. Exact page-0 comparison now makes the stale
+   writer reject instead of interleaving generations, but it is a safety
+   boundary, not a work scheduler or retry protocol. `BrowserDb` does not (and
+   by design will not) choose which tab owns writes; single-writer discipline
+   remains caller policy. Wrap every writing handle's
    lifetime in a Web Lock, which the browser releases automatically when
    the tab dies (unlike a lock file):
 
    ```js
    await navigator.locks.request(`vicia:${dbName}`, async (lock) => {
-     const db = await BrowserDb.open(dbName);
+     const db = await BrowserDb.openPaged(dbName);
      // ... entire writing session while the lock is held ...
    });
    ```
 
    Read-only tabs that never call `execute` with writes / `importGraph`
-   can open without the lock, but see a snapshot loaded at open time.
+   can open without the lock. Eager `open()` sees the snapshot loaded at open
+   time. `openPaged()` keeps already resident pages on that old snapshot and
+   rejects the next IndexedDB miss after another handle publishes, so it never
+   combines generations; reopen on that stale-authority error.
 
 2. **Batch, then debounce.** Between maintenance windows every write
    `execute()` appends a delta segment and rewrites the manifest, so
@@ -198,7 +218,7 @@ Derived from the semantics above plus the A5 growth measurements
    binding now discovers IndexedDB through `globalThis`; the repeatable
    `bench-driver.cjs worker-smoke` gate passes open/write/query/maintenance in
    a real module DedicatedWorker. The
-   existing 1M full-load open shape (~420 MB per handle) and 1M maintenance
-   peak-memory proof remain Gate E blockers; do
-   not claim browser authority readiness until those bounded-storage gates are
-   complete.
+   eager 1M full-load baseline (~420 MB per handle) is not the paged verdict.
+   The `openPaged()` 1M startup/query/growth matrix and 1M maintenance
+   peak-memory proof remain Gate E blockers; do not claim browser authority
+   readiness until those measurements and Vetch adapter adoption are complete.

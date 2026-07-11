@@ -252,6 +252,589 @@ struct BaseIntegrityWrite {
     published_page_count: u64,
 }
 
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+const MAX_BROWSER_BOOTSTRAP_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+
+/// One bounded, contiguous page range needed by sparse browser storage.
+///
+/// The range is always half-open: `[start_page, end_page)`. A zero-page range
+/// is used only for the canonical empty base-fact range.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct BrowserPageRange {
+    start_page: u64,
+    page_count: u64,
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl BrowserPageRange {
+    fn bounded(
+        label: &str,
+        start_page: u64,
+        page_count: u64,
+        published_page_count: u64,
+    ) -> Result<Self> {
+        let end_page = start_page
+            .checked_add(page_count)
+            .ok_or_else(|| anyhow::anyhow!("{label} page range overflow"))?;
+        if end_page > published_page_count {
+            anyhow::bail!("{label} page range exceeds published page count");
+        }
+        Ok(Self {
+            start_page,
+            page_count,
+        })
+    }
+
+    pub(crate) fn start_page(self) -> u64 {
+        self.start_page
+    }
+
+    pub(crate) fn page_count(self) -> u64 {
+        self.page_count
+    }
+
+    pub(crate) fn end_page(self) -> u64 {
+        // Every instance is constructed through `bounded`, which checked the
+        // addition. Keep this accessor infallible for browser range loops.
+        self.start_page + self.page_count
+    }
+
+    fn contains(self, page_id: u64) -> bool {
+        page_id >= self.start_page && page_id < self.end_page()
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.start_page < other.end_page() && other.start_page < self.end_page()
+    }
+}
+
+/// One page-0 manifest candidate whose payload range is safe to fetch.
+///
+/// Candidates remain ordered newest-first, but sparse bootstrap deliberately
+/// keeps every valid slot so a missing newest manifest or segment can recover
+/// through the previous published lineage.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BrowserManifestCandidate {
+    slot: HeaderManifestSlotName,
+    descriptor: HeaderManifestSlot,
+    manifest_range: BrowserPageRange,
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl BrowserManifestCandidate {
+    pub(crate) fn slot(self) -> HeaderManifestSlotName {
+        self.slot
+    }
+
+    pub(crate) fn generation(self) -> u64 {
+        self.descriptor.generation()
+    }
+
+    pub(crate) fn manifest_range(self) -> BrowserPageRange {
+        self.manifest_range
+    }
+}
+
+/// A valid published image that the bounded browser bootstrap deliberately
+/// does not support. This is distinct from a missing or corrupt candidate:
+/// falling back to an older manifest would silently expose stale committed
+/// state, so paged open must fail and eager compatibility may retry the full
+/// native-equivalent loader.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[derive(Debug)]
+struct BrowserSparseUnsupported(String);
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl std::fmt::Display for BrowserSparseUnsupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl std::error::Error for BrowserSparseUnsupported {}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn browser_sparse_unsupported(message: impl Into<String>) -> anyhow::Error {
+    BrowserSparseUnsupported(message.into()).into()
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn is_browser_sparse_unsupported(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<BrowserSparseUnsupported>().is_some()
+}
+
+/// Page-0-derived first phase of a sparse browser v11 open.
+///
+/// This phase performs no backend reads beyond the supplied page 0 and makes
+/// no attacker-sized allocation. It identifies the integrity catalog that is
+/// mandatory for every open and each independently recoverable manifest
+/// payload that the async IndexedDB layer may fetch next.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[derive(Clone, Debug)]
+pub(crate) struct BrowserV11BootstrapPlan {
+    header: FileHeader,
+    extension: HeaderExtension,
+    page0_checksum: u32,
+    base_covered_range: BrowserPageRange,
+    base_fact_range: BrowserPageRange,
+    required_ranges: Vec<BrowserPageRange>,
+    manifest_candidates: Vec<BrowserManifestCandidate>,
+}
+
+/// One decoded manifest and the segment ranges that must be resident before
+/// synchronous core loading can try that lineage.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BrowserManifestSegmentPlan {
+    slot: HeaderManifestSlotName,
+    generation: u64,
+    manifest_range: BrowserPageRange,
+    segment_ranges: Vec<BrowserPageRange>,
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl BrowserManifestSegmentPlan {
+    pub(crate) fn slot(&self) -> HeaderManifestSlotName {
+        self.slot
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn manifest_range(&self) -> BrowserPageRange {
+        self.manifest_range
+    }
+
+    pub(crate) fn segment_ranges(&self) -> &[BrowserPageRange] {
+        &self.segment_ranges
+    }
+}
+
+/// Metadata-validated second phase of a sparse browser v11 open.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[derive(Clone, Debug)]
+pub(crate) struct BrowserV11ResidentPlan {
+    published_page_count: u64,
+    page0_checksum: u32,
+    base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
+    manifest_candidates: Vec<BrowserManifestSegmentPlan>,
+}
+
+/// Streaming verifier for a paged browser export.
+///
+/// The output blob itself is necessarily O(total), but this cursor adds only
+/// O(selected-segment-count) ranges. Immutable base pages are checked against
+/// the generation-bound catalog, while catalog/selected manifest/selected
+/// segment bytes must match the exact resident bytes validated at open.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+pub(crate) struct BrowserPublishedExportVerifier {
+    published_page_count: u64,
+    next_page_id: u64,
+    exact_resident_ranges: Vec<BrowserPageRange>,
+    next_exact_range_index: usize,
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl BrowserPublishedExportVerifier {
+    pub(crate) fn published_page_count(&self) -> u64 {
+        self.published_page_count
+    }
+
+    pub(crate) fn finish(self) -> Result<()> {
+        if self.next_page_id != self.published_page_count {
+            anyhow::bail!(
+                "Browser export ended at page {}, expected {}",
+                self.next_page_id,
+                self.published_page_count
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exact_resident_ranges_for_test(&self) -> &[BrowserPageRange] {
+        &self.exact_resident_ranges
+    }
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl BrowserV11ResidentPlan {
+    pub(crate) fn published_page_count(&self) -> u64 {
+        self.published_page_count
+    }
+
+    pub(crate) fn manifest_candidates(&self) -> &[BrowserManifestSegmentPlan] {
+        &self.manifest_candidates
+    }
+
+    /// Return the exact-range union across every valid manifest candidate.
+    ///
+    /// Only identical ranges are deduplicated. Adjacent ranges remain separate:
+    /// combining an older complete segment with a missing newest segment would
+    /// turn one optional range failure into loss of the recoverable lineage.
+    pub(crate) fn candidate_segment_ranges(&self) -> Vec<BrowserPageRange> {
+        let mut ranges: Vec<BrowserPageRange> = self
+            .manifest_candidates
+            .iter()
+            .flat_map(|candidate| candidate.segment_ranges.iter().copied())
+            .collect();
+        ranges.sort_unstable();
+        ranges.dedup();
+        ranges
+    }
+
+    /// Validate one asynchronously fetched page before it enters the
+    /// synchronous resident backend. Immutable base pages are checked against
+    /// the generation-bound v11 catalog; other published pages are bounded and
+    /// later validated by their manifest/segment codecs as complete payloads.
+    pub(crate) fn verify_fetched_published_page(&self, page_id: u64, page: &[u8]) -> Result<()> {
+        if page_id >= self.published_page_count {
+            anyhow::bail!("Fetched page is outside the published page range");
+        }
+        if page.len() != PAGE_SIZE {
+            anyhow::bail!(
+                "Fetched page {page_id} has invalid length {} (expected {PAGE_SIZE})",
+                page.len()
+            );
+        }
+        if page_id == 0 && crc32fast::hash(page) != self.page0_checksum {
+            anyhow::bail!("Fetched page 0 changed after sparse bootstrap planning");
+        }
+        if let Some(catalog) = &self.base_integrity {
+            let covered = BrowserPageRange::bounded(
+                "Base integrity coverage",
+                catalog.covered_page_start(),
+                catalog.covered_page_count(),
+                self.published_page_count,
+            )?;
+            if covered.contains(page_id) {
+                catalog.verify_page(page_id, page)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+impl BrowserV11BootstrapPlan {
+    /// Validate page 0 and plan the bounded metadata reads for a sparse v11
+    /// browser open.
+    pub(crate) fn from_page0(page0: &[u8]) -> Result<Self> {
+        if page0.len() != PAGE_SIZE {
+            anyhow::bail!(
+                "Browser v11 bootstrap requires exactly {PAGE_SIZE} page-0 bytes, got {}",
+                page0.len()
+            );
+        }
+
+        let header = FileHeader::from_bytes(page0)?;
+        header.validate()?;
+        if header.version != crate::storage::FORMAT_VERSION {
+            anyhow::bail!(
+                "Sparse browser bootstrap requires v{} format, got v{}",
+                crate::storage::FORMAT_VERSION,
+                header.version
+            );
+        }
+        if header.header_checksum != 0 {
+            let computed = compute_header_checksum_from_bytes(page0);
+            if computed != header.header_checksum {
+                anyhow::bail!("Header checksum mismatch during sparse browser bootstrap");
+            }
+        }
+
+        let extension = HeaderExtension::read_from_page0(header.version, page0)?
+            .ok_or_else(|| anyhow::anyhow!("v11 database is missing its header extension"))?;
+        let integrity_descriptor = validate_v11_base_integrity_descriptor(&header, &extension)?;
+
+        let base_fact_range = BrowserPageRange::bounded(
+            "Base fact",
+            extension.base_fact_page_start(),
+            header.fact_page_count,
+            header.page_count,
+        )?;
+        let base_covered_range = match integrity_descriptor {
+            Some(descriptor) => BrowserPageRange::bounded(
+                "Base integrity coverage",
+                descriptor.covered_page_start(),
+                descriptor.covered_page_count(),
+                header.page_count,
+            )?,
+            None => BrowserPageRange::bounded(
+                "Empty base integrity coverage",
+                extension.base_fact_page_start(),
+                0,
+                header.page_count,
+            )?,
+        };
+
+        let required_ranges: Vec<BrowserPageRange> = integrity_descriptor
+            .map(|descriptor| {
+                BrowserPageRange::bounded(
+                    "Base integrity catalog",
+                    descriptor.catalog_page_start(),
+                    descriptor.catalog_page_count(),
+                    header.page_count,
+                )
+            })
+            .transpose()?
+            .into_iter()
+            .collect();
+
+        let manifest_candidates = plan_browser_manifest_candidates(
+            &header,
+            &extension,
+            base_covered_range,
+            required_ranges.first().copied(),
+        )?;
+
+        Ok(Self {
+            header,
+            extension,
+            page0_checksum: crc32fast::hash(page0),
+            base_covered_range,
+            base_fact_range,
+            required_ranges,
+            manifest_candidates,
+        })
+    }
+
+    pub(crate) fn published_page_count(&self) -> u64 {
+        self.header.page_count
+    }
+
+    pub(crate) fn base_covered_range(&self) -> BrowserPageRange {
+        self.base_covered_range
+    }
+
+    pub(crate) fn base_fact_range(&self) -> BrowserPageRange {
+        self.base_fact_range
+    }
+
+    /// Mandatory metadata ranges, excluding page 0. For a non-empty v11 base
+    /// this is exactly the integrity catalog range.
+    pub(crate) fn required_ranges(&self) -> &[BrowserPageRange] {
+        &self.required_ranges
+    }
+
+    /// Independently recoverable manifest payloads in newest-first order.
+    pub(crate) fn manifest_candidates(&self) -> &[BrowserManifestCandidate] {
+        &self.manifest_candidates
+    }
+
+    pub(crate) fn candidate_manifest_ranges(&self) -> Vec<BrowserPageRange> {
+        self.manifest_candidates
+            .iter()
+            .map(|candidate| candidate.manifest_range)
+            .collect()
+    }
+
+    /// Decode every resident manifest candidate and plan its segment ranges.
+    ///
+    /// The supplied backend only needs page 0, the `required_ranges()`, and any
+    /// manifest ranges that were successfully fetched. A missing or corrupt
+    /// newest manifest is skipped so an older valid candidate can still be
+    /// planned, matching normal persistent-load fallback semantics.
+    pub(crate) fn plan_resident_metadata<B: StorageBackend>(
+        &self,
+        backend: &B,
+    ) -> Result<BrowserV11ResidentPlan> {
+        let resident_page0 = backend.read_page(0)?;
+        if resident_page0.len() != PAGE_SIZE
+            || crc32fast::hash(&resident_page0) != self.page0_checksum
+        {
+            anyhow::bail!("Resident page 0 changed during sparse browser bootstrap");
+        }
+
+        let base_integrity = load_v11_base_integrity(backend, &self.header, &self.extension)?;
+
+        let mut manifest_plans = Vec::new();
+        for candidate in &self.manifest_candidates {
+            let Ok(manifest) =
+                read_manifest_from_descriptor(backend, &self.header, candidate.descriptor)
+            else {
+                continue;
+            };
+            if manifest
+                .base_identity()
+                .validate_against_header(&self.header)
+                .is_err()
+            {
+                continue;
+            }
+
+            let plan = match plan_browser_manifest_segments(
+                &self.header,
+                *candidate,
+                &manifest,
+                self.base_covered_range,
+                self.required_ranges.first().copied(),
+            ) {
+                Ok(plan) => plan,
+                Err(error) if is_browser_sparse_unsupported(&error) => return Err(error),
+                Err(_) => continue,
+            };
+            manifest_plans.push(plan);
+        }
+
+        if !self.manifest_candidates.is_empty() && manifest_plans.is_empty() {
+            anyhow::bail!("No valid delta manifest remains for sparse browser recovery");
+        }
+
+        Ok(BrowserV11ResidentPlan {
+            published_page_count: self.header.page_count,
+            page0_checksum: self.page0_checksum,
+            base_integrity,
+            manifest_candidates: manifest_plans,
+        })
+    }
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn plan_browser_manifest_candidates(
+    header: &FileHeader,
+    extension: &HeaderExtension,
+    base_covered_range: BrowserPageRange,
+    catalog_range: Option<BrowserPageRange>,
+) -> Result<Vec<BrowserManifestCandidate>> {
+    let slots = [
+        (HeaderManifestSlotName::Primary, extension.primary()),
+        (HeaderManifestSlotName::Secondary, extension.secondary()),
+    ];
+    let has_non_empty_slot = slots.iter().any(|(_, descriptor)| !descriptor.is_empty());
+    let mut candidates = Vec::new();
+
+    for (slot, descriptor) in slots {
+        if !descriptor.is_selectable() {
+            continue;
+        }
+        validate_browser_manifest_resource_policy(descriptor)?;
+        let manifest_range = match validate_browser_manifest_descriptor(header, descriptor) {
+            Ok(range) => range,
+            Err(error) if is_browser_sparse_unsupported(&error) => return Err(error),
+            Err(_) => continue,
+        };
+        if manifest_range.overlaps(base_covered_range)
+            || catalog_range.is_some_and(|catalog| manifest_range.overlaps(catalog))
+        {
+            return Err(browser_sparse_unsupported(
+                "Delta manifest layout overlaps immutable base metadata; bounded browser open is unsupported",
+            ));
+        }
+        candidates.push(BrowserManifestCandidate {
+            slot,
+            descriptor,
+            manifest_range,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .generation()
+            .cmp(&left.generation())
+            .then_with(|| match (left.slot, right.slot) {
+                (HeaderManifestSlotName::Primary, HeaderManifestSlotName::Secondary) => {
+                    std::cmp::Ordering::Less
+                }
+                (HeaderManifestSlotName::Secondary, HeaderManifestSlotName::Primary) => {
+                    std::cmp::Ordering::Greater
+                }
+                _ => std::cmp::Ordering::Equal,
+            })
+    });
+
+    if has_non_empty_slot && candidates.is_empty() {
+        anyhow::bail!("No bounded selectable delta manifest remains in page 0");
+    }
+    Ok(candidates)
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn validate_browser_manifest_descriptor(
+    header: &FileHeader,
+    descriptor: HeaderManifestSlot,
+) -> Result<BrowserPageRange> {
+    BrowserPageRange::bounded(
+        "Delta manifest",
+        descriptor.manifest_page_start(),
+        descriptor.manifest_page_count(),
+        header.page_count,
+    )
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn validate_browser_manifest_resource_policy(descriptor: HeaderManifestSlot) -> Result<()> {
+    let manifest_len = usize::try_from(descriptor.manifest_len()).map_err(|_| {
+        browser_sparse_unsupported("Delta manifest length exceeds browser memory limits")
+    })?;
+    if manifest_len > MAX_BROWSER_BOOTSTRAP_MANIFEST_BYTES {
+        return Err(browser_sparse_unsupported(format!(
+            "Delta manifest exceeds the supported {}-byte browser bootstrap metadata limit",
+            MAX_BROWSER_BOOTSTRAP_MANIFEST_BYTES,
+        )));
+    }
+    let canonical_page_count = manifest_len.div_ceil(PAGE_SIZE);
+    let descriptor_page_count =
+        usize::try_from(descriptor.manifest_page_count()).map_err(|_| {
+            browser_sparse_unsupported("Delta manifest page count exceeds browser memory limits")
+        })?;
+    if canonical_page_count != descriptor_page_count {
+        return Err(browser_sparse_unsupported(
+            "Non-canonical delta manifest page count is unsupported by bounded browser open",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn plan_browser_manifest_segments(
+    header: &FileHeader,
+    candidate: BrowserManifestCandidate,
+    manifest: &DeltaManifest,
+    base_covered_range: BrowserPageRange,
+    catalog_range: Option<BrowserPageRange>,
+) -> Result<BrowserManifestSegmentPlan> {
+    let mut segment_ranges = Vec::new();
+    segment_ranges
+        .try_reserve_exact(manifest.segments().len())
+        .map_err(|_| {
+            browser_sparse_unsupported("Delta segment range plan exceeds browser memory limits")
+        })?;
+
+    for descriptor in manifest.segments() {
+        let segment_range = BrowserPageRange::bounded(
+            "Delta segment",
+            descriptor.segment_page_start(),
+            descriptor.segment_page_count(),
+            header.page_count,
+        )?;
+        if segment_range.end_page() > candidate.manifest_range.start_page() {
+            return Err(browser_sparse_unsupported(
+                "Delta segment topology reaches its publishing manifest; bounded browser open is unsupported",
+            ));
+        }
+        if segment_range.overlaps(base_covered_range)
+            || catalog_range.is_some_and(|catalog| segment_range.overlaps(catalog))
+        {
+            return Err(browser_sparse_unsupported(
+                "Delta segment topology overlaps immutable base metadata; bounded browser open is unsupported",
+            ));
+        }
+        segment_ranges.push(segment_range);
+    }
+
+    Ok(BrowserManifestSegmentPlan {
+        slot: candidate.slot,
+        generation: candidate.generation(),
+        manifest_range: candidate.manifest_range,
+        segment_ranges,
+    })
+}
+
 impl LayeredFactLoaderImpl {
     fn new(base: Arc<dyn CommittedFactReader>, segments: &[DeltaSegment]) -> Self {
         let mut delta_facts = BTreeMap::new();
@@ -2113,11 +2696,226 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.dirty
     }
 
+    /// Inspect the logical packed-fact range selected by the loaded v11 base.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn browser_base_fact_range(&self) -> Result<BrowserPageRange> {
+        let published_page_count = self.browser_published_page_count()?;
+        BrowserPageRange::bounded(
+            "Loaded browser base fact",
+            self.committed_fact_page_start.load(Ordering::SeqCst),
+            self.committed_fact_pages.load(Ordering::SeqCst),
+            published_page_count,
+        )
+    }
+
+    /// Inspect page 0's declared, published page count without equating it to
+    /// the number of pages currently resident in a sparse backend.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn browser_published_page_count(&self) -> Result<u64> {
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned during browser inspection"))?;
+        let page0 = backend.read_page(0)?;
+        let header = FileHeader::from_bytes(&page0)?;
+        header.validate()?;
+        Ok(header.page_count)
+    }
+
+    /// Return the exact manifest lineage selected by the normal persistent
+    /// loader. Browser sparse planning must retain this same slot/generation;
+    /// a planner that only supports an older candidate must fail instead of
+    /// evicting pages owned by the live selected lineage.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn browser_selected_manifest_identity(
+        &self,
+    ) -> Result<Option<(HeaderManifestSlotName, u64)>> {
+        match (
+            self.header_manifest_selection,
+            &self.delta_manifest_selection,
+        ) {
+            (
+                HeaderManifestSlotSelection::NoDeltaManifest,
+                PersistedManifestSelection::NoDeltaManifest,
+            ) => Ok(None),
+            (
+                HeaderManifestSlotSelection::Use { slot, descriptor },
+                PersistedManifestSelection::Use {
+                    slot: persisted_slot,
+                    manifest,
+                },
+            ) if slot == *persisted_slot && descriptor.generation() == manifest.generation() => {
+                Ok(Some((slot, descriptor.generation())))
+            }
+            _ => anyhow::bail!(
+                "Persistent manifest selection is not a single consistent browser authority"
+            ),
+        }
+    }
+
+    /// Start a streaming verification of an asynchronously re-read browser
+    /// image. The selected metadata ranges are derived from the same manifest
+    /// selection that wired this live PFS, never from a newly chosen fallback.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn begin_browser_export_verification(
+        &self,
+    ) -> Result<BrowserPublishedExportVerifier> {
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned during browser export setup"))?;
+        let page0 = backend.read_page(0)?;
+        let header = FileHeader::from_bytes(&page0)?;
+        header.validate()?;
+        if header.version != crate::storage::FORMAT_VERSION {
+            anyhow::bail!("Paged browser export requires the current file format");
+        }
+        let extension = HeaderExtension::read_from_page0(header.version, &page0)?
+            .ok_or_else(|| anyhow::anyhow!("Paged browser export requires header metadata"))?;
+        let integrity = validate_v11_base_integrity_descriptor(&header, &extension)?;
+
+        let mut exact_resident_ranges = Vec::new();
+        if let Some(descriptor) = integrity {
+            exact_resident_ranges.push(BrowserPageRange::bounded(
+                "Base integrity catalog",
+                descriptor.catalog_page_start(),
+                descriptor.catalog_page_count(),
+                header.page_count,
+            )?);
+        }
+
+        match (
+            self.header_manifest_selection,
+            &self.delta_manifest_selection,
+        ) {
+            (
+                HeaderManifestSlotSelection::NoDeltaManifest,
+                PersistedManifestSelection::NoDeltaManifest,
+            ) => {}
+            (
+                HeaderManifestSlotSelection::Use { slot, descriptor },
+                PersistedManifestSelection::Use {
+                    slot: persisted_slot,
+                    manifest,
+                },
+            ) if slot == *persisted_slot && descriptor.generation() == manifest.generation() => {
+                exact_resident_ranges.push(BrowserPageRange::bounded(
+                    "Selected delta manifest",
+                    descriptor.manifest_page_start(),
+                    descriptor.manifest_page_count(),
+                    header.page_count,
+                )?);
+                exact_resident_ranges
+                    .try_reserve(manifest.segments().len())
+                    .map_err(|_| anyhow::anyhow!("Browser export segment plan exceeds memory"))?;
+                for segment in manifest.segments() {
+                    exact_resident_ranges.push(BrowserPageRange::bounded(
+                        "Selected delta segment",
+                        segment.segment_page_start(),
+                        segment.segment_page_count(),
+                        header.page_count,
+                    )?);
+                }
+            }
+            _ => anyhow::bail!(
+                "Persistent manifest selection is not a single consistent browser export authority"
+            ),
+        }
+
+        exact_resident_ranges.sort_unstable();
+        exact_resident_ranges.dedup();
+        for range in &exact_resident_ranges {
+            for page_id in range.start_page()..range.end_page() {
+                backend.read_page(page_id).map_err(|error| {
+                    anyhow::anyhow!(
+                        "Validated browser export authority page {page_id} is not resident: {error}"
+                    )
+                })?;
+            }
+        }
+
+        Ok(BrowserPublishedExportVerifier {
+            published_page_count: header.page_count,
+            next_page_id: 0,
+            exact_resident_ranges,
+            next_exact_range_index: 0,
+        })
+    }
+
+    /// Verify one ascending batch freshly read from IndexedDB.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn verify_browser_export_batch(
+        &self,
+        verifier: &mut BrowserPublishedExportVerifier,
+        pages: &[(u64, Vec<u8>)],
+    ) -> Result<()> {
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned during browser export"))?;
+        let resident_page0 = backend.read_page(0)?;
+        for (page_id, page) in pages {
+            if *page_id != verifier.next_page_id {
+                anyhow::bail!(
+                    "Browser export page order mismatch: expected {}, found {}",
+                    verifier.next_page_id,
+                    page_id
+                );
+            }
+            verify_browser_published_page_bytes(
+                &resident_page0,
+                self.base_integrity.as_deref(),
+                *page_id,
+                page,
+            )?;
+            while verifier
+                .exact_resident_ranges
+                .get(verifier.next_exact_range_index)
+                .is_some_and(|range| range.end_page() <= *page_id)
+            {
+                verifier.next_exact_range_index = verifier
+                    .next_exact_range_index
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("Browser export range cursor overflow"))?;
+            }
+            let requires_exact_match = verifier
+                .exact_resident_ranges
+                .get(verifier.next_exact_range_index)
+                .is_some_and(|range| range.contains(*page_id));
+            if requires_exact_match {
+                let expected = backend.read_page(*page_id)?;
+                if expected != *page {
+                    anyhow::bail!(
+                        "Browser export authority page {page_id} changed after it was validated"
+                    );
+                }
+            }
+            verifier.next_page_id = verifier
+                .next_page_id
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Browser export page id overflow"))?;
+        }
+        Ok(())
+    }
+
+    /// Verify bytes returned by an external async browser read before staging
+    /// them in the synchronous storage backend.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn verify_browser_fetched_page(&self, page_id: u64, page: &[u8]) -> Result<()> {
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned during browser page verify"))?;
+        let page0 = backend.read_page(0)?;
+        verify_browser_published_page_bytes(&page0, self.base_integrity.as_deref(), page_id, page)
+    }
+
     /// Run a closure with read access to the underlying storage backend.
     ///
     /// Used by the browser WASM layer to read pages after `save()` without
     /// exposing the `Arc<Mutex<B>>` directly.
     #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    #[allow(clippy::unwrap_used)] // poison may contain a partial mutation; fail-stop instead of recovering it
     pub(crate) fn with_backend<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&B) -> R,
@@ -2134,16 +2932,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned during browser export"))?;
+        let page0 = backend.read_page(0)?;
         let page = backend.read_page(page_id)?;
-        if let Some(base_integrity) = &self.base_integrity {
-            let covered_start = base_integrity.covered_page_start();
-            let covered_end = covered_start
-                .checked_add(base_integrity.covered_page_count())
-                .ok_or_else(|| anyhow::anyhow!("Base integrity page range overflow"))?;
-            if page_id >= covered_start && page_id < covered_end {
-                base_integrity.verify_page(page_id, &page)?;
-            }
-        }
+        verify_browser_published_page_bytes(
+            &page0,
+            self.base_integrity.as_deref(),
+            page_id,
+            &page,
+        )?;
         Ok(page)
     }
 
@@ -2151,6 +2947,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     ///
     /// Used by the browser WASM layer to drain dirty pages after `save()`.
     #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    #[allow(clippy::unwrap_used)] // poison may contain a partial mutation; fail-stop instead of recovering it
     pub(crate) fn with_backend_mut<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut B) -> R,
@@ -2393,11 +3190,62 @@ fn verify_base_integrity_pages(
     Ok(())
 }
 
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn verify_browser_published_page_bytes(
+    resident_page0: &[u8],
+    base_integrity: Option<&BasePageIntegrityCatalog>,
+    page_id: u64,
+    page: &[u8],
+) -> Result<()> {
+    if resident_page0.len() != PAGE_SIZE {
+        anyhow::bail!("Resident browser page 0 has invalid length");
+    }
+    let header = FileHeader::from_bytes(resident_page0)?;
+    header.validate()?;
+    if page_id >= header.page_count {
+        anyhow::bail!("Fetched page is outside the published page range");
+    }
+    if page.len() != PAGE_SIZE {
+        anyhow::bail!(
+            "Fetched page {page_id} has invalid length {} (expected {PAGE_SIZE})",
+            page.len()
+        );
+    }
+    if page_id == 0 {
+        if page != resident_page0 {
+            anyhow::bail!("Fetched page 0 does not match the loaded publication authority");
+        }
+        return Ok(());
+    }
+    if let Some(catalog) = base_integrity {
+        let covered_end = catalog
+            .covered_page_start()
+            .checked_add(catalog.covered_page_count())
+            .ok_or_else(|| anyhow::anyhow!("Base integrity page range overflow"))?;
+        if page_id >= catalog.covered_page_start() && page_id < covered_end {
+            catalog.verify_page(page_id, page)?;
+        }
+    }
+    Ok(())
+}
+
 fn load_v11_base_integrity(
     backend: &dyn StorageBackend,
     header: &FileHeader,
     extension: &HeaderExtension,
 ) -> Result<Option<Arc<BasePageIntegrityCatalog>>> {
+    let Some(descriptor) = validate_v11_base_integrity_descriptor(header, extension)? else {
+        return Ok(None);
+    };
+    read_base_integrity_catalog(backend, descriptor).map(Some)
+}
+
+/// Validate page-0's complete v11 base layout without reading or allocating
+/// integrity-catalog payload bytes.
+fn validate_v11_base_integrity_descriptor(
+    header: &FileHeader,
+    extension: &HeaderExtension,
+) -> Result<Option<BasePageIntegrityDescriptor>> {
     let descriptor = extension.base_integrity();
     if descriptor.is_empty() {
         let roots_are_empty = header.eavt_root_page == 0
@@ -2419,6 +3267,13 @@ fn load_v11_base_integrity(
     }
     if descriptor.catalog_page_end()? > header.page_count {
         anyhow::bail!("Base integrity catalog exceeds published page count");
+    }
+    let expected_catalog_len =
+        BasePageIntegrityCatalog::encoded_len_for_page_count(descriptor.covered_page_count())?;
+    let descriptor_catalog_len = usize::try_from(descriptor.catalog_len())
+        .map_err(|_| anyhow::anyhow!("Base integrity catalog length exceeds memory limits"))?;
+    if descriptor_catalog_len != expected_catalog_len {
+        anyhow::bail!("Base integrity catalog length does not match its covered page count");
     }
     let covered_page_end = descriptor.covered_page_end()?;
     let fact_page_end = extension
@@ -2442,8 +3297,7 @@ fn load_v11_base_integrity(
             anyhow::bail!("{name} root is outside base integrity coverage");
         }
     }
-
-    read_base_integrity_catalog(backend, descriptor).map(Some)
+    Ok(Some(descriptor))
 }
 
 /// Compute CRC32 checksum over a range of pages on the backend.
@@ -2780,6 +3634,276 @@ mod tests {
         storage.save().unwrap();
         drop(storage);
         entity
+    }
+
+    fn write_three_generation_v11_memory() -> (MemoryBackend, [Uuid; 3]) {
+        let backend = MemoryBackend::new();
+        let inspection = backend.clone();
+        let mut storage = PersistentFactStorage::new(backend, 256).unwrap();
+        let entities = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+
+        for (index, entity) in entities.iter().copied().enumerate() {
+            storage
+                .storage()
+                .transact(
+                    vec![(
+                        entity,
+                        ":bootstrap/generation".to_string(),
+                        Value::Integer(index as i64),
+                    )],
+                    None,
+                )
+                .unwrap();
+            storage.mark_dirty();
+            storage.save().unwrap();
+        }
+        drop(storage);
+        (inspection, entities)
+    }
+
+    fn stage_browser_range(
+        source: &MemoryBackend,
+        destination: &mut MemoryBackend,
+        range: BrowserPageRange,
+    ) {
+        for page_id in range.start_page()..range.end_page() {
+            destination
+                .write_page(page_id, &source.read_page(page_id).unwrap())
+                .unwrap();
+        }
+    }
+
+    fn stage_browser_ranges(
+        source: &MemoryBackend,
+        destination: &mut MemoryBackend,
+        ranges: impl IntoIterator<Item = BrowserPageRange>,
+    ) {
+        for range in ranges {
+            stage_browser_range(source, destination, range);
+        }
+    }
+
+    #[test]
+    fn browser_v11_bootstrap_plans_bounded_metadata_and_every_lineage() {
+        let (source, _) = write_three_generation_v11_memory();
+        let page0 = source.read_page(0).unwrap();
+        let bootstrap = BrowserV11BootstrapPlan::from_page0(&page0).unwrap();
+
+        assert_eq!(
+            bootstrap.published_page_count(),
+            FileHeader::from_bytes(&page0).unwrap().page_count
+        );
+        assert!(bootstrap.base_fact_range().page_count() > 0);
+        assert!(
+            bootstrap.base_covered_range().page_count() >= bootstrap.base_fact_range().page_count()
+        );
+        assert_eq!(bootstrap.required_ranges().len(), 1);
+        assert_eq!(bootstrap.manifest_candidates().len(), 2);
+        assert_eq!(bootstrap.candidate_manifest_ranges().len(), 2);
+        assert!(
+            bootstrap.manifest_candidates()[0].generation()
+                > bootstrap.manifest_candidates()[1].generation()
+        );
+        assert_eq!(
+            bootstrap.manifest_candidates()[0].slot(),
+            HeaderManifestSlotName::Secondary
+        );
+        assert_eq!(
+            bootstrap.manifest_candidates()[1].slot(),
+            HeaderManifestSlotName::Primary
+        );
+
+        let mut resident_metadata = MemoryBackend::new();
+        resident_metadata.write_page(0, &page0).unwrap();
+        stage_browser_ranges(
+            &source,
+            &mut resident_metadata,
+            bootstrap.required_ranges().iter().copied(),
+        );
+        stage_browser_ranges(
+            &source,
+            &mut resident_metadata,
+            bootstrap.candidate_manifest_ranges(),
+        );
+
+        let resident = bootstrap
+            .plan_resident_metadata(&resident_metadata)
+            .unwrap();
+        assert_eq!(
+            resident.published_page_count(),
+            bootstrap.published_page_count()
+        );
+        assert_eq!(resident.manifest_candidates().len(), 2);
+        assert_eq!(resident.candidate_segment_ranges().len(), 2);
+        assert_eq!(resident.manifest_candidates()[0].segment_ranges().len(), 2);
+        assert_eq!(resident.manifest_candidates()[1].segment_ranges().len(), 1);
+        assert_eq!(
+            resident.manifest_candidates()[0].manifest_range(),
+            bootstrap.manifest_candidates()[0].manifest_range()
+        );
+        assert_eq!(
+            resident.manifest_candidates()[0].slot(),
+            HeaderManifestSlotName::Secondary
+        );
+        assert!(
+            resident.manifest_candidates()[0].generation()
+                > resident.manifest_candidates()[1].generation()
+        );
+
+        let base_page_id = bootstrap.base_covered_range().start_page();
+        let base_page = source.read_page(base_page_id).unwrap();
+        resident
+            .verify_fetched_published_page(base_page_id, &base_page)
+            .unwrap();
+        let mut corrupt_base_page = base_page;
+        corrupt_base_page[PAGE_SIZE - 1] ^= 0x01;
+        assert!(
+            resident
+                .verify_fetched_published_page(base_page_id, &corrupt_base_page)
+                .is_err(),
+            "externally fetched base bytes must be generation-verified"
+        );
+        assert!(
+            resident
+                .verify_fetched_published_page(
+                    bootstrap.published_page_count(),
+                    &vec![0; PAGE_SIZE]
+                )
+                .is_err(),
+            "external reads must remain inside page 0's publication boundary"
+        );
+
+        let loaded = PersistentFactStorage::new(source, 256).unwrap();
+        assert_eq!(
+            loaded.browser_base_fact_range().unwrap(),
+            bootstrap.base_fact_range()
+        );
+        assert_eq!(
+            loaded.browser_published_page_count().unwrap(),
+            bootstrap.published_page_count()
+        );
+        loaded
+            .verify_browser_fetched_page(0, &page0)
+            .expect("loaded page-0 authority must verify byte-exact");
+    }
+
+    #[test]
+    fn browser_v11_sparse_segments_preserve_previous_manifest_fallback() {
+        let (source, entities) = write_three_generation_v11_memory();
+        let page0 = source.read_page(0).unwrap();
+        let bootstrap = BrowserV11BootstrapPlan::from_page0(&page0).unwrap();
+
+        let mut metadata = MemoryBackend::new();
+        metadata.write_page(0, &page0).unwrap();
+        stage_browser_ranges(
+            &source,
+            &mut metadata,
+            bootstrap.required_ranges().iter().copied(),
+        );
+        stage_browser_ranges(
+            &source,
+            &mut metadata,
+            bootstrap.candidate_manifest_ranges(),
+        );
+        let resident = bootstrap.plan_resident_metadata(&metadata).unwrap();
+        assert_eq!(resident.manifest_candidates().len(), 2);
+
+        // Pin the complete base and metadata, but stage only the older
+        // lineage's segment set. Page 0 still points at the newer slot, so the
+        // normal loader must try it, observe its missing segment, and fall back.
+        stage_browser_range(&source, &mut metadata, bootstrap.base_covered_range());
+        stage_browser_ranges(
+            &source,
+            &mut metadata,
+            resident.manifest_candidates()[1]
+                .segment_ranges()
+                .iter()
+                .copied(),
+        );
+
+        let recovered = PersistentFactStorage::new(metadata, 256)
+            .expect("missing newest segment must recover through older manifest");
+        let visible = recovered.storage().get_all_facts().unwrap();
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().any(|fact| fact.entity == entities[0]));
+        assert!(visible.iter().any(|fact| fact.entity == entities[1]));
+        assert!(visible.iter().all(|fact| fact.entity != entities[2]));
+    }
+
+    #[test]
+    fn browser_v11_bootstrap_skips_missing_newest_manifest_payload() {
+        let (source, _) = write_three_generation_v11_memory();
+        let page0 = source.read_page(0).unwrap();
+        let bootstrap = BrowserV11BootstrapPlan::from_page0(&page0).unwrap();
+        let older = bootstrap.manifest_candidates()[1];
+
+        let mut partial = MemoryBackend::new();
+        partial.write_page(0, &page0).unwrap();
+        stage_browser_ranges(
+            &source,
+            &mut partial,
+            bootstrap.required_ranges().iter().copied(),
+        );
+        stage_browser_range(&source, &mut partial, older.manifest_range());
+
+        let resident = bootstrap.plan_resident_metadata(&partial).unwrap();
+        assert_eq!(resident.manifest_candidates().len(), 1);
+        assert_eq!(
+            resident.manifest_candidates()[0].generation(),
+            older.generation()
+        );
+    }
+
+    #[test]
+    fn browser_v11_bootstrap_rejects_oversized_manifest_before_fetch() {
+        let (source, _) = write_three_generation_v11_memory();
+        let page0 = source.read_page(0).unwrap();
+        let mut header = FileHeader::from_bytes(&page0).unwrap();
+        let extension = HeaderExtension::read_from_page0(header.version, &page0)
+            .unwrap()
+            .unwrap();
+        let manifest_len = u64::try_from(MAX_BROWSER_BOOTSTRAP_MANIFEST_BYTES).unwrap() + 1;
+        let manifest_page_count = manifest_len.div_ceil(PAGE_SIZE as u64);
+        let manifest_page_start = header.page_count;
+        let malicious = HeaderManifestSlot::new(
+            99,
+            manifest_page_start,
+            manifest_page_count,
+            manifest_len,
+            0,
+        )
+        .unwrap();
+        header.page_count = manifest_page_start + manifest_page_count;
+        header.header_checksum = compute_header_checksum(&header);
+        let malicious_extension = HeaderExtension::new(malicious, extension.primary())
+            .with_base_fact_page_start(extension.base_fact_page_start())
+            .unwrap()
+            .with_base_integrity(extension.base_integrity())
+            .unwrap();
+        let malicious_page0 =
+            build_header_page_with_extension(header, malicious_extension).unwrap();
+
+        assert!(
+            BrowserV11BootstrapPlan::from_page0(&malicious_page0).is_err(),
+            "unsupported newest metadata must not silently fall back to an older manifest"
+        );
+    }
+
+    #[test]
+    fn browser_v11_bootstrap_accepts_canonical_empty_database() {
+        let page0 = build_header_page(FileHeader::new()).unwrap();
+        let plan = BrowserV11BootstrapPlan::from_page0(&page0).unwrap();
+
+        assert_eq!(plan.published_page_count(), 1);
+        assert_eq!(plan.base_fact_range().page_count(), 0);
+        assert_eq!(plan.base_covered_range().page_count(), 0);
+        assert!(plan.required_ranges().is_empty());
+        assert!(plan.manifest_candidates().is_empty());
+
+        let mut backend = MemoryBackend::new();
+        backend.write_page(0, &page0).unwrap();
+        let resident = plan.plan_resident_metadata(&backend).unwrap();
+        assert!(resident.manifest_candidates().is_empty());
     }
 
     fn read_header_and_extension(path: &std::path::Path) -> (FileHeader, HeaderExtension) {

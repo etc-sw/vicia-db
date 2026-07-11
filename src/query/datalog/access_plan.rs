@@ -47,6 +47,16 @@ impl QueryAccessPlan {
         }
     }
 
+    /// Whether executing this query requires the complete committed fact base.
+    ///
+    /// Browser storage uses this pre-I/O classification to choose between a
+    /// bounded demand-read loop and an explicit full-scan path. It must not
+    /// infer a full scan from a failed selective lookup.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn is_full_scan(&self) -> bool {
+        matches!(self, Self::FullScan)
+    }
+
     pub(crate) fn read_facts(&self, storage: &FactStorage) -> Result<Vec<Fact>> {
         let Self::Selective { lookups } = self else {
             return storage.get_all_facts();
@@ -210,5 +220,17 @@ mod tests {
             QueryAccessPlan::for_query(&query),
             QueryAccessPlan::FullScan
         );
+    }
+
+    #[test]
+    fn full_scan_shape_is_explicitly_inspectable_before_io() {
+        let full_scan = QueryAccessPlan::for_query(&parse_query(
+            "(query [:find ?e :where [?e ?attribute ?value]])",
+        ));
+        let selective =
+            QueryAccessPlan::for_query(&parse_query("(query [:find ?e :where [?e :name ?name]])"));
+
+        assert!(full_scan.is_full_scan());
+        assert!(!selective.is_full_scan());
     }
 }
