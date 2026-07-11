@@ -52,11 +52,13 @@ The default quiet-surface store uses `viciaBackedCanvasPersistence`, backed by
 Vetch's local `@vicia-db/browser` build. The adapter opens the IndexedDB database
 `vetch.quiet-surface.authority.v2` and writes Datalog facts for canvas command
 events, cards, source references, edges, spaces, and manual groups.
-The Vicia package now exposes `BrowserDb.openPaged()`, but this Vetch adapter
-has not yet adopted that bounded path; package sync and caller smoke are a
-separate Vetch-side acceptance step. The Vicia-owned 1M matrix now completes
-the foreground measurement and fixes import/export/maintenance as
-disposable-worker work.
+Vetch main `6c5b1f7` vendors the clean `@vicia-db/browser` build from Vicia
+`9c8ae60`. The adapter opens foreground authority handles through
+`BrowserDb.openPaged()`, preflights any legacy v10 Vicia image before mount,
+serializes the paged one-in-flight boundary, and runs strict import, verified
+export, and maintenance in disposable workers under one shared Web Lock. The
+Vicia-owned 1M matrix supplies the foreground and O(total) process evidence;
+the Vetch Chrome acceptance supplies the caller lifecycle proof.
 
 The integration has already proved useful primitives:
 
@@ -390,9 +392,15 @@ tests pass in the final headless-Chrome run. A5-6d now completes bounded 1M
 open/query/growth and maintenance peak-memory evidence on the recorded host.
 Foreground v11 open/query/write is bounded; legacy migration, import, full
 export, and recompact are accepted only in a disposable DedicatedWorker. The
-measured latter three sampled PSS deltas are 2.55 / 1.04 / 2.09 GiB. Vetch has
-not yet switched its adapter or proved that Web-Locked migration/worker
-termination/reopen lifecycle, so Gate E as a whole remains open.
+measured latter three sampled PSS deltas are 2.55 / 1.04 / 2.09 GiB. Vetch main
+`6c5b1f7` consumes clean Vicia `9c8ae60`, adopts `openPaged()`, preflights v10,
+uses strict paged-ready import, observes write advice, runs all O(total) work
+under its shared Web Lock, terminates workers after success or failure, and
+reopens through the bounded path. Its aggregate Chrome authority suite covers
+the live Canvas, relation, Decision, GO, Braindump, and Condense callers plus a
+visible fail-closed startup surface. **Gate E passes.** This verdict does not
+claim Gate A's later removal of the legacy canvas co-authority or packaged
+Windows WebView2 host verification.
 
 ## Recommended Work Order
 

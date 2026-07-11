@@ -898,8 +898,8 @@ structure and correctness, not 1M performance numbers:
 
 Gate status at A5-6c: the page-on-demand implementation existed, but no new 1M
 numbers were recorded in that slice. A5-6d below supplies the cold-open/query/
-warm-repeat/write/growth/export and maintenance-memory matrix; Vetch adapter
-adoption of `openPaged()` remains required before Gate E can close.
+warm-repeat/write/growth/export and maintenance-memory matrix; Vetch main
+`6c5b1f7` later supplies the matching `openPaged()` caller adoption.
 
 ### A5-6d: 1M Paged Browser Acceptance Matrix (2026-07-12)
 
@@ -961,9 +961,12 @@ v11 fixture, while migration temporarily loads the legacy published image.
 Run these phases in a disposable DedicatedWorker under the Web Lock, emit an
 outcome, terminate the worker after success or failure, and reopen through
 `openPaged()`. This single 32 GiB host run does not establish a general 16 GiB
-product budget. The whole Vetch Gate E remains open for package/adapter
-adoption and that caller-owned worker lifecycle/migration smoke; it no longer
-needs another Vicia storage-format or 1M measurement slice.
+product budget. Vetch main `6c5b1f7` consumes clean Vicia `9c8ae60`, adopts
+`openPaged()` for foreground authority handles, and proves the Web-Locked
+disposable migration/import/export/maintenance lifecycle, termination receipts,
+and reopen behavior in real Chrome. Together with this matrix, Gate E passes;
+the separate Gate A authority cutover and packaged WebView2 host smoke are not
+claimed by this benchmark.
 
 ---
 

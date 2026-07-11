@@ -236,6 +236,7 @@ Derived from the semantics above plus the A5 growth measurements
    200 ms sampled process-tree PSS. Export retains 1.04 GiB and maintenance
    retains 1.27 GiB when the call returns; the harness then closes the browser
    process. A long-lived authority worker is therefore not the intended
-   reclamation boundary. Gate E still requires Vetch adapter adoption and proof
-   that its actual runtime migrates if needed, terminates the worker, and
-   reopens cleanly.
+   reclamation boundary. Vetch main `6c5b1f7` implements this exact boundary
+   against clean Vicia `9c8ae60`: foreground `openPaged()`, one shared Web Lock,
+   disposable migration/import/export/maintenance, outcome receipts, worker
+   termination, and fresh reopen. Its real-Chrome caller smoke closes Gate E.
