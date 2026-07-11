@@ -42,6 +42,20 @@ impl BrowserBufferBackend {
     pub fn take_dirty(&mut self) -> HashSet<u64> {
         std::mem::take(&mut self.dirty)
     }
+
+    /// Clone every page as `(page_id, bytes)` pairs, sorted by page id.
+    /// Used by `BrowserDb::import_graph()` to flush the complete
+    /// post-construction page set (including any pages written during format
+    /// migration) to IndexedDB in one atomic replace.
+    pub fn all_pages(&self) -> Vec<(u64, Vec<u8>)> {
+        let mut pages: Vec<(u64, Vec<u8>)> = self
+            .pages
+            .iter()
+            .map(|(id, data)| (*id, data.clone()))
+            .collect();
+        pages.sort_unstable_by_key(|(id, _)| *id);
+        pages
+    }
 }
 
 impl Default for BrowserBufferBackend {
@@ -159,6 +173,19 @@ mod tests {
         let dirty = buf.take_dirty();
         assert!(dirty.contains(&0));
         assert!(dirty.contains(&1));
+    }
+
+    // `#[wasm_bindgen_test]` (not plain `#[test]`): this module only compiles
+    // on wasm32, where the wasm-bindgen harness silently skips libtest tests.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn all_pages_returns_every_page() {
+        let pages = HashMap::from([(2u64, page(2)), (0u64, page(0)), (1u64, page(1))]);
+        let buf = BrowserBufferBackend::load_pages(pages);
+        let all = buf.all_pages();
+        assert_eq!(all.len(), 3);
+        let ids: Vec<u64> = all.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![0, 1, 2], "pages must be sorted by id");
+        assert_eq!(all[2].1, page(2));
     }
 
     #[test]

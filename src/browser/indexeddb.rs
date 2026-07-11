@@ -35,9 +35,14 @@ fn request_to_promise(request: &IdbRequest) -> Promise {
 }
 
 /// Converts an `IdbTransaction` completion into a JS `Promise`.
+///
+/// Hooks `onabort` in addition to `oncomplete`/`onerror`: an abort not caused
+/// by a request error (e.g. quota exhaustion at commit) fires only `"abort"`,
+/// and without the hook the promise would never settle.
 fn transaction_to_promise(tx: &IdbTransaction) -> Promise {
     let tx = tx.clone();
     Promise::new(&mut |resolve, reject| {
+        let reject_abort = reject.clone();
         let on_complete: Closure<dyn FnMut(web_sys::Event)> =
             Closure::once(move |_: web_sys::Event| {
                 resolve.call0(&JsValue::NULL).ok();
@@ -48,10 +53,18 @@ fn transaction_to_promise(tx: &IdbTransaction) -> Promise {
                     .call1(&JsValue::NULL, &JsValue::from_str("IdbTransaction failed"))
                     .ok();
             });
+        let on_abort: Closure<dyn FnMut(web_sys::Event)> =
+            Closure::once(move |_: web_sys::Event| {
+                reject_abort
+                    .call1(&JsValue::NULL, &JsValue::from_str("IdbTransaction aborted"))
+                    .ok();
+            });
         tx.set_oncomplete(Some(on_complete.as_ref().unchecked_ref()));
         tx.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        tx.set_onabort(Some(on_abort.as_ref().unchecked_ref()));
         on_complete.forget();
         on_error.forget();
+        on_abort.forget();
     })
 }
 
@@ -169,6 +182,33 @@ impl IndexedDbBackend {
         // automatically once all put requests have been processed and no
         // new requests are made. We wait here to ensure durability before
         // returning to the caller.
+        JsFuture::from(transaction_to_promise(&tx)).await?;
+        Ok(())
+    }
+
+    /// Atomically replace the entire object store contents with `pages`.
+    ///
+    /// `clear()` and all `put` operations run in ONE `readwrite` transaction:
+    /// if anything fails (including quota exhaustion at commit), the whole
+    /// transaction aborts and the previous store contents remain fully intact.
+    /// Requests within an IndexedDB transaction execute in FIFO order, so the
+    /// clear is guaranteed to precede the puts.
+    ///
+    /// This is the bulk-replace path for `BrowserDb::import_graph()`;
+    /// `write_pages` remains the incremental path for `execute`/`checkpoint`.
+    pub async fn replace_all_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> Result<(), JsValue> {
+        let tx = self
+            .db
+            .transaction_with_str_and_mode(&self.store_name, IdbTransactionMode::Readwrite)?;
+        let store = tx.object_store(&self.store_name)?;
+
+        store.clear()?;
+        for (page_id, data) in &pages {
+            let key = JsValue::from_f64(*page_id as f64);
+            let arr = Uint8Array::from(data.as_slice());
+            store.put_with_key(&arr, &key)?;
+        }
+
         JsFuture::from(transaction_to_promise(&tx)).await?;
         Ok(())
     }

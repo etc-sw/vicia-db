@@ -198,6 +198,17 @@ outcome parity) stays deferred until this evidence shows a measured wall.
 
 - Gate: the Vicia-side preconditions of Vetch Gate E are documented and
   measured; import atomicity has a test.
+- Progress (2026-07-11): **import atomicity LANDED** — `importGraph` now
+  commits the durable replacement in a single IndexedDB `clear`+`put`
+  transaction *before* the live handle switches (was: swap-then-flush, which
+  left memory on the new DB when the flush failed, tearing durable state via
+  later write-through flushes; shrinking imports also leaked stale trailing
+  pages in IndexedDB forever). The shared IDB transaction promise now hooks
+  `onabort`, so a non-request abort (e.g. quota exhaustion at commit) errors
+  instead of hanging. Locked by six wasm tests in `src/browser/` — the
+  flush-failure-ordering and shrinking-import stale-page tests are red on the
+  old code. Remaining for the gate: caller rules doc, durability semantics
+  (G13), parity measurements (1M open, IndexedDB growth).
 
 ### A8 — Bulk valid-time closure, the "forget" primitive (harrekki P1 #6)
 
