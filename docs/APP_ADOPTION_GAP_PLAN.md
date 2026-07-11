@@ -207,8 +207,20 @@ outcome parity) stays deferred until this evidence shows a measured wall.
   `onabort`, so a non-request abort (e.g. quota exhaustion at commit) errors
   instead of hanging. Locked by six wasm tests in `src/browser/` — the
   flush-failure-ordering and shrinking-import stale-page tests are red on the
-  old code. Remaining for the gate: caller rules doc, durability semantics
-  (G13), parity measurements (1M open, IndexedDB growth).
+  old code.
+- Progress (2026-07-11): **growth measured** (evidence part 2/3, `docs/
+  BENCHMARKS.md` "A5: Browser IndexedDB Growth") — browser write cadence is
+  **not bounded**: cumulative IndexedDB growth is quadratic in commits (2,000
+  ten-fact commits → 30.4 MB, 4,500 → 123.6 MB for ~1.8 MB logical), per-
+  commit latency linear in segment count (2 ms → 137 ms), soft/hard delta
+  thresholds crossed with nothing able to act, and the `exportGraph` →
+  `importGraph` round-trip measured as a size identity — **no caller-side
+  remedy exists**. Reopen tracks IndexedDB size, not logical size. 1M open/
+  import re-measured on the atomic import path: no regression, 407 MB
+  single-transaction import commits cleanly. This is the measured wall for
+  the deferred facade decision: browser Vicia is read-mostly (bulk import +
+  bounded writes) until a maintenance surface lands. Remaining for the gate:
+  caller rules doc + durability semantics (G13) — A5-3.
 
 ### A8 — Bulk valid-time closure, the "forget" primitive (harrekki P1 #6)
 

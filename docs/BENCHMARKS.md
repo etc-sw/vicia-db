@@ -548,6 +548,17 @@ in the Vetch caller requirements, not a bigger tab budget. Heap figures are
 `performance.memory.usedJSHeapSize` deltas (renderer JS heap; wasm linear
 memory accounting may vary by Chrome version).
 
+Re-measured 2026-07-11 on the A5-1 atomic import path (single clear+put
+IndexedDB transaction, commit `13d41bc`):
+
+| Fixture | import (fetch+IDB) | open | first query | JS heap growth on open |
+|---|---|---|---|---|
+| 100K facts | 0.9 s | 364–368 ms | 3.3 ms | +41.6 MB |
+| 1M facts | 10.8 s | 3.44–3.55 s | 3.3–3.6 ms | +419 MB |
+
+The 407 MB single-transaction import commits without quota aborts; numbers
+match the A0 rows above — no regression from the atomicity change.
+
 ---
 
 ## A2: Incremental Fact Log (2026-07-11)
@@ -618,6 +629,74 @@ regression-tested (`tests/wal_test.rs`, `src/storage/backend/file.rs` unit
 tests). Scope caveats: SIGKILL validates process-death durability, not
 power loss; maintenance-op kills exercise the maintenance checkpoint path
 only (recompact thresholds are unreachable at this scale).
+
+---
+
+## A5: Browser IndexedDB Growth (2026-07-11)
+
+Long-running write growth of the browser backend (`BrowserDb`), measured for
+the A5 parity-evidence gate (`docs/APP_ADOPTION_GAP_PLAN.md`). Every browser
+write `execute()` runs `save()`, which appends a delta segment and rewrites
+the manifest; `save()` never consults the delta growth thresholds, and the
+recompact path (`run_idle_delta_maintenance`) has no browser surface — so
+superseded pages accumulate in IndexedDB (and in the in-memory page buffer)
+with no reclaim path. These runs quantify that shape.
+
+Runner: `examples/browser/bench-driver.cjs growth <cycles> <factsPerCycle>
+<sampleEvery> <fixture-url-path|empty>` (same serving/env as "Browser Open
+at Scale"; Chrome for Testing 150, headless). Sizes are IndexedDB page count
+× 4 KB; `idbCount == header page_count` held at every sample (page ids are
+contiguous and never reused). Commit = one 10-fact `(transact ...)`.
+
+Empty base (2,000- and 4,500-commit runs; the 2,000-commit prefix reproduced
+exactly across both — 7,775 pages at commit 2,000 in each):
+
+| Commits | Logical facts | IDB pages | IDB size | exec p50 | exec p95 |
+|---|---|---|---|---|---|
+| 100 | 1,000 | 204 | 0.8 MB | 2.0 ms | 2.9 ms |
+| 1,000 | 10,000 | 2,709 | 10.6 MB | 24–25 ms | 27–29 ms |
+| 2,000 | 20,000 | 7,775 | 30.4 MB | 54–56 ms | 59–62 ms |
+| 3,000 | 30,000 | 15,303 | 59.8 MB | 88 ms | 101 ms |
+| 4,000 | 40,000 | 25,444 | 99.4 MB | 126 ms | 138 ms |
+| 4,500 | 45,000 | 31,642 | 123.6 MB | 137 ms | 150 ms |
+
+100K-fact fixture base (9,778 pages / 38.2 MB imported), 2,000 commits:
+grows to 17,684 pages / 69.1 MB. The growth delta (+7,906 pages) is
+essentially the empty-base curve (+7,775) — growth is base-independent,
+entirely delta-chain-shaped.
+
+Findings:
+
+- **Cumulative growth is quadratic in commits** (2.25× commits → 4.07×
+  size): each commit appends ~1 segment page plus a full manifest rewrite
+  whose page cost is linear in segment count (~13 pages/commit by commit
+  4,500).
+- **Per-commit latency is linear in segment count** (~0.033 ms/segment):
+  p50 2 ms → 54 ms → 137 ms over 4,500 commits. At a plausible
+  commit-on-gesture-end cadence of 500 commits/day this reaches ~80 MB of
+  IndexedDB and >100 ms per commit within a week, for ~1.4 MB of logical
+  data.
+- **Thresholds fire into a void**: the soft (1,024) and hard (4,096) delta
+  segment thresholds were crossed at commits ~1,025 / ~4,097 with no
+  behavior change — nothing in the browser can act on them.
+- **`exportGraph` → `importGraph` is NOT a remedy**: the round-trip is a
+  size identity (31,642 pages before and after at commit 4,500; data
+  verified by point queries). Export serialises the full `0..page_count`
+  range including superseded pages; the fold-to-fresh-base path exists only
+  behind native `run_idle_maintenance()`.
+- **Reopen cost tracks IndexedDB size, not logical size**: after 4,500
+  commits (45K facts, ~1.8 MB logical) reopen is ~1.19 s with ~136 MB heap —
+  the same shape as a clean 100K-fact / 40 MB fixture (~0.37 s / ~42 MB).
+- Heap sampled inside the long-lived growth page under-reports wasm linear
+  memory (single-digit MB while the page buffer holds the full page set);
+  the reopen heap figures are the reliable resident-cost signal.
+
+Gate conclusion: browser Vicia write cadence is **not bounded**. Without a
+maintenance surface (or a native-fold-then-import path), IndexedDB and
+reopen cost grow without limit under exactly the cadence Vetch plans. This
+is the measured wall the A5 scope defers facade expansion on; caller policy
+must treat browser Vicia as read-mostly (bulk import + bounded writes)
+until a maintenance story lands.
 
 ---
 

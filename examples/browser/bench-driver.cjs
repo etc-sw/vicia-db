@@ -19,26 +19,22 @@ const PAGE =
   process.env.BENCH_PAGE ?? "http://localhost:8123/examples/browser/bench.html";
 const PROFILE =
   process.env.BENCH_PROFILE ?? path.join(os.tmpdir(), "minigraf-bench-profile");
-const fixture = process.argv[2];
-const runs = Number(process.argv[3] ?? 3);
 
-if (!fixture) {
-  console.error("usage: bench-driver.cjs <fixture-url-path|skip-import> [runs]");
-  process.exit(1);
-}
-
-async function withPage(fn) {
+async function withPage(fn, { extraArgs = [], forwardConsole = false } = {}) {
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: true,
     protocolTimeout: 1_800_000,
     userDataDir: PROFILE,
-    args: ["--enable-precise-memory-info", "--disable-gpu"],
+    args: ["--enable-precise-memory-info", "--disable-gpu", ...extraArgs],
   });
   try {
     const page = await browser.newPage();
     page.setDefaultTimeout(1_800_000);
     page.on("pageerror", (e) => console.error("pageerror:", e.message));
+    if (forwardConsole) {
+      page.on("console", (m) => console.log(m.text()));
+    }
     await page.goto(PAGE, { waitUntil: "load" });
     return await fn(page);
   } finally {
@@ -46,7 +42,77 @@ async function withPage(fn) {
   }
 }
 
-(async () => {
+// A5-2 growth mode: repeated small write executes against one live handle,
+// sampling IndexedDB growth; then an export->import round-trip (measured as
+// the no-remedy result); then reopen-after-growth in fresh browsers.
+async function growthMain() {
+  const cycles = Number(process.argv[3]);
+  const factsPerCycle = Number(process.argv[4]);
+  const sampleEvery = Number(process.argv[5]);
+  const fixture = process.argv[6];
+  const reopenRuns = Number(process.argv[7] ?? 2);
+  if (!cycles || !factsPerCycle || !sampleEvery || !fixture) {
+    console.error(
+      "usage: bench-driver.cjs growth <cycles> <factsPerCycle> <sampleEvery> <fixture-url-path|empty> [reopenRuns]",
+    );
+    process.exit(1);
+  }
+
+  // Phase A: clean slate (+ optional fixture base) in its own browser.
+  await withPage(async (page) => {
+    console.log("reset:", await page.evaluate(() => window.benchReset()));
+    if (fixture !== "empty") {
+      console.log(
+        "import:",
+        await page.evaluate((u) => window.benchImport(u), fixture),
+      );
+    }
+  });
+
+  // Phase B: growth loop + round-trip in one long-lived page. Samples stream
+  // through forwarded console lines; --expose-gc reduces heap-sample noise.
+  await withPage(
+    async (page) => {
+      console.log(
+        "growthSamples:",
+        await page.evaluate(
+          (c, f, s) => window.benchGrowth(c, f, s),
+          cycles,
+          factsPerCycle,
+          sampleEvery,
+        ),
+      );
+      console.log(
+        "roundTrip:",
+        await page.evaluate(() => window.benchGrowthRoundTrip()),
+      );
+    },
+    { extraArgs: ["--js-flags=--expose-gc"], forwardConsole: true },
+  );
+
+  // Phase C: reopen-after-growth — open cost now tracks IDB size, not
+  // logical size.
+  for (let i = 0; i < reopenRuns; i++) {
+    await withPage(async (page) => {
+      console.log(
+        `reopen[${i}]:`,
+        await page.evaluate(() => window.benchOpen()),
+      );
+    });
+  }
+}
+
+// Legacy A0 mode: import once, then measure open() in fresh browsers.
+async function openMain() {
+  const fixture = process.argv[2];
+  const runs = Number(process.argv[3] ?? 3);
+  if (!fixture) {
+    console.error(
+      "usage: bench-driver.cjs <fixture-url-path|skip-import> [runs]\n" +
+        "       bench-driver.cjs growth <cycles> <factsPerCycle> <sampleEvery> <fixture-url-path|empty> [reopenRuns]",
+    );
+    process.exit(1);
+  }
   if (fixture !== "skip-import") {
     await withPage(async (page) => {
       console.log("reset:", await page.evaluate(() => window.benchReset()));
@@ -64,4 +130,10 @@ async function withPage(fn) {
       );
     });
   }
-})();
+}
+
+if (process.argv[2] === "growth") {
+  growthMain();
+} else {
+  openMain();
+}
