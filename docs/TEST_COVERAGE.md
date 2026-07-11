@@ -1,17 +1,17 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: A7 kill -9 durability harness (July 2026), 1154 tests ✅
+**Last Updated**: A2 incremental fact log (July 2026), 1167 tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1154 ✅ (1143 passing, 11 ignored)
-- ✅ 759 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, and A7 FileLock crash-robustness guards)
+**Total Tests**: 1167 ✅ (1155 passing, 12 ignored)
+- ✅ 765 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A7 FileLock crash-robustness guards, and A2 since-tail page-probe/no-full-scan guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
 - ✅ 12 concurrency tests (integration, 1 ignored: nightly stress)
 - ✅ 22 WAL / crash recovery tests (integration — includes the A7-found header-only-WAL tx-counter regression)
-- ✅ 17 session protocol tests (integration, A6 — framed pipe NDJSON, tagged values, child-process gate runs)
+- ✅ 20 session protocol tests (integration, A6 — framed pipe NDJSON, tagged values, child-process gate runs; A2 export_since op)
 - ✅ 2 kill -9 durability harness tests (integration, A7 — default smoke + `#[ignore]`d 2,400-cycle nightly gate)
 - ✅ 2 cross-platform compat tests (integration, Phase 8.1)
 - ✅ 6 index tests (integration, Phase 6.1)
@@ -34,7 +34,8 @@
 - ✅ 6 migration matrix tests (integration, Wave 3 #215 + v7/v8→v9 format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
 - ✅ 7 multi-value index tests (integration, #287 — same entity+attribute batch values survive indexed public query paths, ref edges, `:as-of`, `:valid-at`, retraction, checkpoint/reopen)
 - ✅ 5 retract valid-time tests (integration, Vetch ledger parity — scoped retract removes only the matching valid-time window, legacy retract still wipes all windows, Ref edge value, WriteTransaction parity, checkpoint/reopen)
-- ✅ 4 fact-log export tests (integration, Vetch ledger receipts — public append-only export includes `asserted`, `tx_id`, `tx_count`, valid-time scope, legacy retractions, scoped Ref-edge retractions, checkpoint/reopen)
+- ✅ 7 fact-log export tests (integration, Vetch ledger receipts — public append-only export includes `asserted`, `tx_id`, `tx_count`, valid-time scope, legacy retractions, scoped Ref-edge retractions, checkpoint/reopen; A2 since-tail subsequence equivalence across base/delta/pending layers and stored-cursor reopen polling)
+- ✅ 1 incremental fact-log gate fixture (`tests/fact_log_since_benchmark.rs`, `#[ignore]`d — 1M-base since-tail latency, see `docs/BENCHMARKS.md` "A2: Incremental Fact Log")
 - ✅ 17 delta checkpoint integration tests (integration, Vetch delta storage — v10 manifest publish, multi-segment append, base/delta and segment/segment Ref edges, later-segment retraction, deterministic export, corrupt-slot fallback)
 - ✅ 5 delta checkpoint crash recovery tests (integration, Vetch delta storage — unpublished delta ignored, WAL replay, selected corrupt/truncated delta errors, stale WAL skip after header publish)
 - ✅ 1 checkpoint rebuild benchmark test (integration, Vetch delta storage — small pending write benchmark gate)
@@ -52,7 +53,7 @@
 - ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 
-**Status**: ✅ **All 1143 non-ignored tests passing** (11 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7 full kill -9 gate)
+**Status**: ✅ **All 1155 non-ignored tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -461,7 +462,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 
 **Coverage**: ~92%
 
-### 8. Packed Pages (`src/storage/packed_pages.rs`) - ✅ Good (8 tests)
+### 8. Packed Pages (`src/storage/packed_pages.rs`) - ✅ Good (10 tests)
 
 - ✅ Single fact pack/unpack roundtrip
 - ✅ Multiple facts pack/unpack roundtrip
@@ -576,6 +577,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ Concurrent write+checkpoint: no deadlock or data loss under concurrent fault injection (Wave 3 #214)
 - ✅ Backend error propagation: storage errors surface as Err, not panic (Wave 3 #209)
 - ✅ Header-only WAL preserves tx counter and acked writes (A7-found regression: counter must hold the committed watermark, next write must extend not reuse tx_counts, and its WAL entry must replay)
+- ✅ `last_tx_count` page probe: last slot carries the page max; empty / non-packed / short pages read as `None` (A2)
 
 ### kill -9 Durability Harness (`tests/kill9_durability_test.rs`) - ✅ 2 tests (A7)
 
@@ -733,12 +735,15 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ explicit `WriteTransaction` scoped retract matches implicit `Minigraf::execute`
 - ✅ checkpoint/reopen preserves scoped retraction semantics
 
-### Fact-Log Export (`tests/fact_log_export_test.rs`) - ✅ 4 tests
+### Fact-Log Export (`tests/fact_log_export_test.rs`) - ✅ 7 tests
 
 - ✅ append-only export includes assertion and legacy retraction records with `tx_id`, `tx_count`, valid-time scope, and `asserted`
 - ✅ scoped Ref-edge retractions export as exact valid-time windows, not all-valid-time legacy wipes
 - ✅ same Ref E/A/V retract and assert in one `WriteTransaction` exports as two same-tx rows distinguished by `asserted`
 - ✅ checkpoint/reopen preserves Ref values and per-window fact-log records
+- ✅ A2 `export_fact_log_since`: exact ordered `tx_count > since` subsequence of the full export (asserted + retracted, valid-time scope preserved); since=0 equals full export, since≥head is empty
+- ✅ A2 since-tail spans base / delta-segment / pending layers with subsequence equivalence at every layer boundary
+- ✅ A2 stored-cursor poll across reopen sees exactly the new assertion + retraction past the cursor
 
 ### Delta Checkpoint Integration (`tests/delta_checkpoint_integration_test.rs`) - ✅ 17 tests
 
@@ -967,7 +972,8 @@ cargo test --test prepared_statements_test # prepared statements (17)
 cargo test --test migration_matrix_test    # migration matrix (6)
 cargo test --test multivalue_index_test    # same entity+attribute multi-value regression (7)
 cargo test --test retract_valid_time_test  # scoped retract valid-time parity (5)
-cargo test --test fact_log_export_test     # append-only fact-log export (4)
+cargo test --test fact_log_export_test     # append-only fact-log export + A2 since-tail (7)
+cargo test --release --test fact_log_since_benchmark -- --ignored # A2 1M-base gate fixture
 cargo test --test delta_checkpoint_integration_test # v10 delta checkpoint integration (17)
 cargo test --test delta_checkpoint_crash_recovery_test # v10 delta checkpoint crash recovery (5)
 cargo test --test index_corruption_test    # index corruption (5)
@@ -1020,7 +1026,7 @@ cargo test -- --nocapture
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 1154 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and maintenance regressions + A6 session protocol + A7 kill -9 durability (including browser WASM + WASI + cross-platform compat + fuzzing CI)
+- 1167 tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and maintenance regressions + A6 session protocol + A7 kill -9 durability + A2 incremental fact log (including browser WASM + WASI + cross-platform compat + fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

@@ -131,7 +131,7 @@ cargo run < demos/demo_negation.txt
 
 5. **`src/repl.rs`** — Interactive REPL; TTY-aware (suppresses prompts/banner for piped input)
 
-6. **`src/db.rs`** — Public API: `Minigraf::open/execute/prepare/begin_write/checkpoint/save/export_fact_log`, `WriteTransaction`, `OpenOptions::page_cache_size`
+6. **`src/db.rs`** — Public API: `Minigraf::open/execute/prepare/begin_write/checkpoint/save/export_fact_log/export_fact_log_since`, `WriteTransaction`, `OpenOptions::page_cache_size`
 
 7. **`src/wal.rs`** — Fact-level sidecar WAL, CRC32-protected entries, crash recovery
 
@@ -170,7 +170,7 @@ Auto-migrates v1/v2/v3/v4/v5/v6/v7/v8 → v9 on open/checkpoint.
 
 ## Test Coverage
 
-**1154 tests total** (1143 passing, 11 ignored).
+**1167 tests total** (1155 passing, 12 ignored).
 See `docs/TEST_COVERAGE.md` for the full per-file breakdown.
 
 **Testing conventions** — see the Testing Conventions section below before writing any tests.

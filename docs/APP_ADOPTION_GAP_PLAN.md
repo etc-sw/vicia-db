@@ -2,8 +2,8 @@
 
 Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 `docs/HARREKKI_CALLER_REQUIREMENTS.md`. Caller decisions override the initial
-2026-07-11 audit inferences (see Revision Note). A0, A6, and A7 landed
-2026-07-11; next up is A2. This line
+2026-07-11 audit inferences (see Revision Note). A0, A6, A7, and A2 landed
+2026-07-11 (A2's session frame shape awaits caller-lane ACK); next up is A5. This line
 sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
 delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 apply unchanged.
@@ -148,8 +148,27 @@ refresh and wants public change-feed APIs only for measured gaps. A2 is
 justified by the harrekki P0 alone; Vetch may adopt it via measurement. A
 push/listener API stays deferred (both callers agree polling/cursor first).
 
-- Gate: at 1M base, a since-tail of ≤100 records returns without
-  `stream_all()`; latency recorded in BENCHMARKS.md.
+Landed 2026-07-11. `Minigraf::export_fact_log_since(since_tx_count)`
+returns exactly the `tx_count > since` subsequence of `export_fact_log()`.
+Committed packed pages are tx-nondecreasing (append-order checkpoints,
+order-preserving recompact), so the reader binary-searches the first tail
+page in O(log pages) cache reads — the tail stays cheap even after a
+recompact folds it into the base, the case a watermark-only skip would
+miss; delta and pending layers filter in memory. The no-full-scan
+discipline is regression-locked twice: a `SinceOnlyLoader` reader double
+whose full-stream entry points bail (`src/graph/storage.rs`), and a
+counting-backend page-read bound (`src/storage/persistent_facts.rs`).
+
+Session exposure: `export_since` op implemented and tested, but the frame
+shape is **proposed, pending caller-lane ACK** per the A6 precedent
+(`docs/SESSION_PROTOCOL.md` "export_since" — includes the open chunked-reply
+question). The Rust API is frozen; the first wire byte is not.
+
+- Gate: PASSED — at a 1M-fact committed base, a 100-record base tail
+  returns in 91 µs cold / 32 µs warm (full-export contrast 256 ms,
+  ~2,800×); pending / delta-segment 50-record tails 52 µs / 31 µs; empty
+  head poll 3 µs. Evidence: `docs/BENCHMARKS.md` "A2: Incremental Fact
+  Log"; fixture `tests/fact_log_since_benchmark.rs` (`--ignored`).
 
 ### A5 — Browser parity evidence + adoption policy (expanded per Vetch Gate E)
 

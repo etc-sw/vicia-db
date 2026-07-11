@@ -550,6 +550,37 @@ memory accounting may vary by Chrome version).
 
 ---
 
+## A2: Incremental Fact Log (2026-07-11)
+
+`Minigraf::export_fact_log_since(since_tx_count)` returns the fact-log tail
+(`tx_count > since`) at cost proportional to the tail, not the committed
+graph (`docs/APP_ADOPTION_GAP_PLAN.md` slice A2, harrekki P0 #2). Committed
+packed pages hold facts in nondecreasing `tx_count` order, so the reader
+binary-searches the first tail page (O(log pages) cache reads) and streams
+from there; delta segments and pending facts filter in memory. Fixture:
+
+```bash
+cargo test --release --test fact_log_since_benchmark -- --ignored --nocapture
+```
+
+Gate run (A0 environment, 1,000,000 committed facts, head tx_count 1,100):
+
+| Scenario | Tail records | Latency |
+|---|---|---|
+| Base tail — cursor inside the 1M base, cold cache | 100 | 90.9 µs |
+| Base tail — warm cache | 100 | 32.0 µs |
+| Pending tail (uncheckpointed) | 50 | 51.7 µs |
+| Delta-segment tail (after checkpoint) | 50 | 31.3 µs |
+| Empty poll at head | 0 | 3.2 µs |
+| Full `export_fact_log()` contrast | 1,000,050 | 256.4 ms |
+
+The cold base tail is the post-recompact daemon-tick shape — the case where
+a watermark-only skip would degrade to a committed full scan; the page probe
+keeps it ~2,800× cheaper than the full export. Setup cost for the fixture:
+1M-fact checkpoint 7.9 s.
+
+---
+
 ## A7: kill -9 Durability Gate (2026-07-11)
 
 Reliability gate, not a benchmark (`docs/APP_ADOPTION_GAP_PLAN.md` slice A7,
