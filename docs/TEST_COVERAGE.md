@@ -1,6 +1,6 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: A5-6d 1M paged-browser acceptance evidence (July 2026), 1277 native tests + 55 browser WASM tests in source
+**Last Updated**: strict paged-import cutover boundary (July 2026), 1277 native tests + 57 browser WASM tests in source
 
 ## Test Summary
 
@@ -54,7 +54,7 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
-- ➕ 55 browser-WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh`. A5-4 covers maintenance/failure ordering; A5-5 adds both-producer tagged portability and shared corruption/recovery; A5-6b adds durable v10→v11 migration and verified export; A5-6c adds bounded metadata-only open, cold/warm demand reads, exact page-0 stale-handle rejection, corrupt-page failure, sparse rollback/import/write/forget/maintenance convergence, asynchronous verified export, full-scan staging release, callback cleanup, and legacy recovery compatibility. All 55 passed in the final Chrome run. The same script is enforced by the Browser WASM CI job.)
+- ➕ 57 browser-WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh`. A5-4 covers maintenance/failure ordering; A5-5 adds both-producer tagged portability and shared corruption/recovery; A5-6b adds durable v10→v11 migration and verified export; A5-6c adds bounded metadata-only open, cold/warm demand reads, exact page-0 stale-handle rejection, corrupt-page failure, sparse rollback/import/write/forget/maintenance convergence, asynchronous verified export, full-scan staging release, callback cleanup, and legacy recovery compatibility. The strict paged-import tests add complete v10 migration/reopen plus exact-state preservation for every non-exportable truncated recovery mutation. All 57 passed in the final Chrome run. The same script is enforced by the Browser WASM CI job.)
 
 **Status**: ✅ **All 1265 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
 
@@ -160,11 +160,11 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 ## Phase 8.1 Completion Status: ✅ COMPLETE
 
 **Phase 8.1a Features** (browser WASM, complete):
-- ✅ `BrowserDb` public API: `open_in_memory`, eager-compatible `open`, bounded `open_paged`, `execute`, `checkpoint`, `run_idle_maintenance`, synchronous `export_graph`, verified `export_graph_async`, `import_graph`
+- ✅ `BrowserDb` public API: `open_in_memory`, eager-compatible `open`, bounded `open_paged`, `execute`, `checkpoint`, `run_idle_maintenance`, synchronous `export_graph`, verified `export_graph_async`, recovery-compatible `import_graph`, strict `import_graph_for_paged_access`
 - ✅ `BrowserBufferBackend` — `StorageBackend` over either a complete resident image or a sparse logical image with pinned authority metadata, bounded clean-page residency, and typed page demands; both preserve native `.graph` page bytes
 - ✅ `IndexedDbBackend` — page-granular async IndexedDB source with batched exact-range reads and exact page-0 compare-and-swap authority; no browser-only schema key
 - ✅ `wasm-pack` build generating `minigraf-wasm/` with JS glue and TypeScript `.d.ts`
-- ✅ `wasm-bindgen-test` suite: 55 browser integration/unit tests passing in headless Chrome locally (wired into the Browser WASM CI job, with no cross-browser claim)
+- ✅ `wasm-bindgen-test` suite: 57 browser integration/unit tests passing in headless Chrome locally (wired into the Browser WASM CI job, with no cross-browser claim)
 
 **Phase 8.1b Features** (WASI, complete):
 - ✅ `FileBackend` verified under WASI capability-based filesystem (no changes needed)
@@ -1040,7 +1040,7 @@ cargo test -- --nocapture
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 1277 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance/parity regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure + A9 linearized backup + A5-6 fail-closed query/page integrity/sparse bootstrap planning (plus 55 browser-WASM tests in source, WASI, cross-platform compat, and fuzzing CI)
+- 1277 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance/parity regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure + A9 linearized backup + A5-6 fail-closed query/page integrity/sparse bootstrap planning (plus 57 browser-WASM tests in source, WASI, cross-platform compat, and fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

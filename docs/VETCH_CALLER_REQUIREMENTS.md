@@ -287,7 +287,11 @@ separate O(total) migration and belongs in the disposable-worker cutover.
 - Native and browser must agree on file format, temporal semantics, refs,
   retractions, and query results.
 - Export must represent a durable checkpointed graph, and import must be
-  atomic: invalid input must not partially replace the live database.
+  atomic: invalid input must not partially replace the live database. A Vetch
+  authority cutover uses `importGraphForPagedAccess()`, which shares normal
+  import migration and atomic replacement but rejects a recovery result that a
+  fresh bounded `openPaged()` cannot own. General `importGraph()` retains the
+  broader native-compatible recovery policy.
 - Vetch needs integrity verification and actionable error classification for
   open, execute, checkpoint, import, and maintenance failures.
 - Backup/restore must remain compatible with the single-file promise. Browser
@@ -378,7 +382,10 @@ matrix. File format v11 now adds generation-bound page-local base integrity,
 and BrowserDb durably commits v10 migration before returning. A5-6c adds a
 generation-aware `openPaged()` path, asynchronous verified full export, exact
 page-0 authority checks across independent handles, sparse write rollback, and
-post-import/maintenance return to sparse residency. All 55 structural browser
+post-import/maintenance return to sparse residency. The additive
+`importGraphForPagedAccess()` cutover gate now accepts complete v10 migration
+but rejects non-exportable truncated recovery before durable replacement,
+while `importGraph()` remains recovery-compatible. All 57 structural browser
 tests pass in the final headless-Chrome run. A5-6d now completes bounded 1M
 open/query/growth and maintenance peak-memory evidence on the recorded host.
 Foreground v11 open/query/write is bounded; legacy migration, import, full

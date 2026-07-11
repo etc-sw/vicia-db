@@ -894,7 +894,7 @@ structure and correctness, not 1M performance numbers:
   base pages against the v11 catalog, and rejects an authority change instead
   of combining old and new pages. Synchronous `exportGraph()` remains available
   for eager and in-memory handles.
-- All 55 browser-WASM structural tests pass in the final real-Chrome run.
+- All 57 browser-WASM structural tests pass in the final real-Chrome run.
 
 Gate status at A5-6c: the page-on-demand implementation existed, but no new 1M
 numbers were recorded in that slice. A5-6d below supplies the cold-open/query/

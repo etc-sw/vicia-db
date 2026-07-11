@@ -75,6 +75,15 @@ enum BrowserOpenMode {
     Paged,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserImportPolicy {
+    /// Preserve the long-standing native-compatible recovery behavior.
+    RecoveryCompatible,
+    /// Publish only a complete current-format image that a fresh
+    /// `BrowserDb.openPaged()` can accept as bounded authority.
+    RequirePagedReady,
+}
+
 struct PreparedBrowserForget {
     facts: Vec<crate::graph::types::Fact>,
     count: usize,
@@ -584,8 +593,34 @@ impl BrowserDb {
     /// lifetime so a stale second handle cannot publish after replacement.
     #[wasm_bindgen(js_name = importGraph)]
     pub async fn import_graph(&self, data: js_sys::Uint8Array) -> Result<(), JsValue> {
+        self.import_graph_with_policy(data, BrowserImportPolicy::RecoveryCompatible)
+            .await
+    }
+
+    /// Atomically import a `.graph` blob only when the post-migration candidate
+    /// is ready for a fresh bounded `BrowserDb.openPaged()`.
+    ///
+    /// Complete legacy graphs are migrated to the current format before this
+    /// check. A physically truncated legacy image that normal `importGraph()`
+    /// may retain through previous-manifest recovery is rejected before any
+    /// IndexedDB or live-handle replacement. Use this boundary for authority
+    /// cutovers that will immediately reopen through `openPaged()`.
+    #[wasm_bindgen(js_name = importGraphForPagedAccess)]
+    pub async fn import_graph_for_paged_access(
+        &self,
+        data: js_sys::Uint8Array,
+    ) -> Result<(), JsValue> {
+        self.import_graph_with_policy(data, BrowserImportPolicy::RequirePagedReady)
+            .await
+    }
+
+    async fn import_graph_with_policy(
+        &self,
+        data: js_sys::Uint8Array,
+        policy: BrowserImportPolicy,
+    ) -> Result<(), JsValue> {
         self.begin_mutation()?;
-        let result = self.import_graph_inner(data).await;
+        let result = self.import_graph_inner(data, policy).await;
         // Import builds and durably replaces before swapping live state, so a
         // rejected import leaves both sides aligned and does not poison the
         // handle.
@@ -593,7 +628,11 @@ impl BrowserDb {
         result
     }
 
-    async fn import_graph_inner(&self, data: js_sys::Uint8Array) -> Result<(), JsValue> {
+    async fn import_graph_inner(
+        &self,
+        data: js_sys::Uint8Array,
+        policy: BrowserImportPolicy,
+    ) -> Result<(), JsValue> {
         let bytes = data.to_vec();
         if bytes.len() < crate::storage::PAGE_SIZE {
             return Err(JsValue::from_str(
@@ -642,6 +681,22 @@ impl BrowserDb {
             .and_then(|page0| crate::storage::FileHeader::from_bytes(&page0))
             .map_err(|error| JsValue::from_str(&error.to_string()))?
             .version;
+
+        if policy == BrowserImportPolicy::RequirePagedReady {
+            if imported_version != crate::storage::FORMAT_VERSION {
+                return Err(JsValue::from_str(&format!(
+                    "strict paged import requires current format v{}, but recovery selected v{imported_version}",
+                    crate::storage::FORMAT_VERSION,
+                )));
+            }
+            validate_sparse_authority(&new_pfs).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "strict paged import candidate is not openPaged-ready: {}",
+                    js_value_message(&error),
+                ))
+            })?;
+        }
+
         let new_paged = if open_mode.is_paged()
             && imported_version == crate::storage::FORMAT_VERSION
         {
@@ -1248,11 +1303,36 @@ fn insert_resident_range_ids(
 fn configure_sparse_authority(
     pfs: &mut PersistentFactStorage<BrowserBufferBackend>,
 ) -> Result<(), JsValue> {
+    let pins = sparse_authority_pin_ids(pfs)?;
+    pfs.with_backend_mut(|backend| {
+        if backend.is_sparse() {
+            backend.replace_pinned_pages(pins)
+        } else {
+            backend.configure_sparse_residency(pins).map(|_| ())
+        }
+    })
+    .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Prove that a complete resident candidate has the exact metadata lineage and
+/// page prefix required by a later sparse open, without changing its live mode.
+fn validate_sparse_authority(
+    pfs: &PersistentFactStorage<BrowserBufferBackend>,
+) -> Result<(), JsValue> {
+    let pins = sparse_authority_pin_ids(pfs)?;
+    pfs.with_backend(|backend| backend.validate_sparse_residency(pins))
+        .map(|_| ())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn sparse_authority_pin_ids(
+    pfs: &PersistentFactStorage<BrowserBufferBackend>,
+) -> Result<HashSet<u64>, JsValue> {
     let logical_page_count = pfs
         .with_backend(BrowserBufferBackend::page_count_raw)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     if logical_page_count == 0 {
-        return Ok(());
+        return Ok(HashSet::new());
     }
     let page0 = pfs
         .with_backend(|backend| backend.read_page_raw(0))
@@ -1276,15 +1356,7 @@ fn configure_sparse_authority(
         }
         Ok::<_, anyhow::Error>(authority_pin_ids(&plan, &resident_plan, backend))
     });
-    let pins = pins.map_err(|error| JsValue::from_str(&error.to_string()))?;
-    pfs.with_backend_mut(|backend| {
-        if backend.is_sparse() {
-            backend.replace_pinned_pages(pins)
-        } else {
-            backend.configure_sparse_residency(pins).map(|_| ())
-        }
-    })
-    .map_err(|error| JsValue::from_str(&error.to_string()))
+    pins.map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 // ── JSON serialisation helpers (free functions, not exported to WASM) ────────
@@ -2136,6 +2208,44 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn strict_paged_import_migrates_complete_v10_and_reopens_sparse() {
+        assert_eq!(
+            u32::from_le_bytes(NATIVE_FIXTURE[4..8].try_into().unwrap()),
+            crate::storage::header_extension::LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION,
+            "strict import premise requires the frozen v10 fixture"
+        );
+        let db_name = format!("vicia-strict-paged-v10-{}", js_sys::Date::now());
+        let db = BrowserDb::open(&db_name)
+            .await
+            .expect("open strict import target");
+
+        db.import_graph_for_paged_access(js_sys::Uint8Array::from(NATIVE_FIXTURE))
+            .await
+            .expect("complete v10 graph must migrate and pass strict paged validation");
+
+        let durable = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open strict import inspector")
+            .load_all_pages()
+            .await
+            .expect("load strict imported pages");
+        assert_eq!(page_map_version(&durable), crate::storage::FORMAT_VERSION);
+        drop(db);
+
+        let fresh = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("fresh openPaged must accept strict import");
+        {
+            let inner = fresh.inner.borrow();
+            assert!(inner.paged, "strict import must reopen through sparse mode");
+            inner
+                .pfs
+                .with_backend(|backend| assert!(backend.is_sparse()));
+        }
+        assert_browser_queries(&fresh, &corpus().queries).await;
+    }
+
+    #[wasm_bindgen_test]
     async fn export_rejects_corrupt_v11_base_page() {
         use crate::storage::StorageBackend;
 
@@ -2316,6 +2426,86 @@ mod tests {
                 BrowserDb::open_paged(&db_name).await.is_err(),
                 "bounded open must reject instead of silently retaining the entire incomplete legacy image"
             );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn strict_paged_import_rejects_truncated_recovery_and_preserves_exact_authority() {
+        let corpus = corpus();
+        let mut ordinal = 0u32;
+
+        for (producer, source) in [("native", NATIVE_FIXTURE), ("browser", BROWSER_FIXTURE)] {
+            for case in corpus
+                .corruptions
+                .iter()
+                .filter(|case| case.expected == "recover_previous" && !case.exportable)
+            {
+                ordinal += 1;
+                let mutated = apply_mutation(source, &case.mutation)
+                    .expect("truncated recovery mutation must apply");
+                let db_name = format!(
+                    "vicia-strict-paged-reject-{producer}-{}-{}-{ordinal}",
+                    case.id,
+                    js_sys::Date::now()
+                );
+                let db = BrowserDb::open(&db_name)
+                    .await
+                    .expect("open strict sentinel target");
+                db.execute("(transact [[:sentinel :value \"preserved\"]])".to_string())
+                    .await
+                    .expect("write strict sentinel");
+
+                let inspector = IndexedDbBackend::open(&db_name)
+                    .await
+                    .expect("open strict target inspector");
+                let before = inspector
+                    .load_all_pages()
+                    .await
+                    .expect("snapshot strict target pages");
+
+                let error = db
+                    .import_graph_for_paged_access(js_sys::Uint8Array::from(mutated.as_slice()))
+                    .await
+                    .expect_err("strict import must reject non-exportable recovery");
+                assert!(
+                    js_value_message(&error).contains("strict paged import"),
+                    "strict rejection must identify the strict boundary: {}",
+                    case.id
+                );
+
+                let live = db
+                    .execute("(query [:find ?v :where [:sentinel :value ?v]])".to_string())
+                    .await
+                    .expect("query live sentinel after strict rejection");
+                let live: serde_json::Value =
+                    serde_json::from_str(&live).expect("live sentinel JSON");
+                assert_eq!(live["results"], serde_json::json!([["preserved"]]));
+
+                assert_eq!(
+                    inspector
+                        .load_all_pages()
+                        .await
+                        .expect("load pages after strict rejection"),
+                    before,
+                    "strict rejection must preserve exact IndexedDB pages: {producer}/{}",
+                    case.id
+                );
+
+                let fresh = BrowserDb::open_paged(&db_name)
+                    .await
+                    .expect("fresh openPaged must retain prior authority");
+                {
+                    let inner = fresh.inner.borrow();
+                    assert!(inner.paged, "fresh prior authority must remain sparse");
+                }
+                let durable = fresh
+                    .execute("(query [:find ?v :where [:sentinel :value ?v]])".to_string())
+                    .await
+                    .expect("query durable sentinel after strict rejection");
+                let durable: serde_json::Value =
+                    serde_json::from_str(&durable).expect("durable sentinel JSON");
+                assert_eq!(durable["results"], serde_json::json!([["preserved"]]));
+            }
         }
     }
 

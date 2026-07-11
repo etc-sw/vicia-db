@@ -2,7 +2,8 @@
 
 Per-backend durability semantics (gap G13) and the browser caller rules from
 slice A5 of `docs/APP_ADOPTION_GAP_PLAN.md`. This is the authority for what
-`execute` / `checkpoint` / `backup_to` / `exportGraphAsync` / `importGraph` / `runIdleMaintenance` guarantee **at the moment they
+`execute` / `checkpoint` / `backup_to` / `exportGraphAsync` / `importGraph` /
+`importGraphForPagedAccess` / `runIdleMaintenance` guarantee **at the moment they
 return**, per backend, and for the rules a browser caller must follow because
 of those semantics. The session-protocol view of the same facts (the
 `durability` field on result frames) is `docs/SESSION_PROTOCOL.md`
@@ -102,7 +103,16 @@ Backends covered:
   IndexedDB `clear`+`put` transaction, and only then does the live handle
   swap. On any failure (invalid blob, quota abort, IndexedDB error) both
   the queryable and durable state remain the old database. Locked by six
-  wasm tests in `src/browser/`.
+  wasm tests in `src/browser/`. It intentionally retains the native-compatible
+  policy where a physically truncated newest candidate may select an older
+  valid manifest, even when the recovered physical image is non-exportable.
+- `importGraphForPagedAccess` uses the same construction, migration, atomic
+  replace, and live-swap pipeline, then adds a pre-publish gate: the resulting
+  candidate must be complete current-format v11 authority accepted by the
+  sparse planner. A complete v10 blob migrates and succeeds; non-exportable
+  previous-manifest recovery rejects while the exact live and IndexedDB state
+  remains unchanged. Use this method for a cutover that will next call
+  `openPaged()`.
 - `runIdleMaintenance` follows the same durable-replace ordering as import:
   build a fresh compact image from the complete fact log, commit one
   IndexedDB `clear`+`put` transaction, then swap the live PFS. Paged handles
@@ -145,6 +155,7 @@ errors are out of its scope — this table is the browser classification).
 | `execute` / `checkpoint` | IndexedDB flush fails (quota, I/O) | browser | Durable state = old. Successful durable reload restores the live handle and rejects the operation; unreadable durable state poisons the whole handle until reopen. |
 | `checkpoint` | I/O failure | native | WAL retained, pending facts retained; safe to retry. Lock-poisoned errors indicate a panicked writer thread — treat the process as needing restart. |
 | `importGraph` | Blob shorter than page 0 / unparseable with no valid predecessor | browser | Rejected before any durable or live change. A trailing partial page is treated like native open: only complete pages enter recovery, so an interrupted newest candidate may fall back to the previous manifest. A physically missing page inside the declared prefix keeps `exportGraph` unavailable until a clean repair/maintenance image exists. |
+| `importGraphForPagedAccess` | Recovery selects a legacy or physically incomplete image | browser | Rejected before the IndexedDB transaction and before the live swap. Complete legacy input may migrate to v11, but the post-construction image must pass the bounded sparse-authority planner. The prior live handle and exact durable page map remain unchanged. |
 | `importGraph` | IndexedDB replace fails | browser | The single replace transaction rolls back; memory and IndexedDB both still the old database. |
 | `runIdleMaintenance` | Compact build or IndexedDB replace fails | browser | Rejected; memory and IndexedDB both remain the previous graph. Retry in a later worker/idle window. |
 | `exportGraph` | Called on a sparse handle without a fully resident published prefix | browser | Rejects visibly; call `await exportGraphAsync()` for the supported verified sparse export. No durable state changes. |

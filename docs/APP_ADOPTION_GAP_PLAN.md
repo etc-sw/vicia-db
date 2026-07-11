@@ -296,7 +296,8 @@ physically incomplete prefix stays queryable through fallback but export fails
 visibly until repair. Browser and session results share `src/json_value.rs`.
 The repeatable CI entrypoint exercises the browser-WASM suite in headless
 Chrome; A5-6b added durable migration success, atomic abort, and verified
-export, and A5-6c expands the source suite to 55 structural tests.
+export, and A5-6c plus the strict paged-import boundary expand the source suite
+to 57 structural tests.
 
 The eager `open()` compatibility path retains the recorded 1M shape of about
 420 MB per handle. A5-6b detects an unread base-fact/index-page bit flip through
@@ -361,7 +362,7 @@ advance together. No browser-only schema key was added, so older numeric-page
 readers retain their existing store shape.
 
 Writes, `forget`, failed-write rollback, import, complete v10 migration, and
-forced maintenance converge back to sparse live residency. All 55 structural
+forced maintenance converge back to sparse live residency. All 57 structural
 browser tests pass in the final headless-Chrome run. This closes the
 implementation slice; A5-6d supplies its 1M measurement, while Vetch adapter
 migration to `openPaged()` remains caller-owned.

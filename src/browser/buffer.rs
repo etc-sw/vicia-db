@@ -225,6 +225,30 @@ impl BrowserBufferBackend {
         &mut self,
         pinned_page_ids: impl IntoIterator<Item = u64>,
     ) -> Result<u64> {
+        let pinned_page_ids: HashSet<u64> = pinned_page_ids.into_iter().collect();
+        let declared_page_count = self.validate_sparse_residency_candidate(&pinned_page_ids)?;
+
+        self.pinned = pinned_page_ids;
+        self.logical_page_count = declared_page_count;
+        self.sparse = true;
+        Ok(declared_page_count)
+    }
+
+    /// Validate that a complete resident image can become a bounded sparse
+    /// authority without changing its current residency mode.
+    ///
+    /// Strict browser import uses this before publishing candidate pages so a
+    /// later `openPaged()` cannot discover that the committed image is only a
+    /// legacy recovery state or is physically incomplete.
+    pub(crate) fn validate_sparse_residency(
+        &self,
+        pinned_page_ids: impl IntoIterator<Item = u64>,
+    ) -> Result<u64> {
+        let pinned_page_ids: HashSet<u64> = pinned_page_ids.into_iter().collect();
+        self.validate_sparse_residency_candidate(&pinned_page_ids)
+    }
+
+    fn validate_sparse_residency_candidate(&self, pinned_page_ids: &HashSet<u64>) -> Result<u64> {
         if !self.dirty.is_empty() {
             anyhow::bail!("Cannot configure sparse residency with dirty pages");
         }
@@ -248,8 +272,7 @@ impl BrowserBufferBackend {
                 header.version
             );
         }
-        let pinned_page_ids: HashSet<u64> = pinned_page_ids.into_iter().collect();
-        for page_id in &pinned_page_ids {
+        for page_id in pinned_page_ids {
             if *page_id >= declared_page_count {
                 anyhow::bail!(
                     "Cannot pin page {} outside declared page count {}",
@@ -261,9 +284,6 @@ impl BrowserBufferBackend {
                 anyhow::bail!("Cannot pin non-resident page {}", page_id);
             }
         }
-        self.pinned = pinned_page_ids;
-        self.logical_page_count = declared_page_count;
-        self.sparse = true;
         Ok(declared_page_count)
     }
 
