@@ -51,14 +51,16 @@ serialises the complete published prefix through the same v11 verifier;
 synchronous
 `exportGraph()` remains the eager/in-memory compatibility API. The 1M paged
 matrix measures `openPaged()` at a 17.8 ms five-run maximum with 51.1 MiB
-maximum 200 ms sampled PSS growth. Import, full export, and maintenance remain
-O(total) work and belong in a disposable DedicatedWorker; see
+maximum 200 ms sampled PSS growth across open plus six point probes. Import,
+full export, maintenance, and a legacy v10 database's first paged migration
+remain O(total) work and belong in a disposable DedicatedWorker; see
 `docs/BENCHMARKS.md` A5-6d.
 
 The recorded matrix is reproducible after building WASM and serving the repo:
 
 ```bash
 CHROME_PATH=<chrome> NODE_PATH=<dir-with-puppeteer> \
+  BENCH_PAGE=http://localhost:8080/examples/browser/bench.html \
   node examples/browser/bench-driver.cjs paged-matrix \
   /target/bench-fixtures/bench-1m.graph 5 1024
 ```

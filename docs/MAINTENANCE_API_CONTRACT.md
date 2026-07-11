@@ -175,11 +175,14 @@ The A5-4 browser implementation additionally pins:
 - four 100K-base soft-threshold cycles reclaim pages and reset write latency
 
 A5-6d adds one self-checking 1M threshold cycle on Chrome 150. Foreground
-`openPaged()` measured a 17.8 ms five-run maximum and 51.1 MiB maximum sampled
-PSS delta; maintenance took 16.679 s, peaked at a 2.09 GiB sampled PSS delta,
-and retained 1.27 GiB when the call returned. This is evidence for the
-disposable-worker lifetime, not proof that a particular runtime has reclaimed
-memory after termination and not a general device-memory floor.
+`openPaged()` measured a 17.8 ms five-run maximum, and its open-plus-six-probe
+phase added at most 51.1 MiB sampled PSS. Maintenance took 16.679 s, peaked at
+a 2.09 GiB sampled PSS delta, and retained 1.27 GiB when the call returned; the
+harness then closed the browser process. This is evidence for the disposable-
+worker lifetime, not proof that a particular runtime has reclaimed memory after
+termination and not a general device-memory floor. A legacy v10 database's
+first `openPaged()` also follows an O(total) migration path and uses the same
+worker lifecycle during Vetch cutover.
 
 Future caller integration should add Vetch-side evidence for:
 

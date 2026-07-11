@@ -9,8 +9,8 @@ and A8/A9 landed. The shared native/browser tagged, portability, and corruption
 corpus and A5-6a/b/c fail-closed integrity and sparse-browser work have also
 landed. A5-6d closes the Vicia-owned 1M sparse-browser measurement. Remaining
 acceptance proof is caller-owned: the real Gate D Vetch trace, package/adapter
-adoption of `openPaged()`, and the disposable-worker import/export/maintenance
-smoke. This line sits
+adoption of `openPaged()`, and the disposable-worker legacy-migration/import/
+export/maintenance smoke. This line sits
 after Q3-B on the Vetch delta-storage roadmap and does not modify any delta
 gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md` apply
 unchanged.
@@ -372,7 +372,8 @@ The exact Vetch-facing path now has a self-checking Chrome 150 matrix on a
 407,580,672-byte / 99,507-page / 1,000,000-fact v11 image. Five fresh-renderer
 `openPaged()` runs measured 16.6 ms p50 / 17.8 ms five-run maximum; cold
 first/middle/last point reads measured 7.4 / 1.9 / 1.9 ms maximum, and the
-open's 200 ms sampled process-tree PSS delta was 51.1 MiB maximum. A single
+whole open-plus-six-probe phase's 200 ms sampled process-tree PSS delta was
+51.1 MiB maximum. A single
 1,024-write 1M threshold cycle kept write p95 at 8.3 ms; its reopen reached
 428.1 ms maximum while three point probes stayed at 11.8 ms. Maintenance
 reclaimed 102,596 to 99,599 pages and restored a 16.3 ms reopen. The earlier
@@ -381,13 +382,16 @@ A5-4 four-cycle 100K run remains the repeated-growth evidence.
 The matrix also fixes the lifecycle boundary. Verified export took 5.370 s and
 a 1.04 GiB sampled PSS delta; maintenance took 16.679 s and 2.09 GiB; initial
 import took 11.242 s and 2.55 GiB. Export retained its complete 1.04 GiB delta
-when the call returned, and maintenance retained 1.27 GiB until renderer close.
-Vetch therefore owns these explicit O(total) operations in a disposable
-DedicatedWorker under its Web Lock, emits a result, terminates the worker after
-either outcome, and reopens through `openPaged()`. This one 32 GiB host run is
-not a general 16 GiB support claim. Foreground authority open/query/write paths
-complete the Vicia-owned Gate E scale evidence; remaining work is Vetch package
-sync, adapter cutover, and the caller-owned worker lifecycle smoke.
+when the call returned, and maintenance retained 1.27 GiB at return; the
+harness then closed the browser. A legacy v10 database's first `openPaged()`
+also follows an O(total) migration path and was not measured by this v11
+fixture. Vetch therefore owns migration/import/export/maintenance in a
+disposable DedicatedWorker under its Web Lock, emits a result, terminates the
+worker after either outcome, and reopens through `openPaged()`. This one 32 GiB
+host run is not a general 16 GiB support claim. Foreground authority open/query/
+write paths complete the Vicia-owned Gate E scale evidence; remaining work is
+Vetch package sync, adapter cutover, and the caller-owned migration/worker
+lifecycle smoke.
 
 ### A8 — Bulk valid-time closure, the "forget" primitive (DONE 2026-07-11)
 
@@ -471,7 +475,7 @@ A9 are P1, after the P0 set. Candidates have no schedule.
 | Payloads (note text, blobs, embeddings, `.pt` packets) | both | Outside the graph; Vicia holds content-hash / path `Ref` pointers only. Both caller docs pin this. |
 | Viewport spatial index / geometry | vetch-app | Vetch-owned UI projection (TypeGPU/Rete); DB stays source of truth. Not a Vicia range-query problem. |
 | Write debounce | vetch-app | Commit note position on gesture end, not per frame. |
-| Browser maintenance | vetch-app | Hold the Web Lock, run import/export/`runIdleMaintenance()` in a disposable BrowserDb worker at idle or explicit operation boundaries, react to write-result advice, emit the outcome, terminate the worker, then reopen through `openPaged()`. Never rebuild on the UI capture path or retain O(total) memory in the authority worker. |
+| Browser maintenance | vetch-app | Hold the Web Lock, run legacy migration/import/export/`runIdleMaintenance()` in a disposable BrowserDb worker at cutover, idle, or explicit operation boundaries, react to write-result advice, emit the outcome, terminate the worker, then reopen through `openPaged()`. Never rebuild on the UI capture path or retain O(total) memory in the authority worker. |
 | Authority cutover sequencing | vetch-app | Governed by `docs/VETCH_CALLER_REQUIREMENTS.md` work order and Gates A–E; Vicia-side prerequisites are A0/A5. |
 | Maintenance cadence | harrekki | Schedule `run_idle_maintenance()` in idle windows per `docs/MAINTENANCE_API_CONTRACT.md`; hard-threshold recompact is seconds-scale at 1M and must not sit in the tick loop. |
 | Shared access | harrekki | One daemon = one writer = one `.graph` file; all other access (human inspection, other sessions) goes through the harrekki daemon over the A6 protocol. Read-only open of a live file is a fallback feature only if daemon mediation proves insufficient (harrekki P1 #8). |

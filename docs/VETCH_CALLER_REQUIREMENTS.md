@@ -237,7 +237,8 @@ maintenance-surface gap, not the full browser gate: maintenance is O(total
 history) and must run in a disposable BrowserDb worker. `openPaged()` now avoids
 the eager full-image startup shape for v11. Its 1M matrix measures a 17.8 ms
 five-run maximum open, <= 7.4 ms selective cold point reads, 8.3 ms p95
-one-fact writes, and 51.1 MiB maximum sampled PSS growth at open. Recompact
+one-fact writes, and 51.1 MiB maximum sampled PSS growth across open plus six
+point probes. Recompact
 remains explicit disposable-worker work: 16.679 s and a 2.09 GiB sampled PSS
 delta in the same run.
 
@@ -277,7 +278,9 @@ fetches verified fact/index pages on deterministic query demand, and evicts
 clean staging through the existing fixed-size cache boundary. The remaining
 caller gate is adoption of that exact measured path, not a Vetch-side shadow
 database. Five real-Chrome 1M runs measured 16.6 ms p50 / 17.8 ms maximum open
-and 51.1 MiB maximum sampled PSS growth; see `docs/BENCHMARKS.md` A5-6d.
+and 51.1 MiB maximum sampled PSS growth across open plus six point probes; see
+`docs/BENCHMARKS.md` A5-6d. A legacy v10 database's first paged open is a
+separate O(total) migration and belongs in the disposable-worker cutover.
 
 ### P1 — Portability and Operations
 
@@ -378,11 +381,11 @@ page-0 authority checks across independent handles, sparse write rollback, and
 post-import/maintenance return to sparse residency. All 55 structural browser
 tests pass in the final headless-Chrome run. A5-6d now completes bounded 1M
 open/query/growth and maintenance peak-memory evidence on the recorded host.
-Foreground open/query/write is bounded; import, full export, and recompact are
-accepted only in a disposable DedicatedWorker because their sampled PSS deltas
-are 2.55 / 1.04 / 2.09 GiB. Vetch has not yet switched its adapter or proved
-that Web-Locked worker termination/reopen lifecycle, so Gate E as a whole
-remains open.
+Foreground v11 open/query/write is bounded; legacy migration, import, full
+export, and recompact are accepted only in a disposable DedicatedWorker. The
+measured latter three sampled PSS deltas are 2.55 / 1.04 / 2.09 GiB. Vetch has
+not yet switched its adapter or proved that Web-Locked migration/worker
+termination/reopen lifecycle, so Gate E as a whole remains open.
 
 ## Recommended Work Order
 

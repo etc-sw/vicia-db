@@ -131,7 +131,7 @@ errors are out of its scope — this table is the browser classification).
 | `open` | Lock held by a live process | native | No handle. `.graph.lock` sidecar is hard-link-atomic; stale locks (dead PID, empty artifact) are removed automatically (`FileLock::acquire`, `src/storage/backend/file.rs`). |
 | `open` | Header checksum mismatch / bad magic / unsupported version | both | No handle; detected **at open**, not lazily (`src/storage/persistent_facts.rs` load path). The file is not modified. Browser reaches the same validation via `PersistentFactStorage::new` over the loaded pages. |
 | `open` / `openPaged` / first committed read | v11 catalog/descriptor corruption, or a base fact/index page checksum mismatch | both | Catalog metadata corruption rejects open without rewriting the image. Base pages are verified lazily against their generation and absolute page id, so `openPaged` can succeed and the first read touching a corrupt page returns an error; eager `open` may encounter the same error during prefetch. Browser asynchronous export and native backup use the same verified boundary. CRC32 detects accidental corruption; it does not authenticate hostile bytes. |
-| `open` | Automatic v10→v11 migration cannot commit | browser | No handle. Catalog pages and page 0 share one IndexedDB transaction; abort preserves the exact v10 image for retry. |
+| `open` / `openPaged` | Automatic v10→v11 migration cannot commit | browser | No handle. Catalog pages and page 0 share one IndexedDB transaction; abort preserves the exact v10 image for retry. |
 | `open` | Non-empty file shorter than one page | native | No handle and no rewrite. A zero-byte path remains an intentional new-database creation surface; 1–4095 bytes are a visible truncation error. |
 | `open` / `importGraph` | Newest slot, manifest, or segment is corrupt while the previous manifest is valid | both | Opens on the previous complete manifest. The shared Gate E corpus verifies that base plus both earlier deltas remain visible and only the newest retraction is absent. |
 | `open` / `importGraph` | A selected older segment or both manifest slots are corrupt | both | No handle/replacement; base-only or plausible partial fallback is forbidden. |
@@ -215,12 +215,16 @@ Derived from the semantics above plus the A5 growth measurements
    outcome, and terminates after either success or failure. The next foreground
    operation reopens through `openPaged()`. Maintenance no-ops below threshold
    and atomically reclaims superseded page records after soft/hard pressure.
-   Initial import and `exportGraphAsync()` use the same disposable-worker rule.
+   Initial import, `exportGraphAsync()`, and the first `openPaged()` of a legacy
+   v10 database use the same disposable-worker rule. That migration temporarily
+   loads the legacy published image before committing v11.
    The 100K maintained-growth gate proves repeated reclaim and latency reset;
    `bench-driver.cjs worker-smoke` proves the binding works in a real module
    worker. A5-6d completes the recorded-host 1M matrix: foreground open/query/
    write stays sparse, but import/export/maintenance add 2.55/1.04/2.09 GiB of
    200 ms sampled process-tree PSS. Export retains 1.04 GiB and maintenance
-   retains 1.27 GiB when the call returns, so a long-lived authority worker is
-   not the reclamation boundary. Gate E still requires Vetch adapter adoption
-   and proof that its actual runtime terminates the worker and reopens cleanly.
+   retains 1.27 GiB when the call returns; the harness then closes the browser
+   process. A long-lived authority worker is therefore not the intended
+   reclamation boundary. Gate E still requires Vetch adapter adoption and proof
+   that its actual runtime migrates if needed, terminates the worker, and
+   reopens cleanly.

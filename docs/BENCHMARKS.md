@@ -935,7 +935,7 @@ nearest-rank p95 is the five-run maximum, not a production SLA estimate.
 | Phase | Latency | Read/write detail | 200 ms sampled PSS peak delta | Physical result |
 |---|---:|---|---:|---|
 | Initial `importGraph` | 11.242 s total | 10.237 s import | +2.55 GiB | 99,507 pages / 1,000,000 facts |
-| Fresh `openPaged()` (5 runs) | 16.6 ms p50 / 17.8 ms max | cold first/middle/last max 7.4 / 1.9 / 1.9 ms; warm <= 0.2 ms | +51.1 MiB max | JS heap open delta 0.535 MiB |
+| Fresh `openPaged()` + six probes (5 runs) | open 16.6 ms p50 / 17.8 ms max | cold first/middle/last max 7.4 / 1.9 / 1.9 ms; warm <= 0.2 ms | +51.1 MiB max for the whole phase | JS heap open delta 0.535 MiB |
 | `exportGraphAsync()` | 5.370 s | exact verified 407,580,672-byte image | +1.04 GiB | published prefix unchanged |
 | 1,024 one-fact writes | 5.121 s total | 4.9 / 8.3 / 11.9 ms p50/p95/max | +84.5 MiB | 99,507 -> 102,596 pages; soft advice emitted |
 | Pre-maintenance `openPaged()` (5 runs) | 405.2 ms p50 / 428.1 ms max | three cold probes 11.8 ms max; warm 0.7 ms max | +102.2 MiB max | 1,024 visible delta segments |
@@ -952,15 +952,18 @@ adds one exact 1M threshold cycle rather than claiming a second long-duration
 study.
 
 Import, full verified export, and recompact remain explicit O(total)
-operations. Their 1.04-2.55 GiB sampled PSS deltas are real process-lifetime
+operations. Their 1.04-2.55 GiB sampled PSS deltas are real process-level
 costs, not RSS double-counting artifacts: export retained its full 1.04 GiB
-delta when the call returned, while maintenance retained 1.27 GiB until the
-renderer closed. Vetch must run these phases in a disposable DedicatedWorker
-under its Web Lock, emit an outcome, terminate the worker after success or
-failure, and reopen through `openPaged()`. This single 32 GiB host run does not
-establish a general 16 GiB product budget. The whole Vetch Gate E remains open
-for package/adapter adoption and that caller-owned worker lifecycle smoke; it
-no longer needs another Vicia storage-format or 1M measurement slice.
+delta when the call returned, and maintenance retained 1.27 GiB at return; the
+harness then closed the browser process. Vetch must also treat a legacy v10
+database's first `openPaged()` migration as O(total): A5-6d measured an already
+v11 fixture, while migration temporarily loads the legacy published image.
+Run these phases in a disposable DedicatedWorker under the Web Lock, emit an
+outcome, terminate the worker after success or failure, and reopen through
+`openPaged()`. This single 32 GiB host run does not establish a general 16 GiB
+product budget. The whole Vetch Gate E remains open for package/adapter
+adoption and that caller-owned worker lifecycle/migration smoke; it no longer
+needs another Vicia storage-format or 1M measurement slice.
 
 ---
 
