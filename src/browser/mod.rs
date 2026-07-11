@@ -13,6 +13,7 @@ mod maintenance;
 use crate::browser::buffer::BrowserBufferBackend;
 use crate::browser::indexeddb::IndexedDbBackend;
 use crate::graph::FactStorage;
+use crate::json_value::to_tagged_json;
 use crate::query::datalog::executor::{DatalogExecutor, QueryResult};
 use crate::query::datalog::functions::FunctionRegistry;
 use crate::query::datalog::parser::parse_datalog_command;
@@ -98,7 +99,9 @@ impl BrowserDb {
         let existing = idb.load_all_pages().await?;
 
         let buffer = BrowserBufferBackend::load_pages(existing);
-        let pfs = PersistentFactStorage::new(buffer, 256)
+        let mut pfs = PersistentFactStorage::new(buffer, 256)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        pfs.with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let fact_storage = pfs.storage().clone();
 
@@ -353,7 +356,7 @@ impl BrowserDb {
         let inner = self.inner.borrow();
         let page_count = inner
             .pfs
-            .with_backend(|b| b.page_count_raw())
+            .with_backend(BrowserBufferBackend::exportable_page_count)
             .map_err(|e| JsValue::from_str(&e.to_string()))? as usize;
 
         let mut blob = Vec::with_capacity(page_count * crate::storage::PAGE_SIZE);
@@ -394,19 +397,24 @@ impl BrowserDb {
 
     async fn import_graph_inner(&self, data: js_sys::Uint8Array) -> Result<(), JsValue> {
         let bytes = data.to_vec();
-        if bytes.is_empty() {
+        if bytes.len() < crate::storage::PAGE_SIZE {
             return Err(JsValue::from_str(
-                "import data is empty — a valid .graph blob has at least a header page",
-            ));
-        }
-        if bytes.len() % crate::storage::PAGE_SIZE != 0 {
-            return Err(JsValue::from_str(
-                "import data length is not a multiple of PAGE_SIZE",
+                "import data is shorter than one complete .graph header page",
             ));
         }
 
+        // Native open treats a partial physical tail as an interrupted
+        // unpublished candidate and lets manifest validation fall back to the
+        // previous committed state. Feed only complete pages into the same PFS
+        // recovery logic so browser import has the identical policy. A partial
+        // selected state with no valid predecessor still fails below.
+        let complete_len = bytes.len() - (bytes.len() % crate::storage::PAGE_SIZE);
+
         let mut pages = std::collections::HashMap::new();
-        for (i, chunk) in bytes.chunks(crate::storage::PAGE_SIZE).enumerate() {
+        for (i, chunk) in bytes[..complete_len]
+            .chunks(crate::storage::PAGE_SIZE)
+            .enumerate()
+        {
             pages.insert(i as u64, chunk.to_vec());
         }
 
@@ -414,6 +422,9 @@ impl BrowserDb {
         // so any parse/validation failure leaves the database unchanged.
         let buffer = BrowserBufferBackend::load_pages_all_dirty(pages);
         let mut new_pfs = PersistentFactStorage::new(buffer, 256)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        new_pfs
+            .with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let new_fact_storage = new_pfs.storage().clone();
 
@@ -511,12 +522,20 @@ impl BrowserDb {
             ))
         })?;
         let buffer = BrowserBufferBackend::load_pages(durable_pages);
-        let restored = PersistentFactStorage::new(buffer, 256).map_err(|recovery_error| {
+        let mut restored = PersistentFactStorage::new(buffer, 256).map_err(|recovery_error| {
             JsValue::from_str(&format!(
                 "IndexedDB write failed and previous durable graph could not be reopened: write={}; reopen={recovery_error}",
                 js_value_message(&write_error),
             ))
         })?;
+        restored
+            .with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
+            .map_err(|recovery_error| {
+                JsValue::from_str(&format!(
+                    "IndexedDB write failed and previous durable prefix was invalid: write={}; reopen={recovery_error}",
+                    js_value_message(&write_error),
+                ))
+            })?;
         let restored_storage = restored.storage().clone();
 
         let mut inner = self.inner.borrow_mut();
@@ -669,7 +688,7 @@ fn query_result_to_json(result: QueryResult) -> String {
         QueryResult::QueryResults { vars, results } => {
             let rows: Vec<Vec<JVal>> = results
                 .iter()
-                .map(|row| row.iter().map(value_to_json).collect())
+                .map(|row| row.iter().map(to_tagged_json).collect())
                 .collect();
             json!({"variables": vars, "results": rows})
         }
@@ -677,28 +696,198 @@ fn query_result_to_json(result: QueryResult) -> String {
     val.to_string()
 }
 
-fn value_to_json(v: &crate::graph::types::Value) -> serde_json::Value {
-    use crate::graph::types::Value;
-    use serde_json::Value as JVal;
-    match v {
-        Value::String(s) => JVal::String(s.clone()),
-        Value::Integer(i) => JVal::Number((*i).into()),
-        Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(JVal::Number)
-            .unwrap_or(JVal::Null),
-        Value::Boolean(b) => JVal::Bool(*b),
-        Value::Ref(uuid) => JVal::String(uuid.to_string()),
-        Value::Keyword(k) => JVal::String(k.clone()),
-        Value::Null => JVal::Null,
-    }
-}
-
 #[cfg(all(target_arch = "wasm32", feature = "browser", test))]
 mod tests {
     use super::*;
+    use crate::gate_e_test_support::{
+        BROWSER_FIXTURE, CorruptionCase, NATIVE_FIXTURE, Probe, QueryCase, apply_mutation, corpus,
+        normalize_rows, published_byte_len,
+    };
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
+
+    fn assert_canonical_query_json(case: &QueryCase, encoded: &str) {
+        let value: serde_json::Value =
+            serde_json::from_str(encoded).expect("browser query JSON must parse");
+        let variables: Vec<String> = serde_json::from_value(value["variables"].clone())
+            .expect("query variables must decode");
+        assert_eq!(variables, case.variables, "query variables: {}", case.id);
+        let mut actual: Vec<Vec<serde_json::Value>> =
+            serde_json::from_value(value["results"].clone()).expect("query rows must decode");
+        let mut expected = case.rows.clone();
+        if case.unordered_rows {
+            actual = normalize_rows(actual);
+            expected = normalize_rows(expected);
+        }
+        assert_eq!(actual, expected, "query rows: {}", case.id);
+    }
+
+    async fn assert_browser_queries(db: &BrowserDb, queries: &[QueryCase]) {
+        for case in queries {
+            let encoded = db
+                .execute(case.datalog.clone())
+                .await
+                .expect("Gate E browser query must execute");
+            assert_canonical_query_json(case, &encoded);
+        }
+    }
+
+    async fn assert_browser_probe(db: &BrowserDb, probe: &Probe, case_id: &str) {
+        let encoded = db
+            .execute(probe.datalog.clone())
+            .await
+            .expect("corruption fallback probe must execute");
+        let value: serde_json::Value =
+            serde_json::from_str(&encoded).expect("fallback probe JSON must parse");
+        let actual: Vec<Vec<serde_json::Value>> =
+            serde_json::from_value(value["results"].clone()).expect("fallback rows must decode");
+        assert_eq!(actual, probe.rows, "corruption fallback probe: {case_id}");
+    }
+
+    async fn assert_rejected_import_preserves_sentinel(
+        db: &BrowserDb,
+        db_name: &str,
+        case: &CorruptionCase,
+        mutated: Vec<u8>,
+    ) {
+        let result = db
+            .import_graph(js_sys::Uint8Array::from(mutated.as_slice()))
+            .await;
+        assert!(
+            result.is_err(),
+            "browser must reject corruption: {}",
+            case.id
+        );
+        let live = db
+            .execute("(query [:find ?v :where [:sentinel :value ?v]])".to_string())
+            .await
+            .expect("live sentinel query");
+        let live: serde_json::Value = serde_json::from_str(&live).expect("live sentinel JSON");
+        assert_eq!(live["results"], serde_json::json!([["preserved"]]));
+
+        let reopened = BrowserDb::open(db_name)
+            .await
+            .expect("reopen sentinel database");
+        let durable = reopened
+            .execute("(query [:find ?v :where [:sentinel :value ?v]])".to_string())
+            .await
+            .expect("durable sentinel query");
+        let durable: serde_json::Value =
+            serde_json::from_str(&durable).expect("durable sentinel JSON");
+        assert_eq!(durable["results"], serde_json::json!([["preserved"]]));
+    }
+
+    #[wasm_bindgen_test]
+    async fn gate_e_browser_consumer_matches_both_producers_and_round_trips() {
+        let corpus = corpus();
+        for source in [NATIVE_FIXTURE, BROWSER_FIXTURE] {
+            let db = BrowserDb::open_in_memory().expect("open Gate E browser consumer");
+            db.import_graph(js_sys::Uint8Array::from(source))
+                .await
+                .expect("import Gate E fixture");
+            assert_browser_queries(&db, &corpus.queries).await;
+
+            let exported = db.export_graph().expect("export Gate E fixture").to_vec();
+            assert_eq!(
+                exported, source,
+                "canonical import/export must be byte exact"
+            );
+            let reopened = BrowserDb::open_in_memory().expect("open round-trip consumer");
+            reopened
+                .import_graph(js_sys::Uint8Array::from(exported.as_slice()))
+                .await
+                .expect("reimport browser export");
+            assert_browser_queries(&reopened, &corpus.queries).await;
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn gate_e_browser_corruption_contract_matches_shared_corpus() {
+        let corpus = corpus();
+        let mut ordinal = 0u32;
+        for (producer, source) in [("native", NATIVE_FIXTURE), ("browser", BROWSER_FIXTURE)] {
+            for case in &corpus.corruptions {
+                ordinal += 1;
+                let mutated = apply_mutation(source, &case.mutation)
+                    .expect("Gate E corruption mutation must apply");
+                let db_name = format!(
+                    "vicia-gate-e-corruption-{producer}-{}-{}-{ordinal}",
+                    case.id,
+                    js_sys::Date::now()
+                );
+                let db = BrowserDb::open(&db_name).await.expect("open sentinel DB");
+                db.execute("(transact [[:sentinel :value \"preserved\"]])".to_string())
+                    .await
+                    .expect("write durable sentinel");
+
+                match case.expected.as_str() {
+                    "reject" => {
+                        assert_rejected_import_preserves_sentinel(&db, &db_name, case, mutated)
+                            .await;
+                    }
+                    "recover_previous" => {
+                        db.import_graph(js_sys::Uint8Array::from(mutated.as_slice()))
+                            .await
+                            .expect("browser must recover previous manifest");
+                        let previous_queries: Vec<QueryCase> = corpus
+                            .queries
+                            .iter()
+                            .filter(|query| query.id != "current_retracted_edge_absent")
+                            .cloned()
+                            .collect();
+                        assert_browser_queries(&db, &previous_queries).await;
+                        let probe = case.probe.as_ref().expect("fallback case must carry probe");
+                        assert_browser_probe(&db, probe, &case.id).await;
+                        let round_trip = db.export_graph();
+                        if case.exportable {
+                            let fresh =
+                                BrowserDb::open_in_memory().expect("open fallback reimport");
+                            fresh
+                                .import_graph(round_trip.expect("complete fallback must export"))
+                                .await
+                                .expect("reimport recovered graph");
+                            assert_browser_probe(&fresh, probe, &case.id).await;
+                        } else {
+                            assert!(
+                                round_trip.is_err(),
+                                "physically truncated fallback must not overclaim exportability: {}",
+                                case.id
+                            );
+                        }
+                    }
+                    "recover_latest" => {
+                        assert!(
+                            mutated.len() > published_byte_len(source).expect("published length"),
+                            "tail case must grow the physical image"
+                        );
+                        db.import_graph(js_sys::Uint8Array::from(mutated.as_slice()))
+                            .await
+                            .expect("browser must ignore unpublished tail");
+                        assert_browser_queries(&db, &corpus.queries).await;
+                        let published =
+                            published_byte_len(source).expect("published source length");
+                        assert_eq!(
+                            db.export_graph()
+                                .expect("export trimmed graph")
+                                .byte_length() as usize,
+                            published,
+                            "browser export must exclude unpublished tail"
+                        );
+                        let idb = IndexedDbBackend::open(&db_name)
+                            .await
+                            .expect("open IDB probe");
+                        assert_eq!(
+                            idb.load_all_pages().await.expect("load IDB pages").len(),
+                            published / crate::storage::PAGE_SIZE,
+                            "atomic import must not persist unpublished tail"
+                        );
+                    }
+                    other => panic!("unknown corruption expectation: {other}"),
+                }
+            }
+        }
+    }
 
     #[wasm_bindgen_test]
     async fn in_memory_transact_and_query() {
@@ -846,7 +1035,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    async fn import_invalid_length_rejected_keeps_data() {
+    async fn import_unparseable_complete_page_prefix_rejected_keeps_data() {
         let db = BrowserDb::open_in_memory().expect("open");
         db.execute(r#"(transact [[:dana :team "core"]])"#.to_string())
             .await
@@ -854,7 +1043,10 @@ mod tests {
 
         let bad = js_sys::Uint8Array::new_with_length((crate::storage::PAGE_SIZE + 1) as u32);
         let result = db.import_graph(bad).await;
-        assert!(result.is_err(), "non-page-aligned blob must be rejected");
+        assert!(
+            result.is_err(),
+            "unparseable complete-page prefix must be rejected despite a partial tail"
+        );
 
         let r = db
             .execute(r#"(query [:find ?t :where [:dana :team ?t]])"#.to_string())

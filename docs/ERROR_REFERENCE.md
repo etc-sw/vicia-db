@@ -1529,7 +1529,13 @@ See the [file format section in README](../README.md#file-format) for version hi
 
 **Error text**: `Invalid header: too short (got 12 bytes, need 64)`
 
-**Cause**: The `.graph` file is truncated — shorter than the minimum header size. Happens if the file was partially written (e.g. a crash during the initial `save()`) or if a non-Minigraf file was passed by mistake.
+Native pre-header variant: `Existing database is truncated: size=12 bytes, expected at least one 4096-byte page`
+
+**Cause**: The `.graph` file is truncated — shorter than the minimum header
+or page-0 size. Happens if the file was partially written (e.g. a crash during
+the initial `save()`) or if a non-Minigraf file was passed by mistake. Native
+open treats a zero-byte path as an intentional new database, but any non-empty
+prefix shorter than 4096 bytes is rejected without rewriting it.
 
 **Resolution**:
 - Restore the file from a backup. If no backup exists and the file was newly created, delete it and let Minigraf create a fresh one. See the [file format section in README](../README.md#file-format).

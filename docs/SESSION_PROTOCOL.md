@@ -170,10 +170,10 @@ Response result body:
 | `Ref(uuid)` | `{"$ref": "<uuid>"}` |
 | `Keyword` | `{"$kw": ":a/b"}` |
 
-This is the canonical long-term encoding (vetch lane decision); the browser
-`execute()` JSON, which flattens `Ref`/`Keyword` to plain strings, is an
-explicitly named temporary compatibility surface until its planned breaking
-transition.
+This is the canonical encoding shared by the session protocol and BrowserDb
+query results. The browser transition landed with the Gate E portable corpus;
+both surfaces call the same encoder and preserve `Ref`, `Keyword`, and
+non-finite float identity.
 
 ## Durability classification
 

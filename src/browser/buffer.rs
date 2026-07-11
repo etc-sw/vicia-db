@@ -1,4 +1,4 @@
-use crate::storage::{PAGE_SIZE, StorageBackend};
+use crate::storage::{FileHeader, PAGE_SIZE, StorageBackend};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
@@ -55,6 +55,54 @@ impl BrowserBufferBackend {
             .collect();
         pages.sort_unstable_by_key(|(id, _)| *id);
         pages
+    }
+
+    /// Return the page count published by the validated page-0 header.
+    ///
+    /// Physical tail pages can remain after an interrupted copy-on-write
+    /// candidate. They are not part of the portable graph image and must not
+    /// leak through browser export or atomic replacement.
+    pub fn declared_page_count(&self) -> Result<u64> {
+        if self.pages.is_empty() {
+            return Ok(0);
+        }
+        let page = self
+            .pages
+            .get(&0)
+            .ok_or_else(|| anyhow::anyhow!("Page 0 not found"))?;
+        let header = FileHeader::from_bytes(page)?;
+        header.validate()?;
+        if header.page_count == 0 {
+            anyhow::bail!("Invalid header: published page_count is zero");
+        }
+        Ok(header.page_count)
+    }
+
+    /// Return the page count when every page in the published prefix exists.
+    pub fn exportable_page_count(&self) -> Result<u64> {
+        let page_count = self.declared_page_count()?;
+        for page_id in 0..page_count {
+            if !self.pages.contains_key(&page_id) {
+                anyhow::bail!(
+                    "Published database is truncated: page {} of {} is missing",
+                    page_id,
+                    page_count
+                );
+            }
+        }
+        Ok(page_count)
+    }
+
+    /// Discard physical pages beyond page 0's published prefix.
+    ///
+    /// Missing pages inside the prefix are intentionally not rejected here:
+    /// `PersistentFactStorage` may have recovered through the previous valid
+    /// manifest. Export performs the stronger contiguity check.
+    pub fn retain_declared_prefix(&mut self) -> Result<u64> {
+        let page_count = self.declared_page_count()?;
+        self.pages.retain(|page_id, _| *page_id < page_count);
+        self.dirty.retain(|page_id| *page_id < page_count);
+        Ok(page_count)
     }
 }
 
@@ -198,6 +246,26 @@ mod tests {
         let mut buf = BrowserBufferBackend::new();
         buf.write_page(0, &page(0)).unwrap();
         assert!(!buf.is_new());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn retain_declared_prefix_drops_unpublished_tail() {
+        let header = crate::storage::header_extension::build_header_page(FileHeader::new())
+            .expect("header page");
+        let pages = HashMap::from([(0u64, header), (1u64, page(99))]);
+        let mut buf = BrowserBufferBackend::load_pages_all_dirty(pages);
+
+        assert_eq!(buf.retain_declared_prefix().unwrap(), 1);
+        assert_eq!(buf.page_count().unwrap(), 1);
+        assert_eq!(buf.all_pages().len(), 1);
+        assert!(buf.take_dirty().contains(&0));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn empty_buffer_has_zero_declared_and_exportable_pages() {
+        let mut buf = BrowserBufferBackend::new();
+        assert_eq!(buf.retain_declared_prefix().unwrap(), 0);
+        assert_eq!(buf.exportable_page_count().unwrap(), 0);
     }
 
     #[test]

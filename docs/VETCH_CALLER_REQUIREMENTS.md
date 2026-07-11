@@ -307,6 +307,11 @@ domain/application responsibilities.
 
 ## Acceptance Gates
 
+Track boundary: Gate E blocks the browser authority cutover, not use of an
+exact Vicia Git revision by the Windows-native desktop app. Native desktop
+adoption is governed by Gates A–D; browser adoption additionally requires
+Gate E.
+
 ### Gate A — Current-state reconstruction
 
 Given a fixture covering every live canvas command, rebuild the complete state
@@ -336,12 +341,24 @@ checkpoint, current-space rebuild, selective current query, historical query,
 reopen, memory, and file growth. Use receipt/slice batching plus idle
 maintenance; do not hide recompact in the foreground path.
 
+Status: the existing 1M cadence suites cover capture/edit/receipt append,
+checkpoint, selective current/`:as-of` reads, and file growth. The one-run
+Vetch trace still needs proposal, epistemic transition, current-space rebuild,
+agent-brief, reopen/RSS, and a real-threshold maintenance cycle with
+Vetch-owned product budgets. Gate D is not yet claimed complete.
+
 ### Gate E — Browser/native parity
 
 Run the same portable graph and query corpus through native and BrowserDb.
 Compare current/history results, export/import, corruption behavior, startup
 memory, and long-running IndexedDB growth. This gate must pass before browser
 Vicia replaces the legacy load path.
+
+Status: tagged semantic parity, native↔browser portability, atomic rejection,
+manifest fallback, and the shared corruption corpus pass in the 2×2 Gate E
+matrix (23 headless-Chrome tests plus native consumers). Bounded 1M open,
+page-local base integrity, and 1M maintenance peak-memory/growth evidence remain
+open, so Gate E as a whole remains open.
 
 ## Recommended Work Order
 

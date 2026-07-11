@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "source_uuid": "00000000-0000-0000-0000-0000000000a1",
+  "proposition_uuid": "00000000-0000-0000-0000-0000000000b2",
+  "setup": [
+    {
+      "id": "base_scalar_ref_facts",
+      "datalog": "(transact {:valid-from \"2026-01-01\"} [[#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/label \"Source A\"] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/kind :vetch/source] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports #uuid \"00000000-0000-0000-0000-0000000000b2\"] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/score 1.5] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/accepted true] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/count 7] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/optional nil] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/uuid-looking \"00000000-0000-0000-0000-0000000000b2\"] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/keyword-looking \":vetch/source\"] [#uuid \"00000000-0000-0000-0000-0000000000b2\" :vetch/label \"Proposition B\"]])",
+      "checkpoint_after": true
+    },
+    {
+      "id": "working_valid_window",
+      "datalog": "(transact {:valid-from \"2026-01-01\" :valid-to \"2026-06-01\"} [[#uuid \"00000000-0000-0000-0000-0000000000b2\" :vetch/status :vetch/working]])",
+      "checkpoint_after": true
+    },
+    {
+      "id": "contested_valid_window",
+      "datalog": "(transact {:valid-from \"2026-06-01\"} [[#uuid \"00000000-0000-0000-0000-0000000000b2\" :vetch/status :vetch/contested]])",
+      "checkpoint_after": true
+    },
+    {
+      "id": "retract_support_edge",
+      "datalog": "(retract [[#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports #uuid \"00000000-0000-0000-0000-0000000000b2\"]])",
+      "checkpoint_after": true
+    }
+  ],
+  "queries": [
+    {
+      "id": "tagged_scalar_types",
+      "datalog": "(query [:find ?label ?kind ?score ?accepted ?count ?uuid-looking ?keyword-looking :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/label ?label] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/kind ?kind] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/score ?score] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/accepted ?accepted] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/count ?count] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/uuid-looking ?uuid-looking] [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/keyword-looking ?keyword-looking]])",
+      "variables": ["?label", "?kind", "?score", "?accepted", "?count", "?uuid-looking", "?keyword-looking"],
+      "rows": [["Source A", {"$kw": ":vetch/source"}, 1.5, true, 7, "00000000-0000-0000-0000-0000000000b2", ":vetch/source"]],
+      "unordered_rows": false
+    },
+    {
+      "id": "entity_is_tagged_ref",
+      "datalog": "(query [:find ?source :where [?source :vetch/label \"Source A\"]])",
+      "variables": ["?source"],
+      "rows": [[{"$ref": "00000000-0000-0000-0000-0000000000a1"}]],
+      "unordered_rows": false
+    },
+    {
+      "id": "current_retracted_edge_absent",
+      "datalog": "(query [:find ?target :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports ?target]])",
+      "variables": ["?target"],
+      "rows": [],
+      "unordered_rows": false
+    },
+    {
+      "id": "as_of_ref_before_retraction",
+      "datalog": "(query [:find ?target :as-of 3 :any-valid-time :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports ?target]])",
+      "variables": ["?target"],
+      "rows": [[{"$ref": "00000000-0000-0000-0000-0000000000b2"}]],
+      "unordered_rows": false
+    },
+    {
+      "id": "valid_time_working",
+      "datalog": "(query [:find ?status :valid-at \"2026-03-01\" :where [#uuid \"00000000-0000-0000-0000-0000000000b2\" :vetch/status ?status]])",
+      "variables": ["?status"],
+      "rows": [[{"$kw": ":vetch/working"}]],
+      "unordered_rows": false
+    },
+    {
+      "id": "valid_time_contested",
+      "datalog": "(query [:find ?status :valid-at \"2026-07-01\" :where [#uuid \"00000000-0000-0000-0000-0000000000b2\" :vetch/status ?status]])",
+      "variables": ["?status"],
+      "rows": [[{"$kw": ":vetch/contested"}]],
+      "unordered_rows": false
+    },
+    {
+      "id": "all_valid_windows",
+      "datalog": "(query [:find ?status :any-valid-time :where [#uuid \"00000000-0000-0000-0000-0000000000b2\" :vetch/status ?status]])",
+      "variables": ["?status"],
+      "rows": [[{"$kw": ":vetch/contested"}], [{"$kw": ":vetch/working"}]],
+      "unordered_rows": true
+    },
+    {
+      "id": "combined_tx_and_valid_time_before_new_status",
+      "datalog": "(query [:find ?status :as-of 2 :valid-at \"2026-07-01\" :where [#uuid \"00000000-0000-0000-0000-0000000000b2\" :vetch/status ?status]])",
+      "variables": ["?status"],
+      "rows": [],
+      "unordered_rows": false
+    },
+    {
+      "id": "vaet_join_before_retraction",
+      "datalog": "(query [:find ?source-label ?target-label :as-of 3 :any-valid-time :where [?source :vetch/supports ?target] [?source :vetch/label ?source-label] [?target :vetch/label ?target-label]])",
+      "variables": ["?source-label", "?target-label"],
+      "rows": [["Source A", "Proposition B"]],
+      "unordered_rows": false
+    },
+    {
+      "id": "stored_null_boundary",
+      "datalog": "(query [:find ?value :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/optional ?value]])",
+      "variables": ["?value"],
+      "rows": [[null]],
+      "unordered_rows": false
+    }
+  ],
+  "corruptions": [
+    {
+      "id": "bad_magic",
+      "mutation": {"kind": "write_byte", "offset": 0, "value": 0},
+      "expected": "reject"
+    },
+    {
+      "id": "unsupported_version",
+      "mutation": {"kind": "write_u32_le", "offset": 4, "value": 4294967295},
+      "expected": "reject"
+    },
+    {
+      "id": "short_nonempty_file",
+      "mutation": {"kind": "truncate", "length": 128},
+      "expected": "reject"
+    },
+    {
+      "id": "header_checksum",
+      "mutation": {"kind": "xor_byte", "offset": 80, "value": 1},
+      "expected": "reject"
+    },
+    {
+      "id": "newest_manifest_slot_falls_back",
+      "mutation": {"kind": "corrupt_newest_manifest_slot"},
+      "expected": "recover_previous",
+      "exportable": true,
+      "probe": {
+        "datalog": "(query [:find ?target :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports ?target]])",
+        "rows": [[{"$ref": "00000000-0000-0000-0000-0000000000b2"}]]
+      }
+    },
+    {
+      "id": "newest_manifest_payload_falls_back",
+      "mutation": {"kind": "corrupt_newest_manifest_payload"},
+      "expected": "recover_previous",
+      "exportable": true,
+      "probe": {
+        "datalog": "(query [:find ?target :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports ?target]])",
+        "rows": [[{"$ref": "00000000-0000-0000-0000-0000000000b2"}]]
+      }
+    },
+    {
+      "id": "newest_delta_segment_falls_back",
+      "mutation": {"kind": "corrupt_newest_delta_segment"},
+      "expected": "recover_previous",
+      "exportable": true,
+      "probe": {
+        "datalog": "(query [:find ?target :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports ?target]])",
+        "rows": [[{"$ref": "00000000-0000-0000-0000-0000000000b2"}]]
+      }
+    },
+    {
+      "id": "missing_newest_manifest_page_falls_back",
+      "mutation": {"kind": "remove_last_page"},
+      "expected": "recover_previous",
+      "exportable": false,
+      "probe": {
+        "datalog": "(query [:find ?target :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports ?target]])",
+        "rows": [[{"$ref": "00000000-0000-0000-0000-0000000000b2"}]]
+      }
+    },
+    {
+      "id": "partial_newest_manifest_page_falls_back",
+      "mutation": {"kind": "truncate_last_page_half"},
+      "expected": "recover_previous",
+      "exportable": false,
+      "probe": {
+        "datalog": "(query [:find ?target :where [#uuid \"00000000-0000-0000-0000-0000000000a1\" :vetch/supports ?target]])",
+        "rows": [[{"$ref": "00000000-0000-0000-0000-0000000000b2"}]]
+      }
+    },
+    {
+      "id": "oldest_selected_delta_segment_is_hard_error",
+      "mutation": {"kind": "corrupt_oldest_delta_segment"},
+      "expected": "reject"
+    },
+    {
+      "id": "both_manifest_slots_are_hard_error",
+      "mutation": {"kind": "corrupt_both_manifest_slots"},
+      "expected": "reject"
+    },
+    {
+      "id": "unpublished_tail_is_trimmed",
+      "mutation": {"kind": "append_page", "value": 165},
+      "expected": "recover_latest"
+    }
+  ]
+}

@@ -7,11 +7,10 @@ answers — wake-loop needs no pipelining, supersede stays harrekki-owned).
 Vetch lane: shared-memory decision
 `:m/20260710T181042Z-vetch-codex-vetch-lane-acks-a6-defaults-ndjson-framing-eba29494`
 (topic `:topic/vicia-db`) — ACKs all defaults and names. On the Q2
-follow-up the vetch lane (owner) supersedes the harrekki opinion: browser
-`execute()` converges on the same tagged encoding in a planned breaking
-transition; the lossy JSON form remains only as an explicitly named
-temporary compatibility surface, not permanent canon. A5 documents both
-encodings plus that convergence plan.
+follow-up the vetch lane (owner) supersedes the harrekki opinion and selected
+one tagged encoding for both surfaces. The BrowserDb transition later landed
+with the Gate E portable corpus; `src/json_value.rs` now owns the shared
+encoding.
 
 The protocol is a long-term contract with the harrekki JVM adapter (the
 `xtdb_ledger.clj` seat) and possibly other non-Rust callers, so caller
@@ -36,11 +35,11 @@ the protocol carries Datalog text and JSON results — no binary planned
 
 ## Q2 — Value encoding fidelity (the important one)
 
-The existing browser `execute()` JSON is **lossy**: `Value::Ref(uuid)` and
-`Value::Keyword` both flatten to plain JSON strings
-(`src/browser/mod.rs:350–364`). A ledger adapter cannot reconstruct
-`Value::Ref` vs a string that happens to contain a UUID — and the delta
-roadmap's Gate 1 pins `Value::Ref` as identity that matters.
+At decision time the browser `execute()` JSON was lossy: `Value::Ref(uuid)`
+and `Value::Keyword` both flattened to plain JSON strings. A ledger adapter
+could not reconstruct `Value::Ref` vs a string that happened to contain a
+UUID — and the delta roadmap's Gate 1 pins `Value::Ref` as identity that
+matters. The accepted tagged transition is now implemented.
 
 Options:
 

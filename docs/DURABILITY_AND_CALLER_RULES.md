@@ -116,6 +116,9 @@ errors are out of its scope — this table is the browser classification).
 | --- | --- | --- | --- |
 | `open` | Lock held by a live process | native | No handle. `.graph.lock` sidecar is hard-link-atomic; stale locks (dead PID, empty artifact) are removed automatically (`FileLock::acquire`, `src/storage/backend/file.rs`). |
 | `open` | Header checksum mismatch / bad magic / unsupported version | both | No handle; detected **at open**, not lazily (`src/storage/persistent_facts.rs` load path). The file is not modified. Browser reaches the same validation via `PersistentFactStorage::new` over the loaded pages. |
+| `open` | Non-empty file shorter than one page | native | No handle and no rewrite. A zero-byte path remains an intentional new-database creation surface; 1–4095 bytes are a visible truncation error. |
+| `open` / `importGraph` | Newest slot, manifest, or segment is corrupt while the previous manifest is valid | both | Opens on the previous complete manifest. The shared Gate E corpus verifies that base plus both earlier deltas remain visible and only the newest retraction is absent. |
+| `open` / `importGraph` | A selected older segment or both manifest slots are corrupt | both | No handle/replacement; base-only or plausible partial fallback is forbidden. |
 | `open` | WAL header invalid | native | No handle; the main file is untouched. |
 | `open` | WAL entry CRC mismatch | native | Opens; replay **stops silently at the first bad entry** (`src/wal.rs` replay loop). Only never-acknowledged work is absent. |
 | `open` | IndexedDB unavailable / blocked | browser | No handle; nothing modified. |
@@ -124,34 +127,31 @@ errors are out of its scope — this table is the browser classification).
 | `execute` | WAL append fails (I/O) | native | Rejected — memory unchanged, database consistent. |
 | `execute` / `checkpoint` | IndexedDB flush fails (quota, I/O) | browser | Durable state = old. Successful durable reload restores the live handle and rejects the operation; unreadable durable state poisons the whole handle until reopen. |
 | `checkpoint` | I/O failure | native | WAL retained, pending facts retained; safe to retry. Lock-poisoned errors indicate a panicked writer thread — treat the process as needing restart. |
-| `importGraph` | Empty blob / length not a `PAGE_SIZE` multiple / unparseable | browser | Rejected before any durable or live change. |
+| `importGraph` | Blob shorter than page 0 / unparseable with no valid predecessor | browser | Rejected before any durable or live change. A trailing partial page is treated like native open: only complete pages enter recovery, so an interrupted newest candidate may fall back to the previous manifest. A physically missing page inside the declared prefix keeps `exportGraph` unavailable until a clean repair/maintenance image exists. |
 | `importGraph` | IndexedDB replace fails | browser | The single replace transaction rolls back; memory and IndexedDB both still the old database. |
 | `runIdleMaintenance` | Compact build or IndexedDB replace fails | browser | Rejected; memory and IndexedDB both remain the previous graph. Retry in a later worker/idle window. |
 
-## 3. Two value encodings — one canonical
+## 3. Canonical value encoding
 
-Two JSON encodings of `Value` exist today; they are **not** interchangeable:
+Native session frames and BrowserDb query results now use one shared lossless
+encoder (`src/json_value.rs`):
 
-| `Value` | Tagged (canonical, A6 session protocol) | Browser `execute()` JSON (temporary) |
-| --- | --- | --- |
-| `String` | string | string |
-| `Integer` | number | number |
-| `Float` (finite) | number | number |
-| `Float` (non-finite) | `{"$float": "nan"\|"inf"\|"-inf"}` | **null** (lossy) |
-| `Boolean` | bool | bool |
-| `Null` | null | null |
-| `Ref(uuid)` | `{"$ref": "<uuid>"}` | **plain string** (tag lost) |
-| `Keyword` | `{"$kw": ":a/b"}` | **plain string** (tag lost) |
+| `Value` | JSON |
+| --- | --- |
+| `String` | string |
+| `Integer` | number |
+| `Float` (finite) | number |
+| `Float` (non-finite) | `{"$float": "nan"\|"inf"\|"-inf"}` |
+| `Boolean` | bool |
+| `Null` | null |
+| `Ref(uuid)` | `{"$ref": "<uuid>"}` |
+| `Keyword` | `{"$kw": ":a/b"}` |
 
-The tagged encoding (`docs/SESSION_PROTOCOL.md` "Value encoding") is the
-long-term canonical form per the vetch-lane A6 Q2 decision. The browser
-`execute()` JSON (`value_to_json`, `src/browser/mod.rs`) is an explicitly
-named **temporary compatibility surface**: it cannot distinguish a `Ref` or
-`Keyword` from a `String`, and it maps non-finite floats to `null`. Browser
-`execute()` will converge on the tagged encoding in a planned **breaking**
-transition. Callers must not build logic that depends on distinguishing
-those types from the browser JSON until then — pin the schema knowledge
-app-side (you know which attributes hold refs) or wait for the transition.
+The planned browser transition is complete. `Ref` and `Keyword` no longer
+flatten into ambiguous strings, and non-finite floats no longer become `null`.
+The Gate E 2×2 producer/consumer matrix runs native- and Chrome-generated v10
+fixtures through both native and BrowserDb, comparing exact tagged current,
+`:as-of`, valid-time, combined-time, retraction, and VAET-join results.
 
 ## 4. Browser caller rules
 
@@ -196,6 +196,7 @@ Derived from the semantics above plus the A5 growth measurements
    binding now discovers IndexedDB through `globalThis`; the repeatable
    `bench-driver.cjs worker-smoke` gate passes open/write/query/maintenance in
    a real module DedicatedWorker. The
-   existing 1M full-load open shape (~420 MB per tab) remains a separate Gate
-   E blocker; do not claim browser authority readiness until the bounded-open
-   work is complete.
+   existing 1M full-load open shape (~420 MB per tab), page-local base
+   integrity, and 1M maintenance peak-memory proof remain Gate E blockers; do
+   not claim browser authority readiness until those bounded-storage gates are
+   complete.

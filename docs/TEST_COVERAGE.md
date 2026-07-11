@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: A9 linearized live-writer backup (July 2026), 1210 native tests + 19 browser WASM tests ✅
+**Last Updated**: A5-5 shared Gate E parity corpus (July 2026), 1217 native tests + 23 browser WASM tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1210 ✅ (1198 passing, 12 ignored)
-- ✅ 786 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A5-4 compact-copy identity/watermark guard, A9 backup identity/linearization/conflict/symlink/watermark guards, A7 FileLock crash-robustness guards, A2 since-tail page-probe/no-full-scan guards, and A8 forget parser plus short-WAL recovery guards)
+**Total Tests**: 1217 ✅ (1205 passing, 12 ignored)
+- ✅ 793 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A5-4 compact-copy identity/watermark guard, A5-5 tagged/native-browser/corruption corpus consumers, A9 backup identity/linearization/conflict/symlink/watermark guards, A7 FileLock crash-robustness guards, A2 since-tail page-probe/no-full-scan guards, and A8 forget parser plus short-WAL recovery guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -53,9 +53,9 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
-- ➕ 19 browser WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --lib --target wasm32-unknown-unknown --features browser` with a `CHROMEDRIVER` matching the local Chrome. A5-4 adds compact maintenance, replacement-failure, mutation guard, ordered durability result, rejected-write rollback, and poison-containment gates.)
+- ➕ 23 browser WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh`. A5-4 covers maintenance/failure ordering; A5-5 adds both-producer tagged portability, shared corruption/recovery, published-prefix trimming, and empty-buffer regressions. The same script is enforced by the Browser WASM CI job.)
 
-**Status**: ✅ **All 1198 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
+**Status**: ✅ **All 1205 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -163,7 +163,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `BrowserBufferBackend` — in-memory `StorageBackend` over a flat page buffer, byte-identical to native `.graph` format
 - ✅ `IndexedDbBackend` — page-granular IndexedDB storage via `web-sys` + `wasm-bindgen`
 - ✅ `wasm-pack` build generating `minigraf-wasm/` with JS glue and TypeScript `.d.ts`
-- ✅ `wasm-bindgen-test` suite: 19 browser integration/unit tests (headless Chrome locally; no cross-browser CI claim in this core repo)
+- ✅ `wasm-bindgen-test` suite: 23 browser integration/unit tests (headless Chrome locally; wired into the Browser WASM CI job, with no cross-browser claim)
 
 **Phase 8.1b Features** (WASI, complete):
 - ✅ `FileBackend` verified under WASI capability-based filesystem (no changes needed)
@@ -1039,7 +1039,7 @@ cargo test -- --nocapture
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 1210 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure + A9 linearized backup (plus 19 browser WASM tests, WASI, cross-platform compat, and fuzzing CI)
+- 1217 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance/parity regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure + A9 linearized backup (plus 23 browser WASM tests, WASI, cross-platform compat, and fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

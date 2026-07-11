@@ -184,8 +184,12 @@ impl FileBackend {
         // as it uses the same file descriptor we'll be reading from.
         let file_len = file.metadata()?.len();
 
-        // Determine if this is an existing file with data or a new/empty one.
-        let is_new = file_len < PAGE_SIZE as u64;
+        // A zero-length path is a supported creation surface (for example a
+        // caller-owned NamedTempFile). Once any bytes exist, however, a file
+        // shorter than page 0 is a truncated database, not a fresh database.
+        // Reinitialising that prefix would silently destroy corruption evidence
+        // and diverge from BrowserDb import behavior.
+        let is_new = file_len == 0;
         let header = if file_len >= PAGE_SIZE as u64 {
             // File has at least one page - try to read the header
             match Self::read_header(&mut file) {
@@ -199,11 +203,17 @@ impl FileBackend {
                     );
                 }
             }
-        } else {
-            // New file or empty file: write initial header
+        } else if is_new {
+            // New or intentionally pre-created empty file: write page 0.
             let header = FileHeader::new();
             Self::write_header(&mut file, &header)?;
             header
+        } else {
+            anyhow::bail!(
+                "Existing database is truncated: size={} bytes, expected at least one {}-byte page",
+                file_len,
+                PAGE_SIZE
+            );
         };
 
         Ok(FileBackend {
@@ -393,6 +403,36 @@ mod tests {
             let backend = FileBackend::open(&temp_path).unwrap();
             assert!(!backend.is_new(), "third open should still not be new");
         }
+    }
+
+    #[test]
+    fn test_precreated_empty_file_is_supported_as_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("precreated-empty.graph");
+        std::fs::write(&path, b"").unwrap();
+
+        let backend = FileBackend::open(&path).expect("empty creation target should open");
+        assert!(
+            backend.is_new(),
+            "empty creation target should be initialized"
+        );
+        assert_eq!(backend.page_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_nonempty_short_file_is_rejected_without_reinitializing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("truncated.graph");
+        let prefix = b"MGRF truncated";
+        std::fs::write(&path, prefix).unwrap();
+
+        let result = FileBackend::open(&path);
+        assert!(result.is_err(), "nonempty short database must be rejected");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            prefix,
+            "failed open must not overwrite the corrupt prefix"
+        );
     }
 
     #[test]

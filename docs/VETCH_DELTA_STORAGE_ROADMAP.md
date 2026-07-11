@@ -159,7 +159,8 @@ the result of progressively narrower gates:
 | Q2-B | `write_recompact_candidate_from_visible_facts()` streams visible facts through `FactStorage::for_each_fact()` instead of materializing a committed `Vec<Fact>` first. | Recompact input has a better memory shape, but candidate pages and index-entry buffers remain O(total facts). |
 | Q3-A | Public `run_idle_maintenance()` exposes checkpoint/delta/advice outcome while keeping raw recompact private. | Vetch can schedule maintenance without owning storage internals. |
 | Q3-B | `docs/MAINTENANCE_API_CONTRACT.md` records caller windows, outcome semantics, error handling, and Vetch scheduling policy. | Vetch can validate maintenance adoption without another Vicia storage algorithm change. |
-| A5-4 | Four 100K-base browser soft-threshold cycles atomically replaced compact images, reclaimed about 2.1K pages each, reset write latency, and a module DedicatedWorker passed open/write/query/maintenance. | The maintenance and worker deployment boundaries pass in real Chrome; bounded 1M open/memory and parity evidence remain Gate E work. |
+| A5-4 | Four 100K-base browser soft-threshold cycles atomically replaced compact images, reclaimed about 2.1K pages each, reset write latency, and a module DedicatedWorker passed open/write/query/maintenance. | The maintenance and worker deployment boundaries pass in real Chrome; bounded 1M open/memory remains Gate E work. |
+| A5-5 | Native- and Chrome-generated v10 fixtures run through both consumers with exact tagged temporal/ref results and one shared slot/manifest/segment/truncation/tail corruption corpus. | Semantic, portability, and recovery-policy parity pass; page-local base integrity and bounded browser reads remain coupled Gate E work. |
 
 ## Philosophy Fit
 

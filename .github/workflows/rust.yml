@@ -36,3 +36,27 @@ jobs:
       env:
         RUSTDOCFLAGS: "--cfg docsrs"
       run: cargo doc --all-features --no-deps
+
+  browser-wasm:
+    name: Browser WASM (Chrome)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+    - name: Install matching Chrome and ChromeDriver
+      id: chrome
+      uses: browser-actions/setup-chrome@v2
+      with:
+        chrome-version: stable
+        install-chromedriver: true
+    - name: Install matching wasm-bindgen test runner
+      shell: bash
+      run: |
+        version="$(cargo tree --target wasm32-unknown-unknown -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $2); print $2 }')"
+        cargo install wasm-bindgen-cli --version "$version" --locked
+    - name: Run BrowserDb tests in headless Chrome
+      env:
+        CHROMEDRIVER: ${{ steps.chrome.outputs.chromedriver-path }}
+      run: ./scripts/test-browser-wasm.sh

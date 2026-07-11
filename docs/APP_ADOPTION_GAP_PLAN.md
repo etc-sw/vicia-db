@@ -5,11 +5,13 @@ Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 2026-07-11 audit inferences (see Revision Note). A0, A6, A7, A2, and A5
 landed 2026-07-11 (A2's `export_since` frame frozen after harrekki-lane
 ACK; A5 evidence gate and A5-4 browser maintenance passed — see the A5 block),
-and A8/A9 landed. Remaining Vicia acceptance work is bounded browser open plus
-the shared native/browser parity and corruption corpus. This line
-sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
-delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
-apply unchanged.
+and A8/A9 landed. The shared native/browser tagged, portability, and corruption
+corpus has also landed. Remaining known implementation work is bounded browser
+open plus page-local integrity; remaining acceptance proof includes the real
+Gate D Vetch trace and a 1M browser maintenance peak-memory run. This line sits
+after Q3-B on the Vetch delta-storage roadmap and does not modify any delta
+gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md` apply
+unchanged.
 
 ## Revision Note
 
@@ -46,7 +48,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G2 | No incremental change surface; `export_fact_log()` is full-export only (`src/db.rs:761`). | Public API audit. | **Harrekki P0 #2** ("what changed since my last tick"). Vetch consumes via stored cursor. Slice A2. |
 | G3 | Value-range predicates evaluate post-scan in memory; AVET/VAET range scans exist at storage layer but executor never pushes comparisons into them. | `eval_binop` (`src/query/datalog/executor.rs` ~2200); `threshold_filter` 57.8 ms at 10K (`docs/BENCHMARKS.md`). | Neither caller asks now. Vetch viewport culling is Vetch-owned UI projection; harrekki decay-candidate queries are benchmark-first (P1 #6 note). Demoted to candidate (A3). |
 | G4 | Single-fact cap `MAX_FACT_BYTES` = 4080 bytes (`src/storage/packed_pages.rs:47`); no documented chunking convention. | Insert-time validation. | Both callers pin payloads (harrekki: blobs/packets; Vetch: even note text) **outside** the graph — pointers/hashes only. Guard-rail doc only (A4). |
-| G5 | Browser backend is write-through with no WAL; open still loads **all** IndexedDB pages into memory and cross-tab coordination remains caller-owned. | `src/browser/mod.rs`, `src/browser/maintenance.rs`, `src/browser/indexeddb.rs`. | **Vetch P0/P1** — A5 measured the wall; A5-4 now exposes atomic compact maintenance, ordered/durable write results, rollback-or-poison failure handling, and worker-compatible IndexedDB discovery. The remaining Gate E blocker is the 1M full-load open/memory path plus the shared parity/corruption corpus. |
+| G5 | Browser backend is write-through with no WAL; open still loads **all** IndexedDB pages into memory and cross-tab coordination remains caller-owned. | `src/browser/mod.rs`, `src/browser/maintenance.rs`, `src/browser/indexeddb.rs`. | **Vetch P0/P1** — A5-4 closes maintenance/failure behavior and A5-5 closes tagged/portable/corruption parity. Remaining Gate E implementation blockers are bounded 1M open and page-local integrity; 1M maintenance peak memory still needs evidence. |
 | G6 | `docs/BENCHMARKS.md` 100K/1M current-view rows predate v1.1.0 selective pushdown. | Query Latency section note ("unchanged from v0.8.0"). | Both callers demand caller-shaped evidence before API growth. Slice A0 (expanded). |
 | G7 | History grows monotonically; no forget or erasure surface. | Full-history identity invariant. | Harrekki splits this: semantic forget = **bulk valid-time closure** (P1 #6, plannable → A8); physical erasure/vacuum = P2, opt-in, auditable (stays an open decision). |
 | G8 | No long-lived session access for external (non-Rust) callers; harrekki currently spawns the CLI per call. | `~/projects/harrekki/src/harrekki/dev_system_minigraf.clj` (one-shot STDIO). | **Harrekki P0 #1** — framed pipe mode. Slice A6. |
@@ -185,12 +187,9 @@ legacy load path. Scope:
    (write-through IndexedDB, no WAL), batch multi-statement work into one
    `execute`.
 2. Documented durability semantics per backend (G13): what `execute` /
-   `checkpoint` guarantee on return, native vs browser; document both value
-   encodings per the vetch lane's A6 Q2 decision — the tagged A6 encoding is
-   the long-term canonical form, the current lossy browser JSON is an
-   explicitly named temporary compatibility surface, and browser `execute()`
-   converges on tagged in a planned breaking transition; failure and
-   corruption classification for open / execute / checkpoint / import.
+   `checkpoint` guarantee on return, native vs browser; use the same lossless
+   tagged value encoding in both session and BrowserDb query results; classify
+   failure and corruption behavior for open / execute / checkpoint / import.
 3. Parity evidence: browser open memory/startup at 1M-fact scale (from A0),
    long-running IndexedDB growth measurement, and verification that
    `importGraph` is atomic — invalid input must not partially replace the
@@ -204,11 +203,11 @@ write durability fields landed later in A5-4.
   are documented, the 1M full-load cost is measured, and import atomicity has
   tests. This is evidence for Gate E, not completion of Gate E. Evidence:
   `docs/DURABILITY_AND_CALLER_RULES.md` (caller rules + G13 durability
-  semantics + failure classification + both value encodings),
+  semantics + failure classification + canonical tagged encoding),
   `docs/BENCHMARKS.md` "Browser Open at Scale" re-measure and "A5: Browser
   IndexedDB Growth", six wasm atomicity tests in `src/browser/`.
-  Vicia still owns bounded 1M open plus the shared tagged parity/corruption
-  corpus before the final cutover decision can move to vetch-app.
+  Vicia still owns bounded 1M open and page-local integrity before the final
+  browser cutover decision can move to vetch-app.
 - Progress (2026-07-11): **import atomicity LANDED** — `importGraph` now
   commits the durable replacement in a single IndexedDB `clear`+`put`
   transaction *before* the live handle switches (was: swap-then-flush, which
@@ -238,10 +237,9 @@ write durability fields landed later in A5-4.
   single-IndexedDB-transaction commit with the Chrome 121+ `relaxed`
   default caveat), the browser flush-failure handle-poisoning rule,
   failure/corruption classification for open/execute/checkpoint/import,
-  both value encodings with the tagged A6 form named canonical and the
-  browser JSON named temporary, and the three browser caller rules (Web
-  Locks single-writer, batch+debounce, read-mostly adoption policy). This
-  closes A5.
+  the tagged value contract and the three browser caller rules (Web Locks
+  single-writer, batch+debounce, read-mostly adoption policy). This closes
+  A5-3.
 
 #### A5-4 — Browser atomic compact maintenance (DONE 2026-07-11)
 
@@ -268,7 +266,7 @@ The same slice closes the browser write-result and failure boundary:
   bench-driver smoke passes open/write/query/maintenance in a real module
   DedicatedWorker
 
-Gate: PASSED for functional correctness and 100K maintained growth. Nineteen
+Gate: PASSED for functional correctness and 100K maintained growth. The
 browser WASM tests cover identity, temporal Ref history, rollback/poison,
 replacement failure, stale-page removal, and reopen. Four consecutive
 100K-base soft-threshold cycles each compacted successfully; page records
@@ -278,10 +276,29 @@ dropped from `12,650→10,550`, `13,433→11,326`, `14,209→12,101`, and
 O(total history) at `2.5–4.2 s`, so worker scheduling and quota reserve are
 load-bearing.
 
-This does **not** close Vetch Gate E. Browser open still loads every page into
-renderer memory; the recorded 1M shape remains about 420 MB per tab. Next
-browser work is bounded/page-on-demand open plus the shared tagged parity and
-corruption corpus, not another maintenance algorithm.
+#### A5-5 — Shared tagged portability and corruption corpus (DONE 2026-07-11)
+
+One declarative corpus now generates both a native v10 graph and a graph from
+the real Chrome BrowserDb facade. Both consumers run both fixtures (2×2) and
+compare exact tagged scalar/Ref/Keyword/null results across current, `:as-of`,
+valid-time, combined-time, retraction, and VAET joins. Native also opens the
+browser-produced ledger and verifies all 13 history records and tx ordering.
+
+The same bytes drive slot, manifest, segment, header, truncation, and
+unpublished-tail mutations. Both backends recover only through the previous
+valid manifest, reject selected-older-segment or both-slot corruption, preserve
+the old live/durable browser state on rejected import, and omit unpublished
+tail pages from export/backup. A complete fallback image remains portable; a
+physically incomplete prefix stays queryable through fallback but export fails
+visibly until repair. Browser and session results share `src/json_value.rs`.
+The repeatable CI entrypoint runs all 23 browser tests in headless Chrome.
+
+This still does **not** close Vetch Gate E. Browser open loads every page into
+renderer memory; the recorded 1M shape remains about 420 MB per tab. The
+existing v10 base checksum also does not detect an unread base-fact-page bit
+flip when a selected delta manifest is present. Next browser storage work is a
+generation-bound page-on-demand source with page-local integrity, followed by
+the 1M open/query/growth/maintenance peak-memory matrix.
 
 ### A8 — Bulk valid-time closure, the "forget" primitive (DONE 2026-07-11)
 
@@ -391,8 +408,9 @@ A6 formalizes an existing surface (piped REPL) without adding a server,
 socket, or wire dependency — the daemon owns the child. A7/A9 are
 reliability proofs, the core of the SQLite posture. A2/A8 are small,
 ledger-shaped primitives consistent with bi-temporal first-class semantics.
-A5 is documentation plus measurement. Everything that pulls toward a bigger
-system (vectors, blobs, push feeds, erasure, second-process readers, query
-conveniences) is parked as caller policy, a candidate, or an open decision —
-consistent with the delta roadmap's rule: do not skip gates by adding a
-broader engine or public surface.
+A5 adds only the browser durability, maintenance, and parity boundaries needed
+by the embedded ledger. Everything that pulls toward a bigger system (vectors,
+blobs, push feeds, erasure, second-process readers, query conveniences) is
+parked as caller policy, a candidate, or an open decision — consistent with
+the delta roadmap's rule: do not skip gates by adding a broader engine or
+public surface.

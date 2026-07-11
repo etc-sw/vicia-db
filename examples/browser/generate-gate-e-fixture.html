@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Vicia Gate E fixture generator</title>
+<script type="module">
+  import init, { BrowserDb } from "../../minigraf-wasm/minigraf.js";
+
+  await init();
+
+  window.generateGateEFixture = async () => {
+    const response = await fetch("../../tests/fixtures/gate_e/corpus.json");
+    if (!response.ok) {
+      throw new Error(`corpus fetch failed: ${response.status}`);
+    }
+    const corpus = await response.json();
+    const db = BrowserDb.openInMemory();
+    for (const operation of corpus.setup) {
+      await db.execute(operation.datalog);
+      if (operation.checkpoint_after) {
+        await db.checkpoint();
+      }
+    }
+    const bytes = db.exportGraph();
+    let binary = "";
+    const chunk = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+    }
+    return { base64: btoa(binary), byteLength: bytes.length };
+  };
+</script>

@@ -75,7 +75,10 @@
 //! - **WASI / server-side** (`wasm32-wasip1`) — `cargo build --target wasm32-wasip1 --release --bin minigraf`
 
 pub mod db;
+#[cfg(test)]
+pub(crate) mod gate_e_test_support;
 pub(crate) mod graph;
+pub(crate) mod json_value;
 pub(crate) mod query;
 /// Interactive REPL for exploring a [`Minigraf`] database from the command line.
 pub mod repl;

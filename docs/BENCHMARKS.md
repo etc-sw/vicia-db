@@ -782,7 +782,7 @@ reached `33.9–43.1 ms` p95; the next post-maintenance windows returned to
 probe at commit 1,024 correctly no-opped because the first write created the
 base and only 1,023 delta segments existed.
 
-Correctness/failure evidence is separate from timing: the 19-test browser WASM
+Correctness/failure evidence is separate from timing: the 23-test browser WASM
 suite preserves Ref assertion/retraction history, valid-time reads, exact tx
 watermark, export/reopen, mutation exclusion, rejected-write rollback, poison
 containment, and atomic maintenance failure.
@@ -802,8 +802,41 @@ Gate verdict:
   plus candidate quota. Run it in the BrowserDb worker, never the UI thread.
 - **Still open for Gate E:** the current open path loads every IndexedDB page.
   The prior 1M result (~3.2 s, ~420 MB per tab) remains the bounded-memory
-  blocker. Do not infer 1M browser authority readiness from the 100K maintenance
-  pass.
+  blocker. The 1M maintenance peak-memory shape is also unmeasured. Do not infer
+  1M browser authority readiness from the 100K maintenance pass.
+
+### A5-5: Gate E Tagged Portability and Corruption Matrix
+
+Run: `cargo test --lib gate_e` for the native consumers, then
+`CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh` for real
+headless Chrome. The browser entrypoint is also wired into `rust.yml` CI.
+
+`tests/fixtures/gate_e/corpus.json` drives two producers (`native.graph` from
+the native generator and `browser.graph` from real BrowserDb WASM) through two
+consumers. All four producer→consumer cells match ten exact tagged query cases:
+scalars, Ref, Keyword, null, current state, `:as-of`, valid-time,
+combined-time, retraction, and VAET joins. The browser-produced fixture also
+opens natively with all 13 ledger records, transaction counts, and the Ref
+retraction intact. Canonical imports export byte-for-byte and reimport with the
+same results.
+
+The shared corruption matrix covers bad magic/version/header checksum,
+non-empty short files, newest slot/manifest/segment fallback, missing and
+partial newest pages, selected-oldest-segment and both-slot hard errors, and
+unpublished full-page tails. Both backends preserve base plus the two earlier
+deltas on fallback and reject base-only partial recovery. Rejected BrowserDb
+imports preserve both the live sentinel and reopened durable sentinel. A full
+unpublished tail is removed from IndexedDB and export; a physically incomplete
+declared prefix can serve the previous manifest but remains visibly
+non-exportable until repaired.
+
+Verdict: semantic, portability, and manifest-recovery parity pass. This matrix
+also exposed the remaining integrity blocker: with a selected delta manifest,
+v10 trusts base checksum identity instead of rereading every base page, so a
+base fact-page bit flip can silently alter results on both backends. Restoring a
+global O(base) checksum on every open would undo the T7A bounded-reopen result;
+the next storage slice must pair page-local authenticated reads with the
+bounded browser page source.
 
 ---
 

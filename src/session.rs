@@ -14,7 +14,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use crate::db::Minigraf;
-use crate::graph::types::{FactRecord, FactValidTime, VALID_TIME_FOREVER, Value};
+use crate::graph::types::{FactRecord, FactValidTime, VALID_TIME_FOREVER};
+use crate::json_value::to_tagged_json;
 use crate::query::datalog::executor::QueryResult;
 use crate::query::datalog::parser::parse_datalog_command;
 use serde_json::{Value as JVal, json};
@@ -156,7 +157,7 @@ impl Session {
             Ok(QueryResult::QueryResults { vars, results }) => {
                 let rows: Vec<Vec<JVal>> = results
                     .iter()
-                    .map(|row| row.iter().map(value_to_tagged_json).collect())
+                    .map(|row| row.iter().map(to_tagged_json).collect())
                     .collect();
                 write_ok(
                     writer,
@@ -361,37 +362,12 @@ fn fact_record_to_json(record: &FactRecord) -> JVal {
     json!({
         "entity": record.entity.to_string(),
         "attribute": record.attribute,
-        "value": value_to_tagged_json(&record.value),
+        "value": to_tagged_json(&record.value),
         "tx_id": record.tx_id,
         "tx_count": record.tx_count,
         "valid_time": valid_time,
         "asserted": record.asserted,
     })
-}
-
-/// Tagged value encoding — lossless for `Value::Ref` and `Value::Keyword`,
-/// which plain JSON would flatten into ambiguous strings. Non-finite floats
-/// (unrepresentable in JSON) use the `$float` escape.
-fn value_to_tagged_json(v: &Value) -> JVal {
-    match v {
-        Value::String(s) => JVal::String(s.clone()),
-        Value::Integer(i) => json!(i),
-        Value::Float(f) => {
-            if f.is_nan() {
-                json!({"$float": "nan"})
-            } else if f.is_infinite() {
-                json!({"$float": if *f > 0.0 { "inf" } else { "-inf" }})
-            } else {
-                serde_json::Number::from_f64(*f)
-                    .map(JVal::Number)
-                    .unwrap_or(JVal::Null)
-            }
-        }
-        Value::Boolean(b) => JVal::Bool(*b),
-        Value::Ref(uuid) => json!({"$ref": uuid.to_string()}),
-        Value::Keyword(k) => json!({"$kw": k}),
-        Value::Null => JVal::Null,
-    }
 }
 
 fn write_ok(writer: &mut impl Write, id: JVal, result: JVal) -> anyhow::Result<()> {

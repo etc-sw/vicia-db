@@ -146,7 +146,7 @@ let r2 = pq.execute(&[("tx", BindValue::TxCount(2)), ("entity", BindValue::Entit
 
 ```bash
 cargo run          # interactive Datalog REPL
-cargo test         # run 1198 passing tests (12 additional gates are ignored by default)
+cargo test         # run 1205 passing tests (12 additional gates are ignored by default)
 cargo run < demos/demo_recursive.txt   # recursive rules demo
 ```
 
@@ -229,9 +229,9 @@ See the [Mobile Integration](https://github.com/project-minigraf/minigraf/wiki/U
 
 ### For WASM / Browser
 
-Published compatibility package: [`@minigraf/browser`](https://www.npmjs.com/package/@minigraf/browser) (IndexedDB-backed, `wasm-pack`). Vetch consumes the current checkout through its local `@vicia-db/browser` package boundary. Browser writes return ordered `tx_count` and durability/maintenance fields; caller-scheduled `runIdleMaintenance()` atomically rebuilds a compact IndexedDB image when delta thresholds are crossed. Run the BrowserDb writer and O(total-history) maintenance in a dedicated worker under a Web Lock. See [`docs/DURABILITY_AND_CALLER_RULES.md`](docs/DURABILITY_AND_CALLER_RULES.md) and [`docs/MAINTENANCE_API_CONTRACT.md`](docs/MAINTENANCE_API_CONTRACT.md).
+Published compatibility package: [`@minigraf/browser`](https://www.npmjs.com/package/@minigraf/browser) (IndexedDB-backed, `wasm-pack`). Vetch consumes the current checkout through its local `@vicia-db/browser` package boundary. Browser and native session queries share one lossless tagged JSON encoding; browser writes return ordered `tx_count` and durability/maintenance fields. Caller-scheduled `runIdleMaintenance()` atomically rebuilds a compact IndexedDB image when delta thresholds are crossed. Run the BrowserDb writer and O(total-history) maintenance in a dedicated worker under a Web Lock. See [`docs/DURABILITY_AND_CALLER_RULES.md`](docs/DURABILITY_AND_CALLER_RULES.md) and [`docs/MAINTENANCE_API_CONTRACT.md`](docs/MAINTENANCE_API_CONTRACT.md).
 
-WASI build (`wasm32-wasip1`) remains available as [`@minigraf/wasi`](https://www.npmjs.com/package/@minigraf/wasi) and as a GitHub Releases artifact. The 1M browser open path remains an open bounded-memory requirement; maintenance availability alone is not a claim of full Vetch Gate E readiness.
+WASI build (`wasm32-wasip1`) remains available as [`@minigraf/wasi`](https://www.npmjs.com/package/@minigraf/wasi) and as a GitHub Releases artifact. The native↔browser tagged portability/corruption matrix passes, but the 1M browser open path and page-local base integrity remain open requirements; maintenance availability alone is not a claim of full Vetch Gate E readiness.
 
 ### For Python / Node.js / Java / C
 
