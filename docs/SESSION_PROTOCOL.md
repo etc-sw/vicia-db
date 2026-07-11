@@ -39,6 +39,7 @@ line-based transport.
 | `status` | — | Cheap telemetry snapshot; see Status fields. |
 | `checkpoint` | — | Foreground checkpoint (WAL → durable image). |
 | `maintenance` | — | `run_idle_maintenance()`; call in idle windows per `docs/MAINTENANCE_API_CONTRACT.md`. |
+| `export_since` | `since_tx_count`: uint | **Proposed (A2), pending caller-lane ACK** — incremental fact-log tail; see export_since below. |
 | `ping` | — | Liveness. |
 | `shutdown` | — | Responds, then exits the loop. Equivalent to stdin EOF. |
 
@@ -53,9 +54,54 @@ Success: `{"ok": true, "result": {...}, "id"?}`. Result bodies by type:
 - `{"type": "status", ...}` — see Status fields
 - `{"type": "checkpoint", "durability": "published"}`
 - `{"type": "maintenance", "checkpoint": "noop"|"published", "delta": "noop"|"recompacted", "advice": "none"|"reduce_checkpoint_cadence"}`
+- `{"type": "fact_log", ...}` — see export_since below
 - `{"type": "pong"}`, `{"type": "shutdown"}`
 
 Error: `{"ok": false, "error": {"kind": "...", "message": "..."}, "id"?}`.
+
+## export_since (A2) — status: proposed, pending caller-lane ACK
+
+The incremental "facts since tx_count N" read (harrekki P0 #2). The Rust API
+(`Minigraf::export_fact_log_since`) is frozen; this frame shape follows the
+A6 precedent of a caller-lane veto before the first byte is canon.
+
+Request: `{"op": "export_since", "since_tx_count": <uint>, "id"?}`
+
+Response result body:
+
+```json
+{"type": "fact_log", "since_tx_count": 42, "head_tx_count": 45,
+ "records": [
+   {"entity": "550e8400-e29b-41d4-a716-446655440000",
+    "attribute": ":person/name",
+    "value": "Alice",
+    "tx_id": 1767052800000,
+    "tx_count": 43,
+    "valid_time": {"valid_from": 1767052800000, "valid_to": null},
+    "asserted": true}
+ ]}
+```
+
+- `records` — every fact-log record with `tx_count > since_tx_count`
+  (assertions **and** retractions), in the same deterministic storage order
+  as `export_fact_log()`. Cost is proportional to the tail (tx-ordered page
+  probe + in-memory delta/pending filter), never a committed full scan.
+- `head_tx_count` — the current head; an empty tail still advances the
+  caller's stored cursor. Poll discipline: store `head_tx_count`, pass it
+  back as the next `since_tx_count`.
+- `entity` — plain UUID string (an entity id is always a UUID; no type
+  ambiguity, so the `$ref` tag is unnecessary). `value` — tagged encoding.
+- `valid_time` — `{"valid_from": <ms>, "valid_to": <ms>|null}`; `null` means
+  open-ended (the `i64::MAX` sentinel does not survive an f64 round-trip, so
+  it never crosses the wire). The string `"all"` marks a legacy unscoped
+  retraction cancelling every valid-time window of its EAV triple.
+- Missing or negative `since_tx_count` → `protocol` error; the session
+  continues. `since_tx_count: 0` is the full export — intended for small
+  tails; full exports of large databases should use the Rust API.
+- Open question for the ACK: whether a bounded-size chunked reply is needed.
+  Current position: no — the daemon polls small tails by design, and a
+  chunked reply adds a multi-frame state machine to every adapter. Veto if
+  the JVM side disagrees.
 
 ## Value encoding (tagged, lossless)
 

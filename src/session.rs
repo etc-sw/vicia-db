@@ -14,7 +14,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use crate::db::Minigraf;
-use crate::graph::types::Value;
+use crate::graph::types::{FactRecord, FactValidTime, VALID_TIME_FOREVER, Value};
 use crate::query::datalog::executor::QueryResult;
 use crate::query::datalog::parser::parse_datalog_command;
 use serde_json::{Value as JVal, json};
@@ -78,6 +78,7 @@ impl Session {
                 "status" => self.op_status(id, &mut writer)?,
                 "checkpoint" => self.op_checkpoint(id, &mut writer)?,
                 "maintenance" => self.op_maintenance(id, &mut writer)?,
+                "export_since" => self.op_export_since(obj, id, &mut writer)?,
                 "ping" => write_ok(&mut writer, id, json!({"type": "pong"}))?,
                 "shutdown" => {
                     write_ok(&mut writer, id, json!({"type": "shutdown"}))?;
@@ -204,6 +205,43 @@ impl Session {
         }
     }
 
+    /// A2 incremental fact-log read: every record with `tx_count > since`.
+    ///
+    /// Frame shape is proposed pending caller-lane ACK (A6 precedent) — see
+    /// `docs/SESSION_PROTOCOL.md` "export_since". `head_tx_count` is returned
+    /// so an empty tail still advances the caller's stored cursor.
+    fn op_export_since(
+        &self,
+        obj: &serde_json::Map<String, JVal>,
+        id: JVal,
+        writer: &mut impl Write,
+    ) -> anyhow::Result<()> {
+        let Some(since) = obj.get("since_tx_count").and_then(JVal::as_u64) else {
+            return write_error(
+                writer,
+                id,
+                "protocol",
+                "export_since requires unsigned integer field \"since_tx_count\"",
+            );
+        };
+        match self.db.export_fact_log_since(since) {
+            Ok(records) => {
+                let rows: Vec<JVal> = records.iter().map(fact_record_to_json).collect();
+                write_ok(
+                    writer,
+                    id,
+                    json!({
+                        "type": "fact_log",
+                        "since_tx_count": since,
+                        "head_tx_count": self.db.current_tx_count(),
+                        "records": rows,
+                    }),
+                )
+            }
+            Err(e) => write_error(writer, id, "storage", &e.to_string()),
+        }
+    }
+
     fn record_checkpoint(&mut self, outcome: &'static str) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -212,6 +250,39 @@ impl Session {
         self.last_checkpoint_unix_ms = Some(now_ms);
         self.last_checkpoint_outcome = Some(outcome);
     }
+}
+
+/// Encode one fact-log record for the `export_since` response.
+///
+/// `entity` is a plain UUID string (an `EntityId` is always a UUID — no type
+/// ambiguity, so the `$ref` tag is unnecessary); `value` uses the tagged
+/// encoding. `valid_to: null` means open-ended (`VALID_TIME_FOREVER` does not
+/// survive an f64 round-trip, so the sentinel never crosses the wire);
+/// `"valid_time": "all"` is the legacy all-valid-time retraction marker.
+fn fact_record_to_json(record: &FactRecord) -> JVal {
+    let valid_time = match record.valid_time {
+        FactValidTime::AllValidTime => json!("all"),
+        FactValidTime::Window {
+            valid_from,
+            valid_to,
+        } => json!({
+            "valid_from": valid_from,
+            "valid_to": if valid_to == VALID_TIME_FOREVER {
+                JVal::Null
+            } else {
+                json!(valid_to)
+            },
+        }),
+    };
+    json!({
+        "entity": record.entity.to_string(),
+        "attribute": record.attribute,
+        "value": value_to_tagged_json(&record.value),
+        "tx_id": record.tx_id,
+        "tx_count": record.tx_count,
+        "valid_time": valid_time,
+        "asserted": record.asserted,
+    })
 }
 
 /// Tagged value encoding — lossless for `Value::Ref` and `Value::Keyword`,

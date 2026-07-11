@@ -181,6 +181,86 @@ fn maintenance_reports_effects() {
     assert!(r["advice"].is_string());
 }
 
+// ─── A2: export_since op (frame shape proposed pending caller-lane ACK) ─────
+
+#[test]
+fn export_since_returns_tail_records_with_tagged_values() {
+    let responses = run_session(concat!(
+        "{\"op\":\"execute\",\"datalog\":\"(transact [[:a :name \\\"x\\\"]])\"}\n",
+        "{\"op\":\"execute\",\"datalog\":\"(transact [[:a :state :status/active]])\"}\n",
+        "{\"op\":\"execute\",\"datalog\":\"(retract [[:a :name \\\"x\\\"]])\"}\n",
+        "{\"op\":\"export_since\",\"since_tx_count\":1}\n",
+    ));
+    let r = &responses[3];
+    assert_eq!(r["ok"], true);
+    let result = &r["result"];
+    assert_eq!(result["type"], "fact_log");
+    assert_eq!(result["since_tx_count"], 1);
+    assert_eq!(result["head_tx_count"], 3);
+
+    let records = result["records"].as_array().expect("records array");
+    assert_eq!(records.len(), 2, "tail past tx 1 has keyword tx + retraction");
+
+    let keyword_record = &records[0];
+    assert_eq!(keyword_record["tx_count"], 2);
+    assert_eq!(keyword_record["asserted"], true);
+    assert_eq!(
+        keyword_record["value"]["$kw"], ":status/active",
+        "keyword values must use the tagged encoding"
+    );
+    assert!(
+        keyword_record["entity"].is_string(),
+        "entity is a plain uuid string"
+    );
+    assert!(
+        keyword_record["valid_time"]["valid_to"].is_null(),
+        "open-ended valid_to must encode as null, not the i64 sentinel"
+    );
+
+    let retraction = &records[1];
+    assert_eq!(retraction["tx_count"], 3);
+    assert_eq!(retraction["asserted"], false);
+    assert_eq!(
+        retraction["valid_time"], "all",
+        "legacy unscoped retraction is the all-valid-time marker"
+    );
+}
+
+#[test]
+fn export_since_empty_tail_still_reports_head_cursor() {
+    let responses = run_session(concat!(
+        "{\"op\":\"execute\",\"datalog\":\"(transact [[:a :n 1]])\"}\n",
+        "{\"op\":\"export_since\",\"since_tx_count\":99}\n",
+    ));
+    let result = &responses[1]["result"];
+    assert_eq!(result["type"], "fact_log");
+    assert_eq!(
+        result["records"].as_array().map(Vec::len),
+        Some(0),
+        "cursor past head yields an empty tail"
+    );
+    assert_eq!(
+        result["head_tx_count"], 1,
+        "empty tail must still let the caller advance its cursor"
+    );
+}
+
+#[test]
+fn export_since_missing_field_is_protocol_error_and_session_survives() {
+    let responses = run_session(concat!(
+        "{\"op\":\"export_since\"}\n",
+        "{\"op\":\"export_since\",\"since_tx_count\":-3}\n",
+        "{\"op\":\"ping\"}\n",
+    ));
+    assert_eq!(responses[0]["ok"], false);
+    assert_eq!(responses[0]["error"]["kind"], "protocol");
+    assert_eq!(
+        responses[1]["error"]["kind"], "protocol",
+        "negative cursor is rejected as protocol error"
+    );
+    assert_eq!(responses[2]["result"]["type"], "pong");
+}
+
 // ─── Child-process tests: the real binary over a real pipe ──────────────────
 
 mod child_process {
