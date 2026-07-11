@@ -414,6 +414,32 @@ impl FactStorage {
         Ok(())
     }
 
+    /// Visit only facts with `tx_count > since_tx_count`, in the same
+    /// deterministic storage order as [`Self::for_each_fact`].
+    ///
+    /// Committed facts go through the reader's since-aware path, which locates
+    /// the tail without a committed full scan; pending facts are filtered in
+    /// memory (cost proportional to the pending set).
+    pub(crate) fn for_each_fact_since(
+        &self,
+        since_tx_count: u64,
+        mut visit: impl FnMut(Fact) -> Result<()>,
+    ) -> Result<()> {
+        let d = self
+            .data
+            .read()
+            .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
+        if let Some(loader) = &d.committed {
+            loader.for_each_fact_since(since_tx_count, &mut visit)?;
+        }
+        for fact in d.facts.iter() {
+            if fact.tx_count > since_tx_count {
+                visit(fact.clone())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Return all facts visible as of the given transaction point.
     ///
     /// * `AsOf::Counter(n)` — include facts whose `tx_count <= n`
@@ -1745,6 +1771,119 @@ mod tests {
             attributes,
             vec![":committed".to_string(), ":pending".to_string()],
             "streaming visitor must preserve committed-then-pending order"
+        );
+    }
+
+    #[test]
+    fn test_for_each_fact_since_never_full_scans_committed() {
+        use crate::storage::CommittedFactReader;
+        use crate::storage::index::FactRef;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        // NoFullScanFactReader discipline: both full-stream entry points bail,
+        // so this test proves FactStorage::for_each_fact_since routes tail
+        // reads through the reader's since-aware path only.
+        struct SinceOnlyLoader {
+            facts: Vec<Fact>,
+        }
+        impl CommittedFactReader for SinceOnlyLoader {
+            fn resolve(&self, fr: FactRef) -> anyhow::Result<Fact> {
+                self.facts
+                    .get(fr.slot_index as usize)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("slot not found"))
+            }
+
+            fn stream_all(&self) -> anyhow::Result<Vec<Fact>> {
+                anyhow::bail!("committed full scan must not run for a since-tail read")
+            }
+
+            fn for_each_fact(
+                &self,
+                _visit: &mut dyn FnMut(Fact) -> anyhow::Result<()>,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("committed full stream must not run for a since-tail read")
+            }
+
+            fn for_each_fact_since(
+                &self,
+                since_tx_count: u64,
+                visit: &mut dyn FnMut(Fact) -> anyhow::Result<()>,
+            ) -> anyhow::Result<()> {
+                for fact in self.facts.iter() {
+                    if fact.tx_count > since_tx_count {
+                        visit(fact.clone())?;
+                    }
+                }
+                Ok(())
+            }
+
+            fn committed_page_count(&self) -> u64 {
+                1
+            }
+        }
+
+        let committed_old = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":committed/old".to_string(),
+            Value::Integer(1),
+            1000,
+            1,
+            1000,
+            VALID_TIME_FOREVER,
+        );
+        let committed_new = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":committed/new".to_string(),
+            Value::Integer(2),
+            2000,
+            2,
+            2000,
+            VALID_TIME_FOREVER,
+        );
+        let pending_old = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":pending/old".to_string(),
+            Value::Integer(3),
+            3000,
+            1,
+            3000,
+            VALID_TIME_FOREVER,
+        );
+        let pending_new = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":pending/new".to_string(),
+            Value::Integer(4),
+            4000,
+            3,
+            4000,
+            VALID_TIME_FOREVER,
+        );
+
+        let storage = FactStorage::new();
+        storage.set_committed_reader(Arc::new(SinceOnlyLoader {
+            facts: vec![committed_old, committed_new],
+        }));
+        storage
+            .load_fact(pending_old)
+            .expect("pending fact should load");
+        storage
+            .load_fact(pending_new)
+            .expect("pending fact should load");
+
+        let mut attributes = Vec::new();
+        storage
+            .for_each_fact_since(1, |fact| {
+                attributes.push(fact.attribute);
+                Ok(())
+            })
+            .expect("since-tail visit should succeed without a full scan");
+
+        assert_eq!(
+            attributes,
+            vec![":committed/new".to_string(), ":pending/new".to_string()],
+            "since-tail must filter both committed and pending layers in order"
         );
     }
 

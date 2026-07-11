@@ -378,6 +378,24 @@ pub trait CommittedFactReader: Send + Sync {
         }
         Ok(())
     }
+    /// Visit only committed facts with `tx_count > since_tx_count`, in the same
+    /// deterministic storage order as [`Self::for_each_fact`].
+    ///
+    /// The default implementation is a correct full-scan filter. Readers that
+    /// can locate the tail cheaply (tx-ordered packed pages, in-memory delta
+    /// layers) override this so a small tail never pays a committed full scan.
+    fn for_each_fact_since(
+        &self,
+        since_tx_count: u64,
+        visit: &mut dyn FnMut(crate::graph::types::Fact) -> Result<()>,
+    ) -> Result<()> {
+        self.for_each_fact(&mut |fact| {
+            if fact.tx_count > since_tx_count {
+                visit(fact)?;
+            }
+            Ok(())
+        })
+    }
     /// Number of committed fact pages (used for checksum + iteration bounds).
     #[allow(dead_code)]
     fn committed_page_count(&self) -> u64;

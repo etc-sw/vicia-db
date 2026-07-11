@@ -845,6 +845,36 @@ impl Minigraf {
         Ok(records)
     }
 
+    /// Export the append-only fact log tail: every record with
+    /// `tx_count > since_tx_count`.
+    ///
+    /// Returns exactly the subsequence of [`Self::export_fact_log`] whose
+    /// `tx_count` exceeds `since_tx_count` — same [`FactRecord`] shape, same
+    /// deterministic storage order, assertions and retractions both included
+    /// with their valid-time scope. `since_tx_count = 0` is equivalent to the
+    /// full export; a `since_tx_count` at or past the current head returns an
+    /// empty vec.
+    ///
+    /// Cost is proportional to the tail: committed pages are located with a
+    /// tx-ordered page probe (no committed full scan), and delta/pending
+    /// records are filtered in memory. This is the polling surface for
+    /// "what changed since my last tick" callers — poll with the last seen
+    /// `tx_count` as the cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying fact reader fails.
+    pub fn export_fact_log_since(&self, since_tx_count: u64) -> Result<Vec<FactRecord>> {
+        let mut records = Vec::new();
+        self.inner
+            .fact_storage
+            .for_each_fact_since(since_tx_count, |fact| {
+                records.push(FactRecord::from_fact(fact));
+                Ok(())
+            })?;
+        Ok(records)
+    }
+
     /// Internal checkpoint logic (operates on an already-held write-lock guard).
     fn do_checkpoint(
         _fact_storage: &FactStorage,

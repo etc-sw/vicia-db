@@ -125,6 +125,66 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
         crate::storage::packed_pages::for_each_from_pages(&*backend, first_fact_page, n, visit)
     }
 
+    fn for_each_fact_since(
+        &self,
+        since_tx_count: u64,
+        visit: &mut dyn FnMut(crate::graph::types::Fact) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let n = self.committed_fact_pages.load(Ordering::SeqCst);
+        if n == 0 {
+            return Ok(());
+        }
+        let first_fact_page = self.committed_fact_page_start.load(Ordering::SeqCst);
+
+        // Packed fact pages hold facts in nondecreasing tx_count order, so
+        // "page max tx_count > since" is monotone across the fact-page range.
+        // Binary search the first tail page through the page cache: O(log n)
+        // page reads instead of a committed full scan.
+        let mut lo = 0u64;
+        let mut hi = n;
+        while lo < hi {
+            let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+            let page_id = first_fact_page.saturating_add(mid);
+            let page = self.page_cache.get_or_load(page_id, &self.backend_adapter)?;
+            match crate::storage::packed_pages::last_tx_count(&page)? {
+                Some(max_tx) if max_tx > since_tx_count => hi = mid,
+                Some(_) => lo = mid.saturating_add(1),
+                None => {
+                    // Non-packed or empty page inside the fact range — the
+                    // monotone probe is unreliable here; fall back to the
+                    // correct full-scan filter.
+                    return self.for_each_fact(&mut |fact| {
+                        if fact.tx_count > since_tx_count {
+                            visit(fact)?;
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
+        if lo >= n {
+            return Ok(());
+        }
+
+        // Stream only the tail pages; the boundary page may still hold
+        // leading facts at or below `since`, so keep the filter.
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        crate::storage::packed_pages::for_each_from_pages(
+            &*backend,
+            first_fact_page.saturating_add(lo),
+            n.saturating_sub(lo),
+            &mut |fact| {
+                if fact.tx_count > since_tx_count {
+                    visit(fact)?;
+                }
+                Ok(())
+            },
+        )
+    }
+
     fn committed_page_count(&self) -> u64 {
         self.committed_fact_pages.load(Ordering::SeqCst)
     }
@@ -190,6 +250,23 @@ impl CommittedFactReader for LayeredFactLoaderImpl {
         self.base.for_each_fact(visit)?;
         for fact in self.delta_facts.values().cloned() {
             visit(fact)?;
+        }
+        Ok(())
+    }
+
+    fn for_each_fact_since(
+        &self,
+        since_tx_count: u64,
+        visit: &mut dyn FnMut(Fact) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        // The base skips its own committed pages via the tx-ordered page
+        // probe; delta facts already live in memory, so the filter below is
+        // proportional to the delta size, not the committed graph size.
+        self.base.for_each_fact_since(since_tx_count, visit)?;
+        for fact in self.delta_facts.values() {
+            if fact.tx_count > since_tx_count {
+                visit(fact.clone())?;
+            }
         }
         Ok(())
     }
@@ -3881,6 +3958,262 @@ mod tests {
                 !err.to_string().is_empty(),
                 "error message must not be empty"
             );
+        }
+    }
+
+    // ── A2: for_each_fact_since — tail reads without a committed full scan ──
+    mod for_each_fact_since {
+        use super::*;
+        use crate::graph::types::Value;
+        use crate::storage::StorageBackend;
+        use crate::storage::backend::FileBackend;
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        use tempfile::NamedTempFile;
+        use uuid::Uuid;
+
+        /// Delegating backend that counts `read_page` calls, so tests can
+        /// prove the since path touches only a bounded page set.
+        struct CountingBackend {
+            inner: FileBackend,
+            reads: Arc<AtomicU64>,
+        }
+
+        impl StorageBackend for CountingBackend {
+            fn write_page(&mut self, page_id: u64, data: &[u8]) -> anyhow::Result<()> {
+                self.inner.write_page(page_id, data)
+            }
+            fn read_page(&self, page_id: u64) -> anyhow::Result<Vec<u8>> {
+                self.reads.fetch_add(1, AtomicOrdering::SeqCst);
+                self.inner.read_page(page_id)
+            }
+            fn sync(&mut self) -> anyhow::Result<()> {
+                self.inner.sync()
+            }
+            fn page_count(&self) -> anyhow::Result<u64> {
+                self.inner.page_count()
+            }
+            fn close(&mut self) -> anyhow::Result<()> {
+                self.inner.close()
+            }
+            fn backend_name(&self) -> &'static str {
+                "counting-file"
+            }
+            fn is_new(&self) -> bool {
+                self.inner.is_new()
+            }
+        }
+
+        /// Write `n_tx` single-fact transactions and checkpoint them into the
+        /// committed base, returning the temp file handle and head tx_count.
+        fn build_committed_base(n_tx: u64) -> (NamedTempFile, u64) {
+            let tmp = NamedTempFile::new().unwrap();
+            let path = tmp.path().to_str().unwrap().to_string();
+            let mut pfs =
+                PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
+            let entity = Uuid::new_v4();
+            for i in 0..n_tx {
+                pfs.storage()
+                    .transact(
+                        vec![(
+                            entity,
+                            ":a2/seq".to_string(),
+                            Value::Integer(i64::try_from(i).unwrap()),
+                        )],
+                        None,
+                    )
+                    .unwrap();
+            }
+            pfs.mark_dirty();
+            pfs.save().unwrap();
+            let head = pfs.storage().current_tx_count();
+            (tmp, head)
+        }
+
+        fn open_counting(
+            path: &str,
+        ) -> (PersistentFactStorage<CountingBackend>, Arc<AtomicU64>) {
+            let reads = Arc::new(AtomicU64::new(0));
+            let backend = CountingBackend {
+                inner: FileBackend::open(path).unwrap(),
+                reads: reads.clone(),
+            };
+            let pfs = PersistentFactStorage::new(backend, 256).unwrap();
+            (pfs, reads)
+        }
+
+        #[test]
+        fn since_tail_reads_far_fewer_pages_than_full_scan() {
+            // ~3000 facts ≈ 120 packed pages in the committed base.
+            let (tmp, head) = build_committed_base(3000);
+            let path = tmp.path().to_str().unwrap().to_string();
+
+            // Cold open #1 — full scan page reads as the baseline.
+            let (full_pfs, full_reads) = open_counting(&path);
+            let before_full = full_reads.load(AtomicOrdering::SeqCst);
+            let mut full_count = 0u64;
+            full_pfs
+                .storage()
+                .for_each_fact(|_| {
+                    full_count = full_count.saturating_add(1);
+                    Ok(())
+                })
+                .unwrap();
+            let full_scan_reads = full_reads
+                .load(AtomicOrdering::SeqCst)
+                .saturating_sub(before_full);
+            assert_eq!(full_count, 3000, "baseline full scan must see every fact");
+            drop(full_pfs);
+
+            // Cold open #2 — a 2-transaction tail must not replay the base.
+            let (tail_pfs, tail_reads) = open_counting(&path);
+            let before_tail = tail_reads.load(AtomicOrdering::SeqCst);
+            let mut tail = Vec::new();
+            tail_pfs
+                .storage()
+                .for_each_fact_since(head.saturating_sub(2), |fact| {
+                    tail.push(fact);
+                    Ok(())
+                })
+                .unwrap();
+            let tail_scan_reads = tail_reads
+                .load(AtomicOrdering::SeqCst)
+                .saturating_sub(before_tail);
+
+            assert_eq!(tail.len(), 2, "tail must contain exactly the last 2 txs");
+            assert!(
+                tail.iter().all(|f| f.tx_count > head - 2),
+                "tail must only contain records past the cursor"
+            );
+            assert!(
+                full_scan_reads >= 20,
+                "baseline full scan should touch the whole base, got {full_scan_reads} reads"
+            );
+            // Probe cost is O(log pages) + the tail pages; anything close to
+            // the full-scan read count means the base was replayed.
+            assert!(
+                tail_scan_reads <= full_scan_reads / 2,
+                "since-tail must not replay the base: {tail_scan_reads} reads vs full scan {full_scan_reads}"
+            );
+            assert!(
+                tail_scan_reads <= 15,
+                "since-tail must read only probe + tail pages, got {tail_scan_reads} (full scan: {full_scan_reads})"
+            );
+        }
+
+        #[test]
+        fn since_matches_filtered_full_export_across_layers() {
+            // Base (first save) + delta segment (second save) + pending.
+            let tmp = NamedTempFile::new().unwrap();
+            let path = tmp.path().to_str().unwrap().to_string();
+            let mut pfs =
+                PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
+            let entity = Uuid::new_v4();
+            let tx = |pfs: &mut PersistentFactStorage<FileBackend>, i: i64| {
+                pfs.storage()
+                    .transact(
+                        vec![(entity, ":a2/layer".to_string(), Value::Integer(i))],
+                        None,
+                    )
+                    .unwrap();
+            };
+            for i in 0..40 {
+                tx(&mut pfs, i);
+            }
+            pfs.mark_dirty();
+            assert!(matches!(pfs.save().unwrap(), CheckpointOutcome::FullRebuild));
+            for i in 40..60 {
+                tx(&mut pfs, i);
+            }
+            pfs.mark_dirty();
+            assert!(matches!(
+                pfs.save().unwrap(),
+                CheckpointOutcome::DeltaSegment
+            ));
+            for i in 60..70 {
+                tx(&mut pfs, i);
+            }
+
+            let mut full = Vec::new();
+            pfs.storage()
+                .for_each_fact(|fact| {
+                    full.push(fact);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(full.len(), 70, "all three layers must be visible");
+
+            let head = pfs.storage().current_tx_count();
+            for since in [0, 1, 39, 40, 41, 59, 60, 65, head, head + 5] {
+                let mut got = Vec::new();
+                pfs.storage()
+                    .for_each_fact_since(since, |fact| {
+                        got.push(fact);
+                        Ok(())
+                    })
+                    .unwrap();
+                let expected: Vec<_> =
+                    full.iter().filter(|f| f.tx_count > since).cloned().collect();
+                assert_eq!(
+                    got.len(),
+                    expected.len(),
+                    "since={since} tail length must match filtered full scan"
+                );
+                let matches = got
+                    .iter()
+                    .zip(expected.iter())
+                    .filter(|(a, b)| a == b)
+                    .count();
+                assert_eq!(
+                    matches,
+                    expected.len(),
+                    "since={since} tail must be the exact ordered subsequence"
+                );
+            }
+        }
+
+        #[test]
+        fn committed_base_pages_are_tx_nondecreasing() {
+            // The page probe in for_each_fact_since relies on packed fact
+            // pages holding facts in nondecreasing tx_count order. Exercise
+            // base build, delta append, and recompact, then verify the
+            // storage-order stream never goes backwards.
+            let tmp = NamedTempFile::new().unwrap();
+            let path = tmp.path().to_str().unwrap().to_string();
+            let mut pfs =
+                PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
+            let entity = Uuid::new_v4();
+            for round in 0..4 {
+                for i in 0..30 {
+                    pfs.storage()
+                        .transact(
+                            vec![(
+                                entity,
+                                ":a2/mono".to_string(),
+                                Value::Integer(round * 100 + i),
+                            )],
+                            None,
+                        )
+                        .unwrap();
+                }
+                pfs.mark_dirty();
+                pfs.save().unwrap();
+            }
+            pfs.recompact_visible_delta().unwrap();
+
+            let mut last_tx = 0u64;
+            let mut seen = 0u64;
+            pfs.storage()
+                .for_each_fact(|fact| {
+                    assert!(
+                        fact.tx_count >= last_tx,
+                        "storage order must be tx-nondecreasing"
+                    );
+                    last_tx = fact.tx_count;
+                    seen = seen.saturating_add(1);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(seen, 120, "recompacted stream must keep every fact");
         }
     }
 }

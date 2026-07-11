@@ -246,6 +246,26 @@ pub fn read_slot(page: &[u8], slot: u16) -> Result<Fact> {
     Ok(fact)
 }
 
+/// Decode the highest `tx_count` present on a packed page.
+///
+/// Returns `Ok(None)` when the page is not a packed fact page or holds no
+/// records. Packed fact pages hold facts in nondecreasing `tx_count` order
+/// (checkpoints append pending facts in commit order and recompact preserves
+/// `for_each_fact` order), so the last slot carries the page maximum.
+pub fn last_tx_count(page: &[u8]) -> Result<Option<u64>> {
+    let page_type = page.first().copied().unwrap_or(0);
+    if page.len() < PAGE_SIZE || page_type != PAGE_TYPE_PACKED {
+        return Ok(None);
+    }
+    let b2 = page.get(2).copied().unwrap_or(0);
+    let b3 = page.get(3).copied().unwrap_or(0);
+    let record_count = u16::from_le_bytes([b2, b3]);
+    if record_count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(read_slot(page, record_count.saturating_sub(1))?.tx_count))
+}
+
 /// Read all facts from a contiguous range of packed fact pages.
 ///
 /// `first_page_id` is the backend page ID of the first packed fact page.
@@ -535,5 +555,39 @@ mod tests {
         );
         let result = pack_facts(&[fact], 1);
         assert!(result.is_err(), "oversized fact must return Err, not panic");
+    }
+
+    #[test]
+    fn test_last_tx_count_reads_page_maximum() {
+        let facts: Vec<Fact> = (1..=5).map(make_fact).collect();
+        let (pages, _) = pack_facts(&facts, 1).unwrap();
+        assert_eq!(pages.len(), 1, "five small facts should fit on one page");
+        let last = last_tx_count(&pages[0]).unwrap();
+        assert_eq!(last, Some(5), "last slot must carry the page max tx_count");
+    }
+
+    #[test]
+    fn test_last_tx_count_none_for_empty_and_non_packed_pages() {
+        let (pages, _) = pack_facts(&[], 1).unwrap();
+        assert_eq!(pages.len(), 1, "empty pack still flushes one page");
+        assert_eq!(
+            last_tx_count(&pages[0]).unwrap(),
+            None,
+            "zero-record page has no tx_count"
+        );
+
+        let non_packed = vec![0u8; PAGE_SIZE];
+        assert_eq!(
+            last_tx_count(&non_packed).unwrap(),
+            None,
+            "non-packed page type must be rejected as None"
+        );
+
+        let short_page = vec![PAGE_TYPE_PACKED; 8];
+        assert_eq!(
+            last_tx_count(&short_page).unwrap(),
+            None,
+            "short page must be rejected as None"
+        );
     }
 }
