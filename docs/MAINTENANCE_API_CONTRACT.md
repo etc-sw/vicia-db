@@ -184,11 +184,14 @@ termination and not a general device-memory floor. A legacy v10 database's
 first `openPaged()` also follows an O(total) migration path and uses the same
 worker lifecycle during Vetch cutover.
 
-Future caller integration should add Vetch-side evidence for:
+Vetch `6c5b1f7` supplies the browser caller evidence: it observes maintenance
+advice centrally, schedules soft and hard idle demand outside the foreground
+operation, acquires the same Web Lock in a disposable worker, posts a truthful
+outcome, terminates after success or failure, and reopens through `openPaged()`.
 
-- daemon idle tick invokes the hook outside capture
-- `ReduceCheckpointCadence` changes batching/backoff policy
+Future native and final-cutover integration should add evidence that:
+
+- the packaged desktop host's idle tick invokes the hook outside capture
+- native `ReduceCheckpointCadence` changes receipt batching/backoff policy
 - maintenance errors are surfaced and retried without losing writes
 - startup/shutdown/import windows do not block interactive receipt capture
-- the browser worker acquires the same Web Lock, posts a success or failure
-  outcome, terminates, and a fresh `openPaged()` handle reopens the authority

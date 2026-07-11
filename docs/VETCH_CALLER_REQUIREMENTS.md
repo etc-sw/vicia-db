@@ -277,12 +277,12 @@ must remain usable at the expected 1M+ fact baseline. `BrowserDb.open()` keeps
 the original eager behavior for compatibility. `BrowserDb.openPaged()` is the
 v11 page-on-demand path: it reads bounded authority/catalog/manifest metadata,
 fetches verified fact/index pages on deterministic query demand, and evicts
-clean staging through the existing fixed-size cache boundary. The remaining
-caller gate is adoption of that exact measured path, not a Vetch-side shadow
-database. Five real-Chrome 1M runs measured 16.6 ms p50 / 17.8 ms maximum open
-and 51.1 MiB maximum sampled PSS growth across open plus six point probes; see
-`docs/BENCHMARKS.md` A5-6d. A legacy v10 database's first paged open is a
-separate O(total) migration and belongs in the disposable-worker cutover.
+clean staging through the existing fixed-size cache boundary. Vetch `6c5b1f7`
+adopts that exact measured path rather than a shadow database. Five real-Chrome
+1M runs measured 16.6 ms p50 / 17.8 ms maximum open and 51.1 MiB maximum sampled
+PSS growth across open plus six point probes; see `docs/BENCHMARKS.md` A5-6d. A
+legacy v10 database's first paged open is a separate O(total) migration and
+belongs in the disposable-worker cutover.
 
 ### P1 — Portability and Operations
 
