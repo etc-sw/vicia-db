@@ -615,22 +615,6 @@ impl DatalogQuery {
         Self::collect_rule_invocations_recursive(&self.where_clauses)
     }
 
-    /// Get only top-level rule invocations — those NOT nested inside a Not body.
-    ///
-    /// Used by execute_query_with_rules to build positive patterns from rule heads;
-    /// rule invocations inside `not` are handled by the not-post-filter, not here.
-    pub fn get_top_level_rule_invocations(&self) -> Vec<(String, Vec<EdnValue>)> {
-        self.where_clauses
-            .iter()
-            .filter_map(|c| match c {
-                WhereClause::RuleInvocation { predicate, args } => {
-                    Some((predicate.clone(), args.clone()))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
     /// Check if this query uses any rules (including inside Not bodies at any depth)
     pub fn uses_rules(&self) -> bool {
         self.where_clauses
@@ -1078,34 +1062,6 @@ mod tests {
         let invocations = query.get_rule_invocations();
         assert_eq!(invocations.len(), 1);
         assert_eq!(invocations[0].0, "blocked");
-    }
-
-    #[test]
-    fn test_get_top_level_rule_invocations_excludes_not_join_body() {
-        // not-join body rule invocations are NOT top-level
-        let query = DatalogQuery::new(
-            vec![FindSpec::Variable("?e".to_string())],
-            vec![
-                WhereClause::RuleInvocation {
-                    predicate: "reachable".to_string(),
-                    args: vec![
-                        EdnValue::Symbol("?e".to_string()),
-                        EdnValue::Symbol("?x".to_string()),
-                    ],
-                },
-                WhereClause::NotJoin {
-                    join_vars: vec!["?e".to_string()],
-                    clauses: vec![WhereClause::RuleInvocation {
-                        predicate: "blocked".to_string(),
-                        args: vec![EdnValue::Symbol("?e".to_string())],
-                    }],
-                },
-            ],
-        );
-        let top_level = query.get_top_level_rule_invocations();
-        // Only "reachable" is top-level; "blocked" is inside not-join
-        assert_eq!(top_level.len(), 1);
-        assert_eq!(top_level[0].0, "reachable");
     }
 
     #[test]

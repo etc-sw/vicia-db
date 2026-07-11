@@ -1,5 +1,5 @@
 use super::access_plan::QueryAccessPlan;
-use super::evaluator::{StratifiedEvaluator, evaluate_not_join};
+use super::evaluator::{StratifiedEvaluator, evaluate_not_join, rule_invocation_to_pattern};
 use super::functions::{AggImpl, FunctionRegistry, apply_builtin_aggregate, value_cmp};
 use super::matcher::{PatternMatcher, edn_to_entity_id, edn_to_value};
 use super::optimizer;
@@ -317,8 +317,8 @@ impl DatalogExecutor {
     /// The three steps above are paid exactly once per `execute_query` /
     /// `execute_query_with_rules` call.
     ///
-    /// Step 1 uses selective index-backed fetches when query patterns bind concrete entities
-    /// or attributes (up to 4 distinct lookups); falls back to `get_all_facts()` otherwise.
+    /// Step 1 uses selective index-backed fetches for up to 128 distinct concrete entities,
+    /// or up to 4 mixed/attribute lookups; otherwise it falls back to `get_all_facts()`.
     /// Step 2 (caching `net_asserted_facts()`) remains a future optimisation opportunity.
     fn filter_facts_for_query(&self, query: &DatalogQuery) -> Result<Arc<[Fact]>> {
         let now = self.read_now();
@@ -902,42 +902,26 @@ impl DatalogExecutor {
             }
         }
 
-        // Collect Pattern and Expr top-level clauses for the planner.
-        // Rule invocations are converted to WhereClause::Pattern against derived_storage.
-        let mut plan_clauses: Vec<WhereClause> = query
-            .where_clauses
-            .iter()
-            .filter(|c| matches!(c, WhereClause::Pattern(_) | WhereClause::Expr { .. }))
-            .cloned()
-            .collect();
-
-        for (predicate, args) in query.get_top_level_rule_invocations() {
-            let pattern = match args.len() {
-                1 => {
-                    #[allow(clippy::indexing_slicing)]
-                    let entity = args[0].clone();
-                    Pattern::new(
-                        entity,
-                        EdnValue::Keyword(format!(":{}", predicate)),
-                        EdnValue::Symbol("?_rule_value".to_string()),
-                    )
+        // Preserve source position while converting top-level rule invocations
+        // into patterns over derived_storage. Per-fact pseudo metadata belongs to
+        // the immediately preceding real/derived pattern, so appending converted
+        // rules after collection would change that authority relationship.
+        let mut plan_clauses: Vec<WhereClause> = Vec::new();
+        for clause in &query.where_clauses {
+            match clause {
+                WhereClause::Pattern(_) | WhereClause::Expr { .. } => {
+                    plan_clauses.push(clause.clone());
                 }
-                2 => {
-                    #[allow(clippy::indexing_slicing)]
-                    let entity = args[0].clone();
-                    #[allow(clippy::indexing_slicing)]
-                    let value = args[1].clone();
-                    Pattern::new(entity, EdnValue::Keyword(format!(":{}", predicate)), value)
+                WhereClause::RuleInvocation { predicate, args } => {
+                    plan_clauses.push(WhereClause::Pattern(rule_invocation_to_pattern(
+                        predicate, args,
+                    )?));
                 }
-                n => {
-                    return Err(anyhow!(
-                        "Rule invocation '{}' must have 1 or 2 arguments, got {}",
-                        predicate,
-                        n
-                    ));
-                }
-            };
-            plan_clauses.push(WhereClause::Pattern(pattern));
+                WhereClause::Not(_)
+                | WhereClause::NotJoin { .. }
+                | WhereClause::Or(_)
+                | WhereClause::OrJoin { .. } => {}
+            }
         }
 
         let planned = optimizer::plan(plan_clauses, &self.indexes);
@@ -3027,6 +3011,73 @@ mod tests {
             stream_calls.load(Ordering::SeqCst),
             0,
             "entity-bound as-of query should avoid committed full scan"
+        );
+    }
+
+    #[test]
+    fn bounded_entity_set_query_uses_committed_indexes_without_full_scan() {
+        let entities: Vec<Uuid> = (1u128
+            ..=super::super::access_plan::MAX_SELECTIVE_ENTITY_LOOKUPS as u128)
+            .map(Uuid::from_u128)
+            .collect();
+        let facts: Vec<Fact> = entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| {
+                Fact::with_valid_time(
+                    *entity,
+                    ":bounded/value".to_string(),
+                    Value::Integer(i64::try_from(index).unwrap()),
+                    1000,
+                    1,
+                    0,
+                    crate::graph::types::VALID_TIME_FOREVER,
+                )
+            })
+            .collect();
+        let (storage, stream_calls) = storage_with_no_full_scan_committed_facts(facts);
+        let executor = DatalogExecutor::new(storage);
+        let query = DatalogQuery {
+            find: vec![FindSpec::Variable("?value".to_string())],
+            where_clauses: vec![WhereClause::Or(
+                entities
+                    .iter()
+                    .map(|entity| {
+                        vec![WhereClause::Pattern(Pattern::new(
+                            EdnValue::Uuid(*entity),
+                            EdnValue::Keyword(":bounded/value".to_string()),
+                            EdnValue::Symbol("?value".to_string()),
+                        ))]
+                    })
+                    .collect(),
+            )],
+            as_of: Some(AsOf::Counter(1)),
+            valid_at: Some(ValidAt::AnyValidTime),
+            with_vars: Vec::new(),
+            max_derived_facts: None,
+            max_results: None,
+        };
+
+        let result = executor.execute(DatalogCommand::Query(query)).unwrap();
+        let mut values = match result {
+            QueryResult::QueryResults { results, .. } => results
+                .into_iter()
+                .map(|row| match row.first() {
+                    Some(Value::Integer(value)) => *value,
+                    _ => panic!("expected integer entity-set result"),
+                })
+                .collect::<Vec<_>>(),
+            _ => panic!("expected QueryResults"),
+        };
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            (0i64..i64::try_from(entities.len()).unwrap()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "bounded entity-set query should avoid committed full scan"
         );
     }
 

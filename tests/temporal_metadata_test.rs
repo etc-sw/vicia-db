@@ -207,6 +207,133 @@ fn tx_id_same_transaction_join() {
     );
 }
 
+/// Per-fact transaction metadata must stay correlated with the immediately
+/// preceding real pattern even when one entity has facts from different
+/// transactions. The optimizer may reorder real patterns for selectivity, but
+/// it must not collapse both pseudo-attribute reads onto the later fact.
+#[test]
+fn tx_metadata_correlates_each_real_pattern_for_same_entity() {
+    let db = db();
+    db.execute(r#"(transact [[:timeline :event/first "one"]])"#)
+        .unwrap();
+    let first_tx_count = db.current_tx_count();
+    db.execute(r#"(transact [[:timeline :event/second "two"]])"#)
+        .unwrap();
+    let second_tx_count = db.current_tx_count();
+    assert_ne!(
+        first_tx_count, second_tx_count,
+        "test setup requires distinct tx counts"
+    );
+
+    let result = db
+        .execute(
+            r#"
+        (query [:find ?first-count ?second-count
+                :any-valid-time
+                :where [:timeline :event/first "one"]
+                       [:timeline :db/tx-count ?first-count]
+                       [:timeline :event/second "two"]
+                       [:timeline :db/tx-count ?second-count]])
+    "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        results(&result),
+        &vec![vec![
+            Value::Integer(i64::try_from(first_tx_count).unwrap()),
+            Value::Integer(i64::try_from(second_tx_count).unwrap()),
+        ]],
+        "each pseudo-attribute must describe its adjacent real fact"
+    );
+}
+
+/// Expression pushdown may occur inside a fact-metadata bundle, but it must
+/// preserve binding conflicts regardless of whether the expression appears
+/// before or after the pseudo pattern in source order.
+#[test]
+fn expr_binding_inside_fact_metadata_bundle_preserves_query_truth() {
+    let db = db();
+    db.execute(r#"(transact [[:expr-meta :value/n 99]])"#)
+        .unwrap();
+
+    for query in [
+        r#"
+            (query [:find ?expected
+                    :any-valid-time
+                    :where [:expr-meta :value/n ?n]
+                           [(+ ?n 1) ?expected]
+                           [:expr-meta :db/tx-count ?expected]])
+        "#,
+        r#"
+            (query [:find ?expected
+                    :any-valid-time
+                    :where [:expr-meta :value/n ?n]
+                           [:expr-meta :db/tx-count ?expected]
+                           [(+ ?n 1) ?expected]])
+        "#,
+    ] {
+        let result = db.execute(query).unwrap();
+        assert!(
+            results(&result).is_empty(),
+            "conflicting expression and tx-count bindings must reject the row"
+        );
+    }
+}
+
+/// Top-level rule invocations are real derived-fact patterns for planning.
+/// Their source position must remain intact so a following pseudo pattern reads
+/// the derived fact metadata rather than an earlier base fact on the same entity.
+#[test]
+fn rule_invocation_preserves_fact_metadata_adjacency() {
+    let db = db();
+    db.execute(r#"(transact [[:timeline :source "one"]])"#)
+        .unwrap();
+    let source_tx_count = db.current_tx_count();
+    db.execute(r#"(rule [(derived ?e ?v) [?e :source ?v]])"#)
+        .unwrap();
+
+    let derived_only = db
+        .execute(
+            r#"
+        (query [:find ?tx
+                :any-valid-time
+                :where (derived :timeline "one")
+                       [:timeline :db/tx-count ?tx]])
+    "#,
+        )
+        .unwrap();
+    let mixed = db
+        .execute(
+            r#"
+        (query [:find ?tx
+                :any-valid-time
+                :where [:timeline :source "one"]
+                       (derived :timeline "one")
+                       [:timeline :db/tx-count ?tx]])
+    "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        results(&derived_only).len(),
+        1,
+        "derived rule query must produce one metadata row"
+    );
+    assert_eq!(
+        results(&mixed),
+        results(&derived_only),
+        "pseudo metadata after a rule invocation must describe the derived fact"
+    );
+    assert_ne!(
+        results(&derived_only),
+        &vec![vec![Value::Integer(
+            i64::try_from(source_tx_count).unwrap()
+        )]],
+        "test setup requires derived metadata to differ from the source fact"
+    );
+}
+
 // ─── :db/valid-at Tests ──────────────────────────────────────────────────────
 
 /// :db/valid-at binds the effective query timestamp when :valid-at is explicit.

@@ -99,9 +99,9 @@ impl PatternMatcher {
                 if !self.match_component(&pattern.value, &fact.value, &mut bindings) {
                     return None;
                 }
-                // Store hidden fact-metadata keys so that subsequent pseudo-attr patterns
-                // for the same entity can read per-fact temporal/tx metadata without
-                // cross-joining against every other fact for the entity.
+                // Store hidden fact-metadata keys so that pseudo-attr patterns in the
+                // same planner-preserved fact bundle can read per-fact temporal/tx
+                // metadata without cross-joining against every fact for the entity.
                 // Keys are prefixed with `__f` and namespaced by entity UUID to avoid
                 // collisions across entities. They are never referenced in :find, so they
                 // are silently filtered out during result extraction.
@@ -489,10 +489,10 @@ impl PatternMatcher {
     /// Match a pattern given existing variable bindings
     /// Returns new bindings that extend the existing ones
     fn match_pattern_with_bindings(&self, pattern: &Pattern, existing: &Bindings) -> Vec<Bindings> {
-        // Fast path for pseudo-attr patterns: when a preceding real-attr pattern stored
-        // hidden fact-metadata keys (e.g. `__fvf_<uuid>`), use them directly instead of
-        // scanning all facts and cross-joining. This ensures pseudo-attr patterns are
-        // correlated with the specific fact matched by the preceding real-attr pattern.
+        // Fast path for pseudo-attr patterns: the planner keeps each per-fact pseudo
+        // pattern in the same bundle as its preceding real pattern. Use the hidden
+        // metadata written by that real pattern instead of scanning all facts and
+        // cross-joining, preserving correlation with the specific matched fact.
         if let AttributeSpec::Pseudo(pseudo) = &pattern.attribute {
             // Resolve the entity component to a UUID using existing bindings
             let resolved_entity = self.apply_binding_to_component(&pattern.entity, existing);

@@ -5,6 +5,53 @@
 
 use crate::query::datalog::types::{AttributeSpec, EdnValue, Expr, Pattern, WhereClause};
 
+/// A real fact pattern and its following per-fact pseudo-attribute patterns
+/// form one join-ordering unit. The matcher keeps the selected fact's temporal
+/// metadata in hidden bindings; moving another real pattern between the fact
+/// and those pseudo patterns would overwrite that metadata. Expressions may
+/// still be pushed between entries because they do not replace hidden metadata.
+struct FactPatternBundle {
+    entries: Vec<(WhereClause, IndexHint)>,
+    /// The exact entity component of the real pattern that owns this bundle.
+    /// `None` denotes a standalone pseudo pattern, which has no fact to attach to.
+    fact_entity: Option<EdnValue>,
+}
+
+impl FactPatternBundle {
+    fn new(clause: WhereClause, hint: IndexHint) -> Self {
+        let fact_entity = match &clause {
+            WhereClause::Pattern(Pattern {
+                entity,
+                attribute: AttributeSpec::Real(_),
+                ..
+            }) => Some(entity.clone()),
+            _ => None,
+        };
+        Self {
+            entries: vec![(clause, hint)],
+            fact_entity,
+        }
+    }
+
+    fn accepts_per_fact_pseudo(&self, pattern: &Pattern) -> bool {
+        matches!(
+            &pattern.attribute,
+            AttributeSpec::Pseudo(pseudo) if pseudo.is_per_fact()
+        ) && self.fact_entity.as_ref() == Some(&pattern.entity)
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    fn selectivity(&self) -> u8 {
+        self.entries
+            .first()
+            .and_then(|(clause, _)| match clause {
+                WhereClause::Pattern(pattern) => Some(selectivity_score(pattern)),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// Which covering index to use for a given pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexHint {
@@ -131,41 +178,60 @@ pub fn plan(
     clauses: Vec<WhereClause>,
     _indexes: &crate::storage::index::Indexes,
 ) -> Vec<(WhereClause, Option<IndexHint>)> {
-    // Separate into patterns (with hints) and exprs.
-    let mut patterns: Vec<(WhereClause, IndexHint)> = Vec::new();
+    // Separate patterns into semantic fact bundles and collect expressions.
+    // A bundle is the smallest unit the selectivity sorter may move.
+    let mut bundles: Vec<FactPatternBundle> = Vec::new();
     let mut exprs: Vec<WhereClause> = Vec::new();
+    let mut open_fact_bundle: Option<usize> = None;
 
     for clause in clauses {
         match &clause {
             WhereClause::Pattern(p) => {
                 let hint = select_index(p);
-                patterns.push((clause, hint));
+                if open_fact_bundle.is_some_and(|bundle_index| {
+                    bundles
+                        .get(bundle_index)
+                        .is_some_and(|bundle| bundle.accepts_per_fact_pseudo(p))
+                }) {
+                    if let Some(bundle) =
+                        open_fact_bundle.and_then(|bundle_index| bundles.get_mut(bundle_index))
+                    {
+                        bundle.entries.push((clause, hint));
+                    }
+                } else {
+                    bundles.push(FactPatternBundle::new(clause, hint));
+                    open_fact_bundle = bundles
+                        .last()
+                        .and_then(|bundle| bundle.fact_entity.as_ref())
+                        .map(|_| bundles.len() - 1);
+                }
             }
-            WhereClause::Expr { .. } => exprs.push(clause),
+            WhereClause::Expr { .. } => {
+                // Expressions do not overwrite the hidden fact metadata. Keep
+                // the bundle open and schedule the expression at its earliest
+                // dependency-safe pattern position below.
+                exprs.push(clause);
+            }
             // Other variants must not be passed to plan(); silently skip.
-            _ => {}
+            _ => open_fact_bundle = None,
         }
     }
 
-    // Stable sort patterns by selectivity descending (non-wasm only).
-    // Preserves original order for ties, ensuring deterministic output.
+    // Stable sort fact bundles by their real pattern's selectivity descending
+    // (non-wasm only). Clauses inside a bundle always retain source order.
+    // Ties retain bundle source order, ensuring deterministic output.
     // WASM omission: see selectivity_score() — small datasets, determinism.
     #[cfg(not(feature = "wasm"))]
-    patterns.sort_by_key(|(clause, _)| {
-        if let WhereClause::Pattern(p) = clause {
-            std::cmp::Reverse(selectivity_score(p))
-        } else {
-            std::cmp::Reverse(0u8)
-        }
-    });
+    bundles.sort_by_key(|bundle| std::cmp::Reverse(bundle.selectivity()));
 
-    // Start with sorted patterns only.
-    let mut result: Vec<(WhereClause, Option<IndexHint>)> = patterns
-        .into_iter()
-        .map(|(clause, hint)| (clause, Some(hint)))
+    // Schedule each Expr after the earliest individual pattern where all its
+    // inputs are bound. Expressions may sit inside a fact bundle: only another
+    // real pattern can overwrite the hidden metadata the bundle protects.
+    let mut exprs_after_entry: Vec<Vec<Vec<WhereClause>>> = bundles
+        .iter()
+        .map(|bundle| (0..bundle.entries.len()).map(|_| Vec::new()).collect())
         .collect();
-
-    // Push each Expr to the earliest position where all its variables are bound.
+    let mut trailing_exprs: Vec<WhereClause> = Vec::new();
     for expr_clause in exprs {
         let vars: std::collections::HashSet<String> =
             if let WhereClause::Expr { expr, .. } = &expr_clause {
@@ -175,23 +241,51 @@ pub fn plan(
             };
 
         let mut bound: std::collections::HashSet<String> = Default::default();
-        // Default: append at end (covers no-var Exprs and vars never bound by any pattern).
-        let mut insert_pos = result.len();
+        // Default: append after the final bundle. This covers no-var expressions
+        // and variables never bound by a pattern.
+        let mut insertion: Option<(usize, usize)> = None;
 
         if !vars.is_empty() {
-            for (pos, (clause, _)) in result.iter().enumerate() {
-                if let WhereClause::Pattern(p) = clause {
-                    bound.extend(pattern_bound_vars(p));
+            for (bundle_index, bundle) in bundles.iter().enumerate() {
+                for (entry_index, (clause, _)) in bundle.entries.iter().enumerate() {
+                    if let WhereClause::Pattern(pattern) = clause {
+                        bound.extend(pattern_bound_vars(pattern));
+                    }
                     if vars.is_subset(&bound) {
-                        insert_pos = pos + 1;
+                        insertion = Some((bundle_index, entry_index));
                         break;
                     }
+                }
+                if insertion.is_some() {
+                    break;
                 }
             }
         }
 
-        result.insert(insert_pos, (expr_clause, None));
+        if let Some((bundle_index, entry_index)) = insertion
+            && let Some(scheduled) = exprs_after_entry
+                .get_mut(bundle_index)
+                .and_then(|entries| entries.get_mut(entry_index))
+        {
+            scheduled.push(expr_clause);
+        } else {
+            trailing_exprs.push(expr_clause);
+        }
     }
+
+    let mut result = Vec::new();
+    for (bundle_index, bundle) in bundles.into_iter().enumerate() {
+        for (entry_index, (clause, hint)) in bundle.entries.into_iter().enumerate() {
+            result.push((clause, Some(hint)));
+            if let Some(scheduled) = exprs_after_entry
+                .get_mut(bundle_index)
+                .and_then(|entries| entries.get_mut(entry_index))
+            {
+                result.extend(scheduled.drain(..).map(|clause| (clause, None)));
+            }
+        }
+    }
+    result.extend(trailing_exprs.into_iter().map(|clause| (clause, None)));
 
     result
 }
@@ -269,6 +363,8 @@ pub fn clause_cost(clause: &WhereClause) -> u64 {
 mod tests {
     use super::*;
     use crate::graph::types::Value;
+    #[cfg(not(feature = "wasm"))]
+    use crate::query::datalog::types::PseudoAttr;
     use crate::query::datalog::types::{BinOp, EdnValue, Expr, Pattern, WhereClause};
     use uuid::Uuid;
 
@@ -365,6 +461,127 @@ mod tests {
             second_attr, p1_attr,
             "Lower-selectivity pattern must be second"
         );
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_join_ordering_keeps_per_fact_metadata_with_real_pattern() {
+        use crate::storage::index::Indexes;
+
+        let entity = var("e");
+        let low_selectivity_real = WhereClause::Pattern(make_pattern(
+            entity.clone(),
+            kw(":event/first"),
+            var("first"),
+        ));
+        let first_tx = WhereClause::Pattern(Pattern::pseudo(
+            entity.clone(),
+            PseudoAttr::TxCount,
+            var("first_tx"),
+        ));
+        let high_selectivity_real = WhereClause::Pattern(make_pattern(
+            entity.clone(),
+            kw(":event/second"),
+            str_val("two"),
+        ));
+        let second_tx = WhereClause::Pattern(Pattern::pseudo(
+            entity,
+            PseudoAttr::TxCount,
+            var("second_tx"),
+        ));
+
+        let planned = plan(
+            vec![
+                low_selectivity_real,
+                first_tx,
+                high_selectivity_real,
+                second_tx,
+            ],
+            &Indexes::new(),
+        );
+
+        let attributes: Vec<AttributeSpec> = planned
+            .into_iter()
+            .filter_map(|(clause, _)| match clause {
+                WhereClause::Pattern(pattern) => Some(pattern.attribute),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            attributes,
+            vec![
+                AttributeSpec::Real(kw(":event/second")),
+                AttributeSpec::Pseudo(PseudoAttr::TxCount),
+                AttributeSpec::Real(kw(":event/first")),
+                AttributeSpec::Pseudo(PseudoAttr::TxCount),
+            ],
+            "selectivity sorting must move complete fact-metadata bundles"
+        );
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_expr_pushdown_inside_bundle_preserves_real_pseudo_order() {
+        use crate::storage::index::Indexes;
+
+        let entity = var("e");
+        let real = WhereClause::Pattern(make_pattern(entity.clone(), kw(":event/id"), var("id")));
+        let tx_count = WhereClause::Pattern(Pattern::pseudo(
+            entity.clone(),
+            PseudoAttr::TxCount,
+            var("tx_count"),
+        ));
+        let tx_id = WhereClause::Pattern(Pattern::pseudo(entity, PseudoAttr::TxId, var("tx_id")));
+        let expr = WhereClause::Expr {
+            expr: Expr::UnaryOp(
+                crate::query::datalog::types::UnaryOp::StringQ,
+                Box::new(Expr::Var("?id".to_string())),
+            ),
+            binding: None,
+        };
+
+        let planned = plan(vec![real, tx_count, tx_id, expr], &Indexes::new());
+        assert!(matches!(
+            planned.as_slice(),
+            [
+                (WhereClause::Pattern(_), Some(_)),
+                (WhereClause::Expr { .. }, None),
+                (WhereClause::Pattern(_), Some(_)),
+                (WhereClause::Pattern(_), Some(_))
+            ]
+        ));
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_expr_between_real_and_pseudo_remains_a_bundle_boundary() {
+        use crate::storage::index::Indexes;
+
+        let entity = kw(":expr-meta");
+        let real = WhereClause::Pattern(make_pattern(entity.clone(), kw(":value/n"), var("n")));
+        let expr = WhereClause::Expr {
+            expr: Expr::BinOp(
+                BinOp::Add,
+                Box::new(Expr::Var("?n".to_string())),
+                Box::new(Expr::Lit(Value::Integer(1))),
+            ),
+            binding: Some("?expected".to_string()),
+        };
+        let tx_count = WhereClause::Pattern(Pattern::pseudo(
+            entity,
+            PseudoAttr::TxCount,
+            var("expected"),
+        ));
+
+        let planned = plan(vec![real, expr, tx_count], &Indexes::new());
+        assert!(matches!(
+            planned.as_slice(),
+            [
+                (WhereClause::Pattern(_), Some(_)),
+                (WhereClause::Expr { .. }, None),
+                (WhereClause::Pattern(_), Some(_))
+            ]
+        ));
     }
 
     // ── expr_vars() ──────────────────────────────────────────────────────────
