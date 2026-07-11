@@ -17,6 +17,27 @@ use crate::graph::types::{Fact, FactRecord, TxId, VALID_TIME_FOREVER};
 /// in any practical context, avoiding the collision that `0` would have with the Unix
 /// epoch (1970-01-01T00:00:00Z), which is a legitimate `valid_from` value.
 pub(crate) const VALID_FROM_USE_TX_TIME: i64 = i64::MIN;
+
+/// Maximum command strings in one browser atomic write request.
+///
+/// This prevents an unbounded JavaScript array from becoming one WebAssembly
+/// allocation and one IndexedDB publication.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+pub(crate) const BROWSER_ATOMIC_MAX_COMMANDS: usize = 256;
+/// Maximum materialized facts in one browser atomic write request.
+///
+/// Vetch permits 32,768 payload chunks with four ledger facts per chunk
+/// (131,072 facts) before operation metadata; this ceiling retains bounded
+/// headroom for that complete operation envelope while still rejecting
+/// unreasonable materialized batches.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+pub(crate) const BROWSER_ATOMIC_MAX_FACTS: usize = 262_144;
+/// Maximum aggregate UTF-8 Datalog source bytes in one browser atomic write.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+pub(crate) const BROWSER_ATOMIC_MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum lexical tokens accepted before the normal parser allocates its AST.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+const BROWSER_ATOMIC_MAX_TOKENS: usize = BROWSER_ATOMIC_MAX_FACTS * 8;
 use crate::graph::FactStorage;
 use crate::graph::types::Value;
 use crate::query::datalog::evaluator::DEFAULT_MAX_DERIVED_FACTS;
@@ -83,6 +104,88 @@ fn set_write_tx_active(val: bool) {
 
 fn is_write_tx_active() -> bool {
     WRITE_TX_ACTIVE.with(|f| f.get())
+}
+
+/// A fully parsed and materialized transact/retract command batch.
+///
+/// No database state has changed while this value is being built. BrowserDb
+/// uses this as the prepare boundary before claiming its mutation guard.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[derive(Debug)]
+pub(crate) struct MaterializedAtomicWrite {
+    /// Facts in caller command order, with transaction metadata unstamped.
+    pub(crate) facts: Vec<Fact>,
+    /// Number of submitted command strings.
+    pub(crate) command_count: usize,
+    /// Number of materialized asserted facts.
+    pub(crate) transacted_fact_count: usize,
+    /// Number of materialized retraction facts.
+    pub(crate) retracted_fact_count: usize,
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+fn atomic_write_preflight(source: &str) -> Result<(usize, usize)> {
+    let mut chars = source.chars().peekable();
+    let mut bracket_depth = 0usize;
+    let mut fact_vectors = 0usize;
+    let mut tokens = 0usize;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' | '\n' | '\r' | ',' => {}
+            '"' => {
+                tokens = tokens.saturating_add(1);
+                let mut escaped = false;
+                for string_ch in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if string_ch == '\\' {
+                        escaped = true;
+                    } else if string_ch == '"' {
+                        break;
+                    }
+                }
+            }
+            '[' => {
+                tokens = tokens.saturating_add(1);
+                if bracket_depth == 1 {
+                    fact_vectors = fact_vectors.saturating_add(1);
+                }
+                bracket_depth = bracket_depth.saturating_add(1);
+            }
+            ']' => {
+                tokens = tokens.saturating_add(1);
+                bracket_depth = bracket_depth.saturating_sub(1);
+            }
+            '(' | ')' | '{' | '}' => {
+                tokens = tokens.saturating_add(1);
+            }
+            _ => {
+                tokens = tokens.saturating_add(1);
+                while let Some(next) = chars.peek() {
+                    if next.is_whitespace()
+                        || matches!(*next, ',' | '(' | ')' | '[' | ']' | '{' | '}' | '"')
+                    {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+        }
+        if tokens > BROWSER_ATOMIC_MAX_TOKENS {
+            bail!(
+                "executeAtomic accepts at most {} lexical tokens",
+                BROWSER_ATOMIC_MAX_TOKENS
+            );
+        }
+        if fact_vectors > BROWSER_ATOMIC_MAX_FACTS {
+            bail!(
+                "executeAtomic accepts at most {} facts",
+                BROWSER_ATOMIC_MAX_FACTS
+            );
+        }
+    }
+    Ok((fact_vectors, tokens))
 }
 
 // ─── Maintenance Outcome ─────────────────────────────────────────────────────
@@ -1390,6 +1493,164 @@ impl Minigraf {
 
     // ── Materialize helpers ───────────────────────────────────────────────────
 
+    /// Parse and materialize a bounded list of transact/retract commands
+    /// without mutating database state.
+    ///
+    /// This is the shared preparation half of BrowserDb's atomic write API.
+    /// Query, rule, and forget commands are intentionally excluded: their
+    /// evaluation or registry semantics do not belong in a write-only batch.
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn materialize_atomic_write_commands(
+        commands: &[String],
+    ) -> Result<MaterializedAtomicWrite> {
+        if commands.is_empty() {
+            bail!("executeAtomic requires at least one transact or retract command");
+        }
+        if commands.len() > BROWSER_ATOMIC_MAX_COMMANDS {
+            bail!(
+                "executeAtomic accepts at most {} commands (received {})",
+                BROWSER_ATOMIC_MAX_COMMANDS,
+                commands.len()
+            );
+        }
+
+        let source_bytes = commands.iter().try_fold(0usize, |total, command| {
+            total
+                .checked_add(command.len())
+                .ok_or_else(|| anyhow::anyhow!("executeAtomic input byte count overflow"))
+        })?;
+        if source_bytes > BROWSER_ATOMIC_MAX_SOURCE_BYTES {
+            bail!(
+                "executeAtomic accepts at most {} source bytes (received {})",
+                BROWSER_ATOMIC_MAX_SOURCE_BYTES,
+                source_bytes
+            );
+        }
+
+        let mut facts = Vec::new();
+        let mut transacted_fact_count = 0usize;
+        let mut retracted_fact_count = 0usize;
+        let mut preflight_fact_count = 0usize;
+        let mut preflight_token_count = 0usize;
+        let mut seen_fact_keys = std::collections::HashSet::new();
+
+        for (index, source) in commands.iter().enumerate() {
+            let (command_fact_count, command_token_count) = atomic_write_preflight(source)?;
+            preflight_fact_count = preflight_fact_count
+                .checked_add(command_fact_count)
+                .ok_or_else(|| anyhow::anyhow!("executeAtomic fact count overflow"))?;
+            if preflight_fact_count > BROWSER_ATOMIC_MAX_FACTS {
+                bail!(
+                    "executeAtomic accepts at most {} facts (command {} would raise the preflight count to {})",
+                    BROWSER_ATOMIC_MAX_FACTS,
+                    index,
+                    preflight_fact_count
+                );
+            }
+            preflight_token_count = preflight_token_count
+                .checked_add(command_token_count)
+                .ok_or_else(|| anyhow::anyhow!("executeAtomic token count overflow"))?;
+            if preflight_token_count > BROWSER_ATOMIC_MAX_TOKENS {
+                bail!(
+                    "executeAtomic accepts at most {} lexical tokens",
+                    BROWSER_ATOMIC_MAX_TOKENS
+                );
+            }
+            let command = parse_datalog_command(source).map_err(|error| {
+                anyhow::anyhow!("executeAtomic command {} failed to parse: {}", index, error)
+            })?;
+            let (materialized, is_retract) = match command {
+                DatalogCommand::Transact(tx) => (
+                    Self::materialize_transaction(&tx).map_err(|error| {
+                        anyhow::anyhow!(
+                            "executeAtomic command {} could not materialize: {}",
+                            index,
+                            error
+                        )
+                    })?,
+                    false,
+                ),
+                DatalogCommand::Retract(tx) => (
+                    Self::materialize_retraction(&tx).map_err(|error| {
+                        anyhow::anyhow!(
+                            "executeAtomic command {} could not materialize: {}",
+                            index,
+                            error
+                        )
+                    })?,
+                    true,
+                ),
+                DatalogCommand::Query(_) => {
+                    bail!(
+                        "executeAtomic command {} is a query; only transact and retract are allowed",
+                        index
+                    )
+                }
+                DatalogCommand::Rule(_) => {
+                    bail!(
+                        "executeAtomic command {} is a rule; only transact and retract are allowed",
+                        index
+                    )
+                }
+                DatalogCommand::Forget(_) => {
+                    bail!(
+                        "executeAtomic command {} is a forget; only transact and retract are allowed",
+                        index
+                    )
+                }
+            };
+
+            let next_fact_count = facts
+                .len()
+                .checked_add(materialized.len())
+                .ok_or_else(|| anyhow::anyhow!("executeAtomic fact count overflow"))?;
+            if next_fact_count > BROWSER_ATOMIC_MAX_FACTS {
+                bail!(
+                    "executeAtomic accepts at most {} facts (command {} would raise the batch to {})",
+                    BROWSER_ATOMIC_MAX_FACTS,
+                    index,
+                    next_fact_count
+                );
+            }
+
+            for fact in &materialized {
+                let key = (fact.entity, fact.attribute.clone(), fact.value.clone());
+                if !seen_fact_keys.insert(key) {
+                    bail!(
+                        "executeAtomic command {} repeats one entity/attribute/value fact; atomic fact order is intentionally undefined",
+                        index
+                    );
+                }
+            }
+
+            if is_retract {
+                retracted_fact_count = retracted_fact_count
+                    .checked_add(materialized.len())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("executeAtomic retracted fact count overflow")
+                    })?;
+            } else {
+                transacted_fact_count = transacted_fact_count
+                    .checked_add(materialized.len())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("executeAtomic transacted fact count overflow")
+                    })?;
+            }
+            facts.extend(materialized);
+        }
+
+        if facts.is_empty() {
+            bail!("executeAtomic requires at least one fact");
+        }
+
+        Ok(MaterializedAtomicWrite {
+            facts,
+            command_count: commands.len(),
+            transacted_fact_count,
+            retracted_fact_count,
+        })
+    }
+
     /// Convert a `Transaction` into a list of assertion `Fact`s (tx_id and tx_count
     /// are set to 0 as placeholders; they are assigned at commit time).
     pub(crate) fn materialize_transaction(tx: &Transaction) -> Result<Vec<Fact>> {
@@ -2029,6 +2290,118 @@ mod tests {
 
     // ── begin_write / rollback ────────────────────────────────────────────────
 
+    // Atomic write preparation and shared core transaction identity.
+    #[test]
+    fn test_write_transaction_mixed_commit_uses_one_transaction_identity() {
+        let db = Minigraf::in_memory().unwrap();
+        db.execute("(transact [[:head :value :old]])").unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        tx.execute("(retract [[:head :value :old]])").unwrap();
+        tx.execute("(transact [[:head :value :new] [:event :kind :replace]])")
+            .unwrap();
+        tx.commit().unwrap();
+
+        let committed = db.inner.fact_storage.get_all_facts().unwrap();
+        let batch: Vec<_> = committed.iter().filter(|fact| fact.tx_count == 2).collect();
+        assert_eq!(batch.len(), 3, "mixed commit must retain all three facts");
+        assert!(
+            batch.iter().all(|fact| fact.tx_id == batch[0].tx_id),
+            "mixed commit must stamp one tx_id"
+        );
+        assert!(
+            batch.iter().all(|fact| fact.tx_count == 2),
+            "mixed commit must stamp one tx_count"
+        );
+    }
+
+    #[test]
+    fn test_materialize_atomic_write_commands_is_write_only_and_bounded() {
+        assert!(
+            BROWSER_ATOMIC_MAX_FACTS >= 32_768usize.saturating_mul(4),
+            "browser atomic fact budget must contain Vetch's maximum chunk envelope"
+        );
+        let commands = vec![
+            "(retract [[:head :value :old]])".to_string(),
+            "(transact [[:head :value :new] [:event :kind :replace]])".to_string(),
+        ];
+        let prepared = Minigraf::materialize_atomic_write_commands(&commands).unwrap();
+        assert_eq!(prepared.command_count, 2);
+        assert_eq!(prepared.transacted_fact_count, 2);
+        assert_eq!(prepared.retracted_fact_count, 1);
+        assert_eq!(prepared.facts.len(), 3);
+
+        let empty = Minigraf::materialize_atomic_write_commands(&[]).unwrap_err();
+        assert!(empty.to_string().contains("at least one"));
+
+        let too_many = vec![
+            "(transact [[:bounded :value true]])".to_string();
+            BROWSER_ATOMIC_MAX_COMMANDS.saturating_add(1)
+        ];
+        let too_many = Minigraf::materialize_atomic_write_commands(&too_many).unwrap_err();
+        assert!(too_many.to_string().contains("at most 256 commands"));
+
+        for (kind, command) in [
+            ("query", "(query [:find ?v :where [:head :value ?v]])"),
+            ("rule", "(rule [(head ?v) [:head :value ?v]])"),
+            ("forget", "(forget [[:head :value :old]])"),
+        ] {
+            let batch = vec![commands[1].clone(), command.to_string()];
+            let error = Minigraf::materialize_atomic_write_commands(&batch).unwrap_err();
+            assert!(error.to_string().contains(kind));
+        }
+    }
+
+    #[test]
+    fn test_materialize_atomic_write_commands_rejects_fact_overflow() {
+        let tuples = (0..BROWSER_ATOMIC_MAX_FACTS.saturating_add(1))
+            .map(|index| format!("[:batch/e{index} :value {index}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command = vec![format!("(transact [{tuples}])")];
+        let error = Minigraf::materialize_atomic_write_commands(&command).unwrap_err();
+        assert!(error.to_string().contains("at most 262144 facts"));
+    }
+
+    #[test]
+    fn test_materialize_atomic_write_commands_rejects_same_fact_ordering() {
+        for commands in [
+            vec![
+                "(retract [[:head :value :same]])".to_string(),
+                "(transact [[:head :value :same]])".to_string(),
+            ],
+            vec![
+                "(transact [[:head :value :same]])".to_string(),
+                "(retract [[:head :value :same]])".to_string(),
+            ],
+            vec![
+                "(transact [[:head :value :same]])".to_string(),
+                "(transact [[:head :value :same]])".to_string(),
+            ],
+        ] {
+            let error = Minigraf::materialize_atomic_write_commands(&commands).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("repeats one entity/attribute/value fact")
+            );
+        }
+
+        let replacement = vec![
+            "(retract [[:head :value :old]])".to_string(),
+            "(transact [[:head :value :new]])".to_string(),
+        ];
+        assert!(Minigraf::materialize_atomic_write_commands(&replacement).is_ok());
+    }
+
+    #[test]
+    fn test_atomic_write_preflight_rejects_token_bomb_before_parse() {
+        let source = "x ".repeat(BROWSER_ATOMIC_MAX_TOKENS.saturating_add(1));
+        let error = atomic_write_preflight(&source).unwrap_err();
+        assert!(error.to_string().contains("lexical tokens"));
+    }
+
+    // begin_write / rollback
     #[test]
     fn test_begin_write_rollback_no_facts_visible() {
         let db = Minigraf::in_memory().unwrap();

@@ -260,6 +260,30 @@ impl BrowserDb {
         }
     }
 
+    /// Execute a bounded transact/retract command list as one atomic write.
+    ///
+    /// Every command is parsed and materialized before database state changes.
+    /// All resulting facts then receive one shared `tx_id` and `tx_count`, and
+    /// persistent handles publish one IndexedDB dirty-page set in one readwrite
+    /// transaction. Query, rule, and forget commands are rejected.
+    ///
+    /// The batch must contain 1..=256 commands, at most 262,144 facts, and at
+    /// most 64 MiB of Datalog source. An allocation-free fact/token preflight
+    /// rejects syntactic bombs before the normal parser builds its AST. The
+    /// JSON result reports command/fact counts plus the same durability,
+    /// maintenance, and advice fields as [`BrowserDb::execute`].
+    #[wasm_bindgen(js_name = executeAtomic)]
+    pub async fn execute_atomic(&self, commands: Vec<String>) -> Result<String, JsValue> {
+        self.ensure_usable()?;
+        let prepared = crate::db::Minigraf::materialize_atomic_write_commands(&commands)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+        self.begin_mutation()?;
+        let result = self.apply_atomic_write(prepared).await;
+        self.finish_mutation(result.is_err());
+        result
+    }
+
     /// Resolve every page needed by a forget before the mutation boundary.
     /// Retrying after `tx_count` allocation could apply one semantic command
     /// twice, so paged I/O is complete before `begin_mutation()` returns.
@@ -1066,6 +1090,112 @@ impl BrowserDb {
 
         self.evict_sparse_staging();
 
+        Ok(result_json)
+    }
+
+    /// Stamp and publish one fully prepared mixed write batch.
+    async fn apply_atomic_write(
+        &self,
+        prepared: crate::db::MaterializedAtomicWrite,
+    ) -> Result<String, JsValue> {
+        use crate::db::VALID_FROM_USE_TX_TIME;
+        use crate::graph::types::tx_id_now;
+        use crate::storage::packed_pages::MAX_FACT_BYTES;
+
+        let (dirty_pages, result_json) = {
+            let mut inner = self.inner.borrow_mut();
+            let tx_id = tx_id_now();
+            let tx_count = inner.fact_storage.current_tx_count().saturating_add(1);
+            let mut stamped = prepared.facts;
+
+            for (index, fact) in stamped.iter_mut().enumerate() {
+                fact.tx_id = tx_id;
+                fact.tx_count = tx_count;
+                if fact.valid_from == VALID_FROM_USE_TX_TIME {
+                    fact.valid_from = tx_id.cast_signed();
+                }
+                let encoded = postcard::to_allocvec(fact)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                if encoded.len() > MAX_FACT_BYTES {
+                    return Err(JsValue::from_str(&format!(
+                        "executeAtomic fact {} serialised size {} bytes exceeds maximum slot size {} bytes",
+                        index,
+                        encoded.len(),
+                        MAX_FACT_BYTES
+                    )));
+                }
+            }
+
+            // No semantic failure remains after this boundary. Claim one
+            // transaction counter and publish every materialized fact together.
+            inner.mutation_advanced = true;
+            let allocated_tx_count = inner.fact_storage.allocate_tx_count();
+            if allocated_tx_count != tx_count {
+                return Err(JsValue::from_str(
+                    "executeAtomic transaction counter changed while the mutation guard was held",
+                ));
+            }
+
+            for fact in stamped {
+                inner
+                    .fact_storage
+                    .load_fact(fact)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            }
+
+            inner.pfs.mark_dirty();
+            inner
+                .pfs
+                .save()
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            let dirty_pages = take_dirty_pages(&mut inner.pfs)?;
+            if inner.paged {
+                configure_sparse_authority(&mut inner.pfs)?;
+            }
+
+            let decision = inner.pfs.delta_maintenance_decision();
+            let durability = if inner.idb.is_some() {
+                "published"
+            } else {
+                "memory"
+            };
+            let fact_count = prepared
+                .transacted_fact_count
+                .saturating_add(prepared.retracted_fact_count);
+            let json = serde_json::json!({
+                "atomic": true,
+                "command_count": prepared.command_count,
+                "fact_count": fact_count,
+                "transacted_fact_count": prepared.transacted_fact_count,
+                "retracted_fact_count": prepared.retracted_fact_count,
+                "tx_id": tx_id,
+                "tx_count": tx_count,
+                "transacted": tx_id,
+                "durability": durability,
+                "maintenance_pending": !matches!(
+                    decision,
+                    DeltaMaintenanceDecision::ContinueDeltaAppend
+                ),
+                "advice": browser_write_advice(decision),
+            })
+            .to_string();
+
+            (dirty_pages, json)
+        };
+
+        if !dirty_pages.is_empty() {
+            let idb = self
+                .inner
+                .borrow()
+                .idb
+                .as_ref()
+                .map(IndexedDbBackend::clone_handle);
+            if let Some(idb) = idb {
+                self.flush_dirty_pages_or_restore(idb, dirty_pages).await?;
+            }
+        }
+
+        self.evict_sparse_staging();
         Ok(result_json)
     }
 }
@@ -2527,6 +2657,153 @@ mod tests {
         let results = v["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], serde_json::Value::String("Alice".into()));
+    }
+
+    #[wasm_bindgen_test]
+    async fn atomic_mixed_write_replaces_head_and_shares_transaction_metadata() {
+        let db = BrowserDb::open_in_memory().expect("open atomic in-memory database");
+        db.execute(r#"(transact [[:head :value "old"]])"#.to_string())
+            .await
+            .expect("seed old head");
+
+        let receipt = db
+            .execute_atomic(vec![
+                r#"(retract [[:head :value "old"]])"#.to_string(),
+                r#"(transact [[:head :value "new"] [:event :kind "replace"]])"#.to_string(),
+            ])
+            .await
+            .expect("commit mixed atomic write");
+        let receipt: serde_json::Value =
+            serde_json::from_str(&receipt).expect("atomic receipt JSON");
+        assert_eq!(receipt["atomic"], true);
+        assert_eq!(receipt["command_count"], 2);
+        assert_eq!(receipt["fact_count"], 3);
+        assert_eq!(receipt["transacted_fact_count"], 2);
+        assert_eq!(receipt["retracted_fact_count"], 1);
+        assert_eq!(receipt["transacted"], receipt["tx_id"]);
+        assert_eq!(receipt["durability"], "memory");
+
+        let head = db
+            .execute("(query [:find ?value :where [:head :value ?value]])".to_string())
+            .await
+            .expect("query replaced head");
+        let head: serde_json::Value = serde_json::from_str(&head).expect("head query JSON");
+        assert_eq!(head["results"], serde_json::json!([["new"]]));
+
+        let metadata = db
+            .execute(
+                r#"(query [:find ?tx ?tc :any-valid-time :where [:head :value "new"] [:head :db/tx-id ?tx] [:head :db/tx-count ?tc] [:event :kind "replace"] [:event :db/tx-id ?tx] [:event :db/tx-count ?tc]])"#
+                    .to_string(),
+            )
+            .await
+            .expect("query shared atomic metadata");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata).expect("metadata query JSON");
+        assert_eq!(metadata["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(metadata["results"][0][0], receipt["tx_id"]);
+        assert_eq!(metadata["results"][0][1], receipt["tx_count"]);
+    }
+
+    #[wasm_bindgen_test]
+    async fn atomic_write_rejects_invalid_commands_without_mutation() {
+        let db = BrowserDb::open_in_memory().expect("open atomic rejection database");
+        db.execute("(transact [[:stable :value :old]])".to_string())
+            .await
+            .expect("seed stable fact");
+        let before_tx_count = db.inner.borrow().fact_storage.current_tx_count();
+
+        let error = db
+            .execute_atomic(vec![
+                "(transact [[:partial :value :must-not-appear]])".to_string(),
+                "(query [:find ?value :where [:stable :value ?value]])".to_string(),
+            ])
+            .await
+            .expect_err("query in atomic write must be rejected");
+        assert!(js_value_message(&error).contains("only transact and retract"));
+        assert_eq!(
+            db.inner.borrow().fact_storage.current_tx_count(),
+            before_tx_count,
+            "preparation failure must not consume a transaction counter"
+        );
+
+        let partial = db
+            .execute("(query [:find ?value :where [:partial :value ?value]])".to_string())
+            .await
+            .expect("query rejected partial fact");
+        let partial: serde_json::Value =
+            serde_json::from_str(&partial).expect("partial query JSON");
+        assert_eq!(partial["results"], serde_json::json!([]));
+        let ordering_error = db
+            .execute_atomic(vec![
+                "(retract [[:stable :value :old]])".to_string(),
+                "(transact [[:stable :value :old]])".to_string(),
+            ])
+            .await
+            .expect_err("same-fact ordering must be rejected before mutation");
+        assert!(
+            js_value_message(&ordering_error).contains("fact order is intentionally undefined")
+        );
+        assert_eq!(
+            db.inner.borrow().fact_storage.current_tx_count(),
+            before_tx_count,
+            "same-fact rejection must not consume a transaction counter"
+        );
+        assert!(db.execute_atomic(Vec::new()).await.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn atomic_indexeddb_failure_restores_previous_live_and_durable_head() {
+        let db_name = format!("vicia-atomic-write-abort-{}", js_sys::Date::now());
+        let db = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("open atomic persistent database");
+        db.execute(r#"(transact [[:head :value "old"]])"#.to_string())
+            .await
+            .expect("publish old head");
+        let before_tx_count = db.inner.borrow().fact_storage.current_tx_count();
+        db.inner
+            .borrow()
+            .idb
+            .as_ref()
+            .expect("persistent handle")
+            .fail_next_write_for_test();
+
+        let error = db
+            .execute_atomic(vec![
+                r#"(retract [[:head :value "old"]])"#.to_string(),
+                r#"(transact [[:head :value "new"]])"#.to_string(),
+            ])
+            .await
+            .expect_err("injected IndexedDB failure must reject atomic write");
+        assert!(js_value_message(&error).contains("injected IndexedDB"));
+        assert!(!db.inner.borrow().durability_poisoned);
+        assert_eq!(
+            db.inner.borrow().fact_storage.current_tx_count(),
+            before_tx_count,
+            "failed atomic publication must restore the transaction counter"
+        );
+
+        let live = db
+            .execute("(query [:find ?value :where [:head :value ?value]])".to_string())
+            .await
+            .expect("query restored live head");
+        let live: serde_json::Value = serde_json::from_str(&live).expect("live head JSON");
+        assert_eq!(live["results"], serde_json::json!([["old"]]));
+        drop(db);
+
+        let reopened = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("reopen atomic persistent database");
+        assert_eq!(
+            reopened.inner.borrow().fact_storage.current_tx_count(),
+            before_tx_count
+        );
+        let durable = reopened
+            .execute("(query [:find ?value :where [:head :value ?value]])".to_string())
+            .await
+            .expect("query durable old head");
+        let durable: serde_json::Value = serde_json::from_str(&durable).expect("durable head JSON");
+        assert_eq!(durable["results"], serde_json::json!([["old"]]));
     }
 
     #[wasm_bindgen_test]
