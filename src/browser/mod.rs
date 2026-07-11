@@ -2530,6 +2530,89 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn per_fact_transaction_metadata_survives_browser_query_planning() {
+        let db = BrowserDb::open_in_memory().expect("open in-memory metadata database");
+        db.execute(r#"(transact [[:timeline :event/first "one"]])"#.to_string())
+            .await
+            .expect("write first event fact");
+        db.execute(r#"(transact [[:timeline :event/second "two"]])"#.to_string())
+            .await
+            .expect("write second event fact");
+
+        let query = db
+            .execute(
+                r#"(query [:find ?first-tx ?second-tx
+                            :any-valid-time
+                            :where [:timeline :event/first "one"]
+                                   [:timeline :db/tx-count ?first-tx]
+                                   [:timeline :event/second "two"]
+                                   [:timeline :db/tx-count ?second-tx]])"#
+                    .to_string(),
+            )
+            .await
+            .expect("query exact fact transaction metadata");
+        let query: serde_json::Value = serde_json::from_str(&query).expect("query JSON");
+        assert_eq!(query["results"], serde_json::json!([[1, 2]]));
+
+        db.execute(r#"(transact [[:expr-meta :value/n 99]])"#.to_string())
+            .await
+            .expect("write expression input");
+        for query in [
+            r#"(query [:find ?expected :any-valid-time
+                       :where [:expr-meta :value/n ?n]
+                              [(+ ?n 1) ?expected]
+                              [:expr-meta :db/tx-count ?expected]])"#,
+            r#"(query [:find ?expected :any-valid-time
+                       :where [:expr-meta :value/n ?n]
+                              [:expr-meta :db/tx-count ?expected]
+                              [(+ ?n 1) ?expected]])"#,
+        ] {
+            let result = db
+                .execute(query.to_string())
+                .await
+                .expect("query expression binding conflict");
+            let result: serde_json::Value =
+                serde_json::from_str(&result).expect("expression query JSON");
+            assert_eq!(result["results"], serde_json::json!([]));
+        }
+
+        db.execute(r#"(rule [(derived ?e ?v) [?e :event/first ?v]])"#.to_string())
+            .await
+            .expect("register derived event rule");
+        let derived_only = db
+            .execute(
+                r#"(query [:find ?tx :any-valid-time
+                           :where (derived :timeline "one")
+                                  [:timeline :db/tx-count ?tx]])"#
+                    .to_string(),
+            )
+            .await
+            .expect("query derived metadata");
+        let mixed = db
+            .execute(
+                r#"(query [:find ?tx :any-valid-time
+                           :where [:timeline :event/first "one"]
+                                  (derived :timeline "one")
+                                  [:timeline :db/tx-count ?tx]])"#
+                    .to_string(),
+            )
+            .await
+            .expect("query mixed base and derived metadata");
+        let derived_only: serde_json::Value =
+            serde_json::from_str(&derived_only).expect("derived query JSON");
+        let mixed: serde_json::Value = serde_json::from_str(&mixed).expect("mixed query JSON");
+        assert_eq!(
+            derived_only["results"]
+                .as_array()
+                .expect("derived result rows")
+                .len(),
+            1
+        );
+        assert_eq!(mixed["results"], derived_only["results"]);
+        assert_ne!(derived_only["results"], serde_json::json!([[1]]));
+    }
+
+    #[wasm_bindgen_test]
     async fn empty_database_exports_a_canonical_round_trippable_graph() {
         let memory = BrowserDb::open_in_memory().expect("open empty memory database");
         let memory_blob = memory

@@ -1,5 +1,5 @@
 use super::access_plan::QueryAccessPlan;
-use super::evaluator::{StratifiedEvaluator, evaluate_not_join};
+use super::evaluator::{StratifiedEvaluator, evaluate_not_join, rule_invocation_to_pattern};
 use super::functions::{AggImpl, FunctionRegistry, apply_builtin_aggregate, value_cmp};
 use super::matcher::{PatternMatcher, edn_to_entity_id, edn_to_value};
 use super::optimizer;
@@ -902,42 +902,26 @@ impl DatalogExecutor {
             }
         }
 
-        // Collect Pattern and Expr top-level clauses for the planner.
-        // Rule invocations are converted to WhereClause::Pattern against derived_storage.
-        let mut plan_clauses: Vec<WhereClause> = query
-            .where_clauses
-            .iter()
-            .filter(|c| matches!(c, WhereClause::Pattern(_) | WhereClause::Expr { .. }))
-            .cloned()
-            .collect();
-
-        for (predicate, args) in query.get_top_level_rule_invocations() {
-            let pattern = match args.len() {
-                1 => {
-                    #[allow(clippy::indexing_slicing)]
-                    let entity = args[0].clone();
-                    Pattern::new(
-                        entity,
-                        EdnValue::Keyword(format!(":{}", predicate)),
-                        EdnValue::Symbol("?_rule_value".to_string()),
-                    )
+        // Preserve source position while converting top-level rule invocations
+        // into patterns over derived_storage. Per-fact pseudo metadata belongs to
+        // the immediately preceding real/derived pattern, so appending converted
+        // rules after collection would change that authority relationship.
+        let mut plan_clauses: Vec<WhereClause> = Vec::new();
+        for clause in &query.where_clauses {
+            match clause {
+                WhereClause::Pattern(_) | WhereClause::Expr { .. } => {
+                    plan_clauses.push(clause.clone());
                 }
-                2 => {
-                    #[allow(clippy::indexing_slicing)]
-                    let entity = args[0].clone();
-                    #[allow(clippy::indexing_slicing)]
-                    let value = args[1].clone();
-                    Pattern::new(entity, EdnValue::Keyword(format!(":{}", predicate)), value)
+                WhereClause::RuleInvocation { predicate, args } => {
+                    plan_clauses.push(WhereClause::Pattern(rule_invocation_to_pattern(
+                        predicate, args,
+                    )?));
                 }
-                n => {
-                    return Err(anyhow!(
-                        "Rule invocation '{}' must have 1 or 2 arguments, got {}",
-                        predicate,
-                        n
-                    ));
-                }
-            };
-            plan_clauses.push(WhereClause::Pattern(pattern));
+                WhereClause::Not(_)
+                | WhereClause::NotJoin { .. }
+                | WhereClause::Or(_)
+                | WhereClause::OrJoin { .. } => {}
+            }
         }
 
         let planned = optimizer::plan(plan_clauses, &self.indexes);
