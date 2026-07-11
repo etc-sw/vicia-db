@@ -440,15 +440,6 @@ impl FactStorage {
         Ok(())
     }
 
-    /// Return all facts visible as of the given transaction point.
-    ///
-    /// * `AsOf::Counter(n)` — include facts whose `tx_count <= n`
-    /// * `AsOf::Timestamp(t)` — include facts whose `tx_id <= t as u64`
-    pub(crate) fn get_facts_as_of(&self, as_of: &AsOf) -> Result<Vec<Fact>> {
-        let all = self.get_all_facts()?;
-        Ok(filter_facts_as_of(all, as_of))
-    }
-
     /// Get all asserted facts (filters out retractions)
     ///
     /// Returns only facts where asserted=true. This gives you the currently
@@ -568,7 +559,7 @@ impl FactStorage {
 
 /// Apply transaction-time snapshot semantics to a batch of facts.
 ///
-/// Shared by `FactStorage::get_facts_as_of()` and transactional overlay reads.
+/// Shared by planned Datalog reads and transactional overlay reads.
 pub(crate) fn filter_facts_as_of(facts: Vec<Fact>, as_of: &AsOf) -> Vec<Fact> {
     facts
         .into_iter()
@@ -1435,7 +1426,7 @@ mod tests {
             .unwrap();
 
         // as-of tx 1: only name fact visible
-        let snapshot = storage.get_facts_as_of(&AsOf::Counter(1)).unwrap();
+        let snapshot = filter_facts_as_of(storage.get_all_facts().unwrap(), &AsOf::Counter(1));
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].attribute, ":person/name");
     }
@@ -1693,14 +1684,15 @@ mod tests {
         assert_eq!(all.len(), 1, "get_all_facts must include committed facts");
         assert_eq!(all[0].entity, alice);
 
-        // get_facts_as_of should see committed facts.
-        let as_of = storage
-            .get_facts_as_of(&crate::query::datalog::types::AsOf::Counter(10))
-            .unwrap();
+        // Transaction-time filtering should see committed facts.
+        let as_of = filter_facts_as_of(
+            storage.get_all_facts().unwrap(),
+            &crate::query::datalog::types::AsOf::Counter(10),
+        );
         assert_eq!(
             as_of.len(),
             1,
-            "get_facts_as_of should include committed facts"
+            "transaction-time filtering should include committed facts"
         );
 
         // get_facts_valid_at should see committed facts valid at time 0.

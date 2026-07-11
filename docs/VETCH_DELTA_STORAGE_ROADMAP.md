@@ -161,6 +161,7 @@ the result of progressively narrower gates:
 | Q3-B | `docs/MAINTENANCE_API_CONTRACT.md` records caller windows, outcome semantics, error handling, and Vetch scheduling policy. | Vetch can validate maintenance adoption without another Vicia storage algorithm change. |
 | A5-4 | Four 100K-base browser soft-threshold cycles atomically replaced compact images, reclaimed about 2.1K pages each, reset write latency, and a module DedicatedWorker passed open/write/query/maintenance. | The maintenance and worker deployment boundaries pass in real Chrome; bounded 1M open/memory remains Gate E work. |
 | A5-5 | Native- and Chrome-generated v10 fixtures run through both consumers with exact tagged temporal/ref results and one shared slot/manifest/segment/truncation/tail corruption corpus. | Semantic, portability, and recovery-policy parity pass; page-local base integrity and bounded browser reads remain coupled Gate E work. |
+| A5-6a | Query access planning is a deterministic internal boundary; selective index/fact I/O failures propagate instead of triggering a full scan, and declared fact ranges reject wrong-type pages. | Sparse browser reads can distinguish an explicit full-scan plan from a failed selective read without hiding corruption. |
 
 ## Philosophy Fit
 

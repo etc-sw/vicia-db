@@ -3773,8 +3773,11 @@ mod tests {
         page[8..16].copy_from_slice(&2u64.to_le_bytes()); // page_count = 2 (header + 1 empty page)
         page[68] = 0x02; // fact_page_format = PACKED
         backend.write_page(0, &page).unwrap();
-        // Write an empty fact page so page_count > 1 triggers load()
-        backend.write_page(1, &vec![0u8; PAGE_SIZE]).unwrap();
+        // Write a structurally valid empty packed fact page so page_count > 1
+        // triggers migration without relying on the old silent wrong-type skip.
+        let mut empty_fact_page = vec![0u8; PAGE_SIZE];
+        empty_fact_page[0] = crate::storage::packed_pages::PAGE_TYPE_PACKED;
+        backend.write_page(1, &empty_fact_page).unwrap();
 
         let s = PersistentFactStorage::new(backend, 256).unwrap();
         let b = s.into_backend().unwrap();

@@ -1,3 +1,4 @@
+pub(crate) mod access_plan;
 pub mod evaluator;
 pub mod executor;
 pub mod functions;

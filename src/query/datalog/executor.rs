@@ -1,3 +1,4 @@
+use super::access_plan::QueryAccessPlan;
 use super::evaluator::{StratifiedEvaluator, evaluate_not_join};
 use super::functions::{AggImpl, FunctionRegistry, apply_builtin_aggregate, value_cmp};
 use super::matcher::{PatternMatcher, edn_to_entity_id, edn_to_value};
@@ -9,7 +10,6 @@ use super::types::{
 };
 use crate::graph::FactStorage;
 use crate::graph::types::{Fact, TransactOptions, TxId, Value, tx_id_now};
-use crate::storage::index::encode_value;
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -32,30 +32,6 @@ fn query_uses_per_fact_pseudo_attr(query: &DatalogQuery) -> bool {
         })
     }
     check_clauses(&query.where_clauses)
-}
-
-/// Recursively collect all `Pattern` clauses from a slice of where clauses,
-/// including those nested inside `Not`, `NotJoin`, `Or`, and `OrJoin` bodies.
-/// Used by `selective_fact_fetch` to ensure every pattern that references a fact
-/// (including not-body patterns) is considered when deciding which indexes to query.
-fn collect_all_patterns(clauses: &[WhereClause]) -> Vec<Pattern> {
-    let mut patterns = Vec::new();
-    for clause in clauses {
-        match clause {
-            WhereClause::Pattern(p) => patterns.push(p.clone()),
-            WhereClause::Not(inner) => patterns.extend(collect_all_patterns(inner)),
-            WhereClause::NotJoin { clauses: inner, .. } => {
-                patterns.extend(collect_all_patterns(inner))
-            }
-            WhereClause::Or(branches) | WhereClause::OrJoin { branches, .. } => {
-                for branch in branches {
-                    patterns.extend(collect_all_patterns(branch));
-                }
-            }
-            WhereClause::RuleInvocation { .. } | WhereClause::Expr { .. } => {}
-        }
-    }
-    patterns
 }
 
 /// The result of executing a Datalog command via [`crate::db::Minigraf::execute`].
@@ -352,32 +328,11 @@ impl DatalogExecutor {
                 crate::graph::storage::filter_facts_as_of(facts.iter().cloned().collect(), as_of)
             }
             (Some(facts), None) => facts.iter().cloned().collect(),
-            (None, Some(as_of)) => {
-                // Selective fetch is only safe when no rule invocations are present —
-                // rules require the full fact base to evaluate correctly.
-                if !query.uses_rules() {
-                    let patterns = collect_all_patterns(&query.where_clauses);
-                    match self.selective_fact_fetch(&patterns, 4) {
-                        Some(facts) => crate::graph::storage::filter_facts_as_of(facts, as_of),
-                        None => self.storage.get_facts_as_of(as_of)?,
-                    }
-                } else {
-                    self.storage.get_facts_as_of(as_of)?
-                }
-            }
-            (None, None) => {
-                // Selective fetch is only safe when no rule invocations are present —
-                // rules require the full fact base to evaluate correctly.
-                if !query.uses_rules() {
-                    let patterns = collect_all_patterns(&query.where_clauses);
-                    match self.selective_fact_fetch(&patterns, 4) {
-                        Some(facts) => facts,
-                        None => self.storage.get_all_facts()?,
-                    }
-                } else {
-                    self.storage.get_all_facts()?
-                }
-            }
+            (None, Some(as_of)) => crate::graph::storage::filter_facts_as_of(
+                QueryAccessPlan::for_query(query).read_facts(&self.storage)?,
+                as_of,
+            ),
+            (None, None) => QueryAccessPlan::for_query(query).read_facts(&self.storage)?,
         };
 
         let tx_filtered = source_facts;
@@ -406,95 +361,6 @@ impl DatalogExecutor {
         };
 
         Ok(Arc::from(valid_filtered))
-    }
-
-    /// Attempt a selective index-backed fact fetch for the given patterns.
-    ///
-    /// For each pattern, prefer a bound entity literal (UUID or keyword -> deterministic UUID)
-    /// over a bound attribute keyword for that same pattern. Entity lookups are usually more
-    /// selective, but multi-pattern joins still need attribute candidates for patterns that do not
-    /// bind an entity. If any pattern has neither a bound entity nor a bound attribute, or if the
-    /// distinct lookup count exceeds `threshold`, returns `None` to use a full scan. Otherwise
-    /// returns `Some(facts)`, deduplicated by full fact identity.
-    fn selective_fact_fetch(&self, patterns: &[Pattern], threshold: usize) -> Option<Vec<Fact>> {
-        use std::collections::HashSet;
-
-        type SelectiveDedupKey = (uuid::Uuid, String, Vec<u8>, i64, i64, u64, u64, bool);
-
-        fn dedup_key(fact: &Fact) -> SelectiveDedupKey {
-            (
-                fact.entity,
-                fact.attribute.clone(),
-                encode_value(&fact.value),
-                fact.valid_from,
-                fact.valid_to,
-                fact.tx_count,
-                fact.tx_id,
-                fact.asserted,
-            )
-        }
-
-        let mut entity_ids: HashSet<uuid::Uuid> = HashSet::new();
-        let mut attributes: HashSet<String> = HashSet::new();
-
-        for pattern in patterns {
-            let bound_entity = match &pattern.entity {
-                EdnValue::Uuid(u) => Some(*u),
-                EdnValue::Keyword(_) => edn_to_entity_id(&pattern.entity).ok(),
-                _ => None,
-            };
-
-            if let Some(uid) = bound_entity {
-                entity_ids.insert(uid);
-                continue;
-            }
-
-            if let AttributeSpec::Real(EdnValue::Keyword(attr)) = &pattern.attribute {
-                attributes.insert(attr.clone());
-            } else {
-                return None;
-            }
-        }
-
-        let total = entity_ids.len() + attributes.len();
-        if total == 0 || total > threshold {
-            return None;
-        }
-
-        // Include full fact identity so same entity+attribute batches do not
-        // collapse distinct facts that share one tx_count.
-        let mut seen: HashSet<SelectiveDedupKey> = HashSet::new();
-        let mut all_facts: Vec<Fact> = Vec::new();
-
-        for uid in &entity_ids {
-            match self.storage.get_facts_by_entity(uid) {
-                Ok(facts) => {
-                    for fact in facts {
-                        let key = dedup_key(&fact);
-                        if seen.insert(key) {
-                            all_facts.push(fact);
-                        }
-                    }
-                }
-                Err(_) => return None,
-            }
-        }
-
-        for attr in &attributes {
-            match self.storage.get_facts_by_attribute(attr) {
-                Ok(facts) => {
-                    for fact in facts {
-                        let key = dedup_key(&fact);
-                        if seen.insert(key) {
-                            all_facts.push(fact);
-                        }
-                    }
-                }
-                Err(_) => return None,
-            }
-        }
-
-        Some(all_facts)
     }
 
     /// Execute a query: find matching facts and return specified variables
@@ -2441,6 +2307,69 @@ mod tests {
         }
     }
 
+    struct FallbackCapableFactReader {
+        facts: Vec<Fact>,
+        stream_calls: Arc<AtomicUsize>,
+        fail_resolve: bool,
+    }
+
+    impl CommittedFactReader for FallbackCapableFactReader {
+        fn resolve(&self, fr: FactRef) -> anyhow::Result<Fact> {
+            if self.fail_resolve {
+                anyhow::bail!("injected committed fact resolve failure");
+            }
+            self.facts
+                .get(fr.slot_index as usize)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing committed fact"))
+        }
+
+        fn stream_all(&self) -> anyhow::Result<Vec<Fact>> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.facts.clone())
+        }
+
+        fn committed_page_count(&self) -> u64 {
+            self.facts.len() as u64
+        }
+    }
+
+    struct FailingCommittedIndexReader;
+
+    impl CommittedIndexReader for FailingCommittedIndexReader {
+        fn range_scan_eavt(
+            &self,
+            _: &EavtKey,
+            _: Option<&EavtKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            anyhow::bail!("injected committed index read failure")
+        }
+
+        fn range_scan_aevt(
+            &self,
+            _: &AevtKey,
+            _: Option<&AevtKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            anyhow::bail!("injected committed index read failure")
+        }
+
+        fn range_scan_avet(
+            &self,
+            _: &AvetKey,
+            _: Option<&AvetKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            anyhow::bail!("injected committed index read failure")
+        }
+
+        fn range_scan_vaet(
+            &self,
+            _: &VaetKey,
+            _: Option<&VaetKey>,
+        ) -> anyhow::Result<Vec<FactRef>> {
+            anyhow::bail!("injected committed index read failure")
+        }
+    }
+
     struct InMemoryCommittedIndexReader {
         indexes: Indexes,
     }
@@ -3144,6 +3073,143 @@ mod tests {
             stream_calls.load(Ordering::SeqCst),
             0,
             "attribute-bound as-of query should avoid committed full scan"
+        );
+    }
+
+    #[test]
+    fn selective_entity_index_error_is_not_replaced_by_full_scan() {
+        let entity = Uuid::new_v4();
+        let fact = Fact::with_valid_time(
+            entity,
+            ":bench/name".to_string(),
+            Value::String("visible only through an invalid fallback".to_string()),
+            1000,
+            1,
+            0,
+            crate::graph::types::VALID_TIME_FOREVER,
+        );
+        let storage = FactStorage::new();
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        storage.set_committed_reader(Arc::new(FallbackCapableFactReader {
+            facts: vec![fact],
+            stream_calls: stream_calls.clone(),
+            fail_resolve: false,
+        }));
+        storage.set_committed_index_reader(Arc::new(FailingCommittedIndexReader));
+        let executor = DatalogExecutor::new(storage);
+        let command = parse_datalog_command(&format!(
+            r#"(query [:find ?v :where [#uuid "{entity}" :bench/name ?v]])"#
+        ))
+        .unwrap();
+
+        let error = match executor.execute(command) {
+            Err(error) => error,
+            Ok(_) => panic!("selective index failure must fail the query"),
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected committed index read failure"),
+            "the original index read failure must remain visible"
+        );
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "a selective read failure must not trigger a committed full scan"
+        );
+    }
+
+    #[test]
+    fn selective_attribute_index_error_is_not_replaced_by_full_scan() {
+        let fact = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":bench/name".to_string(),
+            Value::String("visible only through an invalid fallback".to_string()),
+            1000,
+            1,
+            0,
+            crate::graph::types::VALID_TIME_FOREVER,
+        );
+        let storage = FactStorage::new();
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        storage.set_committed_reader(Arc::new(FallbackCapableFactReader {
+            facts: vec![fact],
+            stream_calls: stream_calls.clone(),
+            fail_resolve: false,
+        }));
+        storage.set_committed_index_reader(Arc::new(FailingCommittedIndexReader));
+        let executor = DatalogExecutor::new(storage);
+        let command =
+            parse_datalog_command("(query [:find ?e ?v :where [?e :bench/name ?v]])").unwrap();
+
+        let error = match executor.execute(command) {
+            Err(error) => error,
+            Ok(_) => panic!("selective attribute index failure must fail the query"),
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected committed index read failure"),
+            "the original attribute index failure must remain visible"
+        );
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "an attribute-selective failure must not trigger a committed full scan"
+        );
+    }
+
+    #[test]
+    fn selective_fact_resolve_error_is_not_replaced_by_full_scan() {
+        let entity = Uuid::new_v4();
+        let fact = Fact::with_valid_time(
+            entity,
+            ":bench/name".to_string(),
+            Value::String("visible only through an invalid fallback".to_string()),
+            1000,
+            1,
+            0,
+            crate::graph::types::VALID_TIME_FOREVER,
+        );
+        let mut indexes = Indexes::new();
+        indexes.insert(
+            &fact,
+            FactRef {
+                page_id: 1,
+                slot_index: 0,
+            },
+        );
+        let storage = FactStorage::new();
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        storage.set_committed_reader(Arc::new(FallbackCapableFactReader {
+            facts: vec![fact],
+            stream_calls: stream_calls.clone(),
+            fail_resolve: true,
+        }));
+        storage.set_committed_index_reader(Arc::new(InMemoryCommittedIndexReader { indexes }));
+        let executor = DatalogExecutor::new(storage);
+        let command = parse_datalog_command(&format!(
+            r#"(query [:find ?v :where [#uuid "{entity}" :bench/name ?v]])"#
+        ))
+        .unwrap();
+
+        let error = match executor.execute(command) {
+            Err(error) => error,
+            Ok(_) => panic!("selective fact resolve failure must fail the query"),
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected committed fact resolve failure"),
+            "the original fact resolve failure must remain visible"
+        );
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "a selective resolve failure must not trigger a committed full scan"
         );
     }
 

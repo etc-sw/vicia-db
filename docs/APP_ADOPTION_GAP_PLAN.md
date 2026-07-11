@@ -300,6 +300,22 @@ flip when a selected delta manifest is present. Next browser storage work is a
 generation-bound page-on-demand source with page-local integrity, followed by
 the 1M open/query/growth/maintenance peak-memory matrix.
 
+#### A5-6a — Fail-closed query access boundary (DONE 2026-07-11)
+
+The executor now derives a deterministic `QueryAccessPlan` before touching
+storage. Queries with a bounded set of entity/attribute lookups use that exact
+selective plan; rules, unbound patterns, or more than four distinct lookups use
+an explicit full scan. An index-page or fact-page read failure during a
+selective plan remains an error instead of being reclassified as permission to
+full-scan the store. Nested `not`, `not-join`, `or`, and `or-join` patterns are
+part of the same plan, and candidate deduplication retains all eight ledger
+identity fields.
+
+Declared packed-fact page ranges also reject short or wrong-type pages instead
+of silently omitting their facts. This is the reusable query/storage boundary
+for the sparse browser source and page verifier; it does not itself make
+BrowserDb page-on-demand or close Gate E.
+
 ### A8 — Bulk valid-time closure, the "forget" primitive (DONE 2026-07-11)
 
 Close `valid_to` on many facts at once as **one atomic transaction**: input

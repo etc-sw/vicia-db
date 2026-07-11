@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Selective Datalog reads now fail closed when a committed index scan or fact-page resolve fails. The executor previously converted either storage error into a full-scan plan, which could hide corruption and return apparently valid results from a different read path. Query access planning is now a separate deterministic internal boundary shared by current and temporal reads, and declared packed-fact ranges reject wrong-type pages instead of silently dropping their rows.
 - Native open no longer reinitializes a non-empty file shorter than one 4KB page. A 1–4095-byte database now fails visibly without modifying the corrupt prefix; zero-byte paths remain the supported new-database creation surface.
 - Browser import/export now honors page 0's published prefix. Full unpublished tail pages are removed before the atomic IndexedDB replacement and never leak through `exportGraph`; a trailing partial page enters the same previous-manifest recovery policy as native open. Physically incomplete fallback images remain queryable but visibly non-exportable until repair.
 - Browser write-through failures no longer leave a silently usable handle ahead of IndexedDB. An aborted commit reloads the previous durable graph and rejects the operation; if durable reload itself is impossible, the whole handle is poisoned and rejects query/write/export/import/checkpoint/maintenance until reopen. A same-handle mutation guard also prevents async write/import/checkpoint/maintenance overlap.

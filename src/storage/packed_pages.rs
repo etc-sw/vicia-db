@@ -272,7 +272,7 @@ pub fn last_tx_count(page: &[u8]) -> Result<Option<u64>> {
 ///
 /// `first_page_id` is the backend page ID of the first packed fact page.
 /// `num_pages` is the number of pages to read.
-/// Non-packed pages (e.g., index pages) are silently skipped.
+/// Every page in the declared range must be a complete packed fact page.
 pub fn read_all_from_pages(
     backend: &dyn StorageBackend,
     first_page_id: u64,
@@ -291,7 +291,7 @@ pub fn read_all_from_pages(
 ///
 /// `first_page_id` is the backend page ID of the first packed fact page.
 /// `num_pages` is the number of pages to read.
-/// Non-packed pages (e.g., index pages) are silently skipped.
+/// Every page in the declared range must be a complete packed fact page.
 pub fn for_each_from_pages(
     backend: &dyn StorageBackend,
     first_page_id: u64,
@@ -300,9 +300,21 @@ pub fn for_each_from_pages(
 ) -> Result<()> {
     for i in 0..num_pages {
         let page = backend.read_page(first_page_id.saturating_add(i))?;
+        if page.len() != PAGE_SIZE {
+            anyhow::bail!(
+                "Committed fact page {} has invalid length {} (expected {})",
+                first_page_id.saturating_add(i),
+                page.len(),
+                PAGE_SIZE
+            );
+        }
         let page_type = page.first().copied().unwrap_or(0);
-        if page.len() < PAGE_SIZE || page_type != PAGE_TYPE_PACKED {
-            continue;
+        if page_type != PAGE_TYPE_PACKED {
+            anyhow::bail!(
+                "Committed fact page {} has invalid page type 0x{:02x}",
+                first_page_id.saturating_add(i),
+                page_type
+            );
         }
         let b2 = page.get(2).copied().unwrap_or(0);
         let b3 = page.get(3).copied().unwrap_or(0);
@@ -540,6 +552,20 @@ mod tests {
         for (orig, rec) in facts.iter().zip(recovered.iter()) {
             assert_eq!(orig.entity, rec.entity);
         }
+    }
+
+    #[test]
+    fn committed_fact_scan_rejects_non_packed_page_in_declared_range() {
+        use crate::storage::backend::MemoryBackend;
+
+        let mut backend = MemoryBackend::new();
+        backend.write_page(1, &[0u8; PAGE_SIZE]).unwrap();
+
+        let result = read_all_from_pages(&backend, 1, 1);
+        assert!(
+            result.is_err(),
+            "a declared fact page with the wrong page type must be corruption"
+        );
     }
 
     #[test]
