@@ -97,6 +97,7 @@ impl BrowserDb {
     /// - Query: `{"variables": [...], "results": [[...], ...]}`
     /// - Transact: `{"transacted": <tx_id>}`
     /// - Retract: `{"retracted": <tx_id>}`
+    /// - Forget: `{"forgotten": <count>, "tx_id": <tx_id or null>}`
     /// - Rule: `{"ok": true}`
     #[wasm_bindgen(js_name = execute)]
     pub async fn execute(&self, datalog: String) -> Result<String, JsValue> {
@@ -130,9 +131,92 @@ impl BrowserDb {
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
                 self.apply_write(facts, true).await
             }
+            DatalogCommand::Forget(spec) => self.execute_forget(spec).await,
             // Handled above; unreachable but required for exhaustiveness.
             DatalogCommand::Query(_) | DatalogCommand::Rule(_) => unreachable!(),
         }
+    }
+
+    /// Bulk valid-time closure: resolve the triples, materialize the
+    /// retract + truncated re-assert pairs, and apply them as one transaction
+    /// (single `tx_count`), then flush dirty pages to IndexedDB.
+    async fn execute_forget(
+        &self,
+        spec: crate::query::datalog::types::ForgetSpec,
+    ) -> Result<String, JsValue> {
+        use crate::graph::types::tx_id_now;
+
+        // ── Sync section: hold borrow, do ALL sync work, collect owned data ──
+        let (dirty_pages, result_json) = {
+            let mut inner = self.inner.borrow_mut();
+
+            let now = tx_id_now();
+            let closure_time = spec.valid_to.unwrap_or_else(|| now.cast_signed());
+
+            let executor = DatalogExecutor::new_with_rules_and_functions(
+                inner.fact_storage.clone(),
+                inner.rules.clone(),
+                inner.functions.clone(),
+            );
+            let triples =
+                crate::db::Minigraf::resolve_forget_triples(&spec, &executor, closure_time)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let (facts, count) = crate::db::Minigraf::materialize_closure(
+                &inner.fact_storage,
+                &triples,
+                closure_time,
+            )
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            // Nothing matched: no tx_count consumed, nothing to flush.
+            if facts.is_empty() {
+                return Ok(r#"{"forgotten":0,"tx_id":null}"#.to_string());
+            }
+
+            let tx_count = inner.fact_storage.allocate_tx_count();
+            let tx_id = now;
+
+            for mut fact in facts {
+                fact.tx_id = tx_id;
+                fact.tx_count = tx_count;
+                inner
+                    .fact_storage
+                    .load_fact(fact)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            }
+
+            inner.pfs.mark_dirty();
+            inner
+                .pfs
+                .save()
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let dirty_ids = inner.pfs.with_backend_mut(|b| b.take_dirty());
+            let dirty_pages: Vec<(u64, Vec<u8>)> = dirty_ids
+                .into_iter()
+                .filter_map(|id| {
+                    inner
+                        .pfs
+                        .with_backend(|b| b.read_page_raw(id).ok().map(|d| (id, d)))
+                })
+                .collect();
+
+            let json = format!(r#"{{"forgotten":{},"tx_id":{}}}"#, count, tx_id);
+
+            (dirty_pages, json)
+        };
+        // ── Borrow dropped here ───────────────────────────────────────────────
+
+        // ── Async section: flush to IDB (no RefCell borrow held) ─────────────
+        if !dirty_pages.is_empty() {
+            let has_idb = self.inner.borrow().idb.is_some();
+            if has_idb {
+                let idb = self.inner.borrow().idb.as_ref().unwrap().clone_handle();
+                idb.write_pages(dirty_pages).await?;
+            }
+        }
+
+        Ok(result_json)
     }
 
     /// Flush all dirty pages to IndexedDB.
@@ -350,6 +434,9 @@ fn query_result_to_json(result: QueryResult) -> String {
         QueryResult::Retracted(tx_id) => {
             json!({"retracted": tx_id})
         }
+        QueryResult::Forgotten { tx_id, count } => {
+            json!({"forgotten": count, "tx_id": tx_id})
+        }
         QueryResult::Ok => json!({"ok": true}),
         QueryResult::QueryResults { vars, results } => {
             let rows: Vec<Vec<JVal>> = results
@@ -403,6 +490,41 @@ mod tests {
         let results = v["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], serde_json::Value::String("Alice".into()));
+    }
+
+    #[wasm_bindgen_test]
+    async fn in_memory_forget_preserves_history() {
+        let db = BrowserDb::open_in_memory().expect("open_in_memory");
+        db.execute(
+            r#"(transact {:valid-from "2026-01-01"} [[:alice :status :active]])"#.to_string(),
+        )
+        .await
+        .expect("transact");
+
+        let forgotten = db
+            .execute(r#"(forget {:valid-to "2026-06-01"} [[:alice :status :active]])"#.to_string())
+            .await
+            .expect("forget");
+        let forgotten: serde_json::Value = serde_json::from_str(&forgotten).unwrap();
+        assert_eq!(forgotten["forgotten"], 1);
+        assert!(forgotten["tx_id"].is_u64());
+
+        let current = db
+            .execute(r#"(query [:find ?s :where [:alice :status ?s]])"#.to_string())
+            .await
+            .expect("current query");
+        let current: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert_eq!(current["results"].as_array().unwrap().len(), 0);
+
+        let history = db
+            .execute(
+                r#"(query [:find ?s :valid-at "2026-03-01" :where [:alice :status ?s]])"#
+                    .to_string(),
+            )
+            .await
+            .expect("history query");
+        let history: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert_eq!(history["results"].as_array().unwrap().len(), 1);
     }
 
     #[wasm_bindgen_test]

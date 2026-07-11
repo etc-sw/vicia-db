@@ -632,6 +632,54 @@ only (recompact thresholds are unreachable at this scale).
 
 ---
 
+## A8: Bulk Valid-Time Closure (2026-07-11)
+
+`(forget ...)` closes query-selected or explicitly supplied EAV valid-time
+windows as one WAL-first transaction while preserving the earlier history
+(`docs/APP_ADOPTION_GAP_PLAN.md` slice A8, harrekki P1 #6). Gate commands:
+
+```bash
+cargo test --release --test forget_test \
+  forget_10k_result_set_closes_in_one_transaction -- --nocapture
+cargo test --release --test kill9_durability_test -- --ignored --nocapture
+```
+
+Semantic/scale gate (A0 environment):
+
+| Metric | Value |
+|---|---|
+| Query-selected triples closed | 10,000 |
+| Closure transaction count | **1** |
+| Fact-log records | 20,000 (10k scoped retracts + 10k truncated re-asserts) |
+| Release closure latency | 86.1 ms |
+| History before closure / current after closure | 10,000 / 0 visible |
+
+Crash gate (seed `0xa7a720260711`, A8-extended workload/model):
+
+| Metric | Value |
+|---|---|
+| Kill cycles | 2,400 |
+| Acknowledged transactions | 169,275 |
+| Acknowledged forgets | 333 |
+| In-flight forget promotions | 27 |
+| Lost acknowledged transactions / forgets | **0 / 0** |
+| Unopenable files | **0** |
+| Confirmed mid-checkpoint kills | 955 |
+| Lineage rotations | 29 |
+| Deadline hits | 0 |
+| Wall time | 505.7 s |
+
+The first full run exposed a third real A7/A8 crash window: SIGKILL after
+lazy WAL `create_new()` but before its 32-byte header write left a zero-byte
+sidecar. The main `.graph` and both manifest slots were valid, but reopen
+rejected the short WAL before it could audit them. A short WAL cannot contain
+an acknowledged entry because the complete header is fsynced before any
+append; replay now treats it as empty and the next writer reinitializes the
+header. Unit coverage pins 0-, 7-, and 31-byte artifacts while full-sized
+bad-magic headers remain hard errors.
+
+---
+
 ## A5: Browser IndexedDB Growth (2026-07-11)
 
 Long-running write growth of the browser backend (`BrowserDb`), measured for

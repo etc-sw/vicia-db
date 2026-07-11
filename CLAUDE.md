@@ -170,7 +170,7 @@ Auto-migrates v1/v2/v3/v4/v5/v6/v7/v8 → v9 on open/checkpoint.
 
 ## Test Coverage
 
-**1167 tests total** (1155 passing, 12 ignored).
+**1200 tests total** (1188 passing, 12 ignored).
 See `docs/TEST_COVERAGE.md` for the full per-file breakdown.
 
 **Testing conventions** — see the Testing Conventions section below before writing any tests.

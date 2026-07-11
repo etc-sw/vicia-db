@@ -141,6 +141,16 @@ impl WalWriter {
 
         // File exists — validate its header and seek to end for appending
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        // SIGKILL can land after `create_new` succeeds but before the WAL
+        // header is complete. No acknowledged entry can exist behind a
+        // partial header because header fsync precedes every append, so this
+        // is a safe empty-WAL recovery state rather than corruption.
+        if file.metadata()?.len() < WAL_HEADER_SIZE as u64 {
+            file.set_len(0)?;
+            write_wal_header(&mut file)?;
+            file.seek(SeekFrom::End(0))?;
+            return Ok(WalWriter { file });
+        }
         validate_wal_header(&mut file)?;
         file.seek(SeekFrom::End(0))?;
         Ok(WalWriter { file })
@@ -197,7 +207,12 @@ impl WalReader {
     /// Open the WAL at `path` for reading.
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path)?;
-        validate_wal_header(&mut file)?;
+        // A short file is the recoverable create-before-header crash window.
+        // `read_entries` will seek past it and return no entries; the writer
+        // subsequently replaces it with a complete, fsynced header.
+        if file.metadata()?.len() >= WAL_HEADER_SIZE as u64 {
+            validate_wal_header(&mut file)?;
+        }
         Ok(WalReader { file })
     }
 
@@ -450,6 +465,32 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].tx_count, 1);
         assert_eq!(entries[1].tx_count, 2);
+    }
+
+    #[test]
+    fn test_short_wal_header_recovers_as_empty_then_accepts_writes() {
+        for header_len in [0usize, 7, WAL_HEADER_SIZE - 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("short-{header_len}.wal"));
+            std::fs::write(&path, vec![0xA5; header_len]).unwrap();
+
+            let mut reader = WalReader::open(&path).unwrap();
+            assert!(
+                reader.read_entries().unwrap().is_empty(),
+                "a WAL shorter than its header cannot contain an acknowledged entry"
+            );
+
+            let entity = Uuid::new_v4();
+            let fact = make_fact(entity, ":name", Value::String("Ada".to_string()), 1);
+            let mut writer = WalWriter::open_or_create(&path).unwrap();
+            writer.append_entry(1, std::slice::from_ref(&fact)).unwrap();
+            drop(writer);
+
+            let mut reader = WalReader::open(&path).unwrap();
+            let entries = reader.read_entries().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].facts[0].entity, fact.entity);
+        }
     }
 
     #[test]

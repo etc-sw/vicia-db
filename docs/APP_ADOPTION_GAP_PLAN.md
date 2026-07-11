@@ -4,7 +4,7 @@ Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 `docs/HARREKKI_CALLER_REQUIREMENTS.md`. Caller decisions override the initial
 2026-07-11 audit inferences (see Revision Note). A0, A6, A7, A2, and A5
 landed 2026-07-11 (A2's `export_since` frame frozen after harrekki-lane
-ACK; A5 gate passed — see the A5 block); next up is A8. This line
+ACK; A5 gate passed — see the A5 block), and A8 landed; next up is A9. This line
 sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
 delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 apply unchanged.
@@ -132,8 +132,8 @@ that blocked open until manual deletion. Regression tests live in
   263.5 s wall. Evidence: `docs/BENCHMARKS.md` "A7: kill -9 Durability
   Gate". Caveats: process-death durability, not power loss; recompact
   thresholds unreachable at harness scale (maintenance checkpoint path
-  only). A8's new write path must be added to the harness op mix when it
-  lands (weight table in `gen_stream_op`).
+  only). A8 extends the harness op mix and closed-aware audit model (weight
+  table in `gen_stream_op`).
 
 ### A2 — Incremental fact log: `export_fact_log_since(tx_count)` (harrekki P0 #2)
 
@@ -238,7 +238,7 @@ outcome parity) stays deferred until this evidence shows a measured wall.
   Locks single-writer, batch+debounce, read-mostly adoption policy). This
   closes A5.
 
-### A8 — Bulk valid-time closure, the "forget" primitive (harrekki P1 #6)
+### A8 — Bulk valid-time closure, the "forget" primitive (DONE 2026-07-11)
 
 Close `valid_to` on many facts at once as **one atomic transaction**: input
 is a query result set or a supplied fact list; no per-fact round-trips over
@@ -250,6 +250,27 @@ below). Philosophy check: batch retraction semantics already exist
 - Gate: atomicity under crash (A7 harness covers the new write path);
   closure of a 10k-fact result set in one transaction; history queries show
   the closed window correctly.
+
+Landed. `(forget ...)` accepts either a three-column EAV query result set or
+an explicit fact list, with optional `{:valid-to ...}` closure time. It
+resolves and materializes under the write lock, then writes every scoped
+retract plus truncated re-assert in one WAL-first transaction. A no-match
+closure is idempotent and consumes neither a `tx_count` nor a WAL entry.
+Native session and browser façades expose the same command; explicit
+`WriteTransaction` staging rejects it because closure discovery must see a
+stable committed valid-time view.
+
+- Gate: PASSED — `tests/forget_test.rs` closes 10,000 query-selected facts
+  in one transaction (20,000 fact-log records, 86.1 ms release), pins current/history/
+  `:as-of` semantics and checkpoint/reopen durability. The extended A7
+  harness passed 2,400 SIGKILL cycles with 169,275 acknowledged transactions,
+  333 acknowledged forgets, 27 promoted in-flight forgets, zero lost, zero
+  unopenable files, and zero deadline hits. It found one additional crash
+  window: SIGKILL after lazy WAL
+  creation but before its 32-byte header left a zero/short sidecar that
+  reopen rejected. Short WAL headers now recover as an empty pre-append
+  state and are reinitialized before the next write; unit coverage pins
+  0-, 7-, and 31-byte cases.
 
 ### A9 — Online snapshot/backup contract (harrekki P1 #7)
 

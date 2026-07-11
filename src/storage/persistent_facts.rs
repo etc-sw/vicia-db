@@ -145,7 +145,9 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
         while lo < hi {
             let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
             let page_id = first_fact_page.saturating_add(mid);
-            let page = self.page_cache.get_or_load(page_id, &self.backend_adapter)?;
+            let page = self
+                .page_cache
+                .get_or_load(page_id, &self.backend_adapter)?;
             match crate::storage::packed_pages::last_tx_count(&page)? {
                 Some(max_tx) if max_tx > since_tx_count => hi = mid,
                 Some(_) => lo = mid.saturating_add(1),
@@ -4029,9 +4031,7 @@ mod tests {
             (tmp, head)
         }
 
-        fn open_counting(
-            path: &str,
-        ) -> (PersistentFactStorage<CountingBackend>, Arc<AtomicU64>) {
+        fn open_counting(path: &str) -> (PersistentFactStorage<CountingBackend>, Arc<AtomicU64>) {
             let reads = Arc::new(AtomicU64::new(0));
             let backend = CountingBackend {
                 inner: FileBackend::open(path).unwrap(),
@@ -4120,7 +4120,10 @@ mod tests {
                 tx(&mut pfs, i);
             }
             pfs.mark_dirty();
-            assert!(matches!(pfs.save().unwrap(), CheckpointOutcome::FullRebuild));
+            assert!(matches!(
+                pfs.save().unwrap(),
+                CheckpointOutcome::FullRebuild
+            ));
             for i in 40..60 {
                 tx(&mut pfs, i);
             }
@@ -4151,8 +4154,11 @@ mod tests {
                         Ok(())
                     })
                     .unwrap();
-                let expected: Vec<_> =
-                    full.iter().filter(|f| f.tx_count > since).cloned().collect();
+                let expected: Vec<_> = full
+                    .iter()
+                    .filter(|f| f.tx_count > since)
+                    .cloned()
+                    .collect();
                 assert_eq!(
                     got.len(),
                     expected.len(),

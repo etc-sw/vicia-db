@@ -501,7 +501,10 @@ mod tests {
         let db_path = dir.path().join("livelock.graph");
         std::fs::write(db_path.with_extension("graph.lock"), b"1").unwrap();
         let err = FileLock::acquire(&db_path);
-        assert!(err.is_err(), "live foreign holder must still block acquisition");
+        assert!(
+            err.is_err(),
+            "live foreign holder must still block acquisition"
+        );
     }
 
     #[test]

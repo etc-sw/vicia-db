@@ -85,7 +85,10 @@ fn gate_since_tail_at_1m_base() -> Result<()> {
     // (the post-recompact daemon-tick shape): served by the tx-ordered page
     // probe, no full scan.
     let (base_tail_cold, base_tail_len) = timed_since_tail(&db, base_tail_cursor)?;
-    assert_eq!(base_tail_len, BASE_TAIL_TXS, "base tail must be 100 records");
+    assert_eq!(
+        base_tail_len, BASE_TAIL_TXS,
+        "base tail must be 100 records"
+    );
     let (base_tail_warm, _) = timed_since_tail(&db, base_tail_cursor)?;
 
     // Scenario B — tail in the pending (uncheckpointed) layer.
@@ -93,7 +96,10 @@ fn gate_since_tail_at_1m_base() -> Result<()> {
         insert_batch(&db, BASE_FACTS + i, BASE_FACTS + i + 1)?;
     }
     let (pending_tail, pending_len) = timed_since_tail(&db, head)?;
-    assert_eq!(pending_len, PENDING_TAIL_TXS, "pending tail must be 50 records");
+    assert_eq!(
+        pending_len, PENDING_TAIL_TXS,
+        "pending tail must be 50 records"
+    );
 
     // Scenario C — same tail after checkpoint moves it into a delta segment.
     db.checkpoint().map_err(db_error)?;
@@ -112,7 +118,9 @@ fn gate_since_tail_at_1m_base() -> Result<()> {
     assert_eq!(full.len(), BASE_FACTS + PENDING_TAIL_TXS);
 
     println!("A2 gate @ {BASE_FACTS} committed facts (head tx_count {head}):");
-    println!("  base-tail   since={base_tail_cursor} -> {base_tail_len:>3} records: cold {base_tail_cold:?}, warm {base_tail_warm:?}");
+    println!(
+        "  base-tail   since={base_tail_cursor} -> {base_tail_len:>3} records: cold {base_tail_cold:?}, warm {base_tail_warm:?}"
+    );
     println!("  pending-tail since={head} -> {pending_len:>3} records: {pending_tail:?}");
     println!("  delta-tail   since={head} -> {delta_len:>3} records: {delta_tail:?}");
     println!("  empty-tail   since={new_head} -> {empty_len:>3} records: {empty_tail:?}");

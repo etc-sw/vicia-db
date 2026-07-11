@@ -263,7 +263,9 @@ pub fn last_tx_count(page: &[u8]) -> Result<Option<u64>> {
     if record_count == 0 {
         return Ok(None);
     }
-    Ok(Some(read_slot(page, record_count.saturating_sub(1))?.tx_count))
+    Ok(Some(
+        read_slot(page, record_count.saturating_sub(1))?.tx_count,
+    ))
 }
 
 /// Read all facts from a contiguous range of packed fact pages.

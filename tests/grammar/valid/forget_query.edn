@@ -1,0 +1,1 @@
+(forget [:find ?e ?a ?v :where [?e :session/expired true] [?e ?a ?v]])

@@ -31,6 +31,7 @@ the `run_idle_maintenance()` caller contract.
 Minigraf is a **single-file embedded graph database** that lets you:
 - ✅ **Query relationships with Datalog** - Recursive rules, natural graph traversal
 - ✅ **Time travel through history** - Bi-temporal queries (transaction time + valid time)
+- ✅ **Forget without erasing history** - Atomically close valid-time windows for query results or fact lists
 - ✅ **Window functions** - `sum/count/min/max/avg/rank/row-number :over (partition-by … :order-by …)` in `:find` clauses
 - ✅ **Prepared statements** - Parse + plan once with `$slot` bind tokens, execute thousands of times
 - ✅ **Embed anywhere** - Native, WASM, mobile, IoT - one `.graph` file
@@ -94,6 +95,12 @@ let _maintenance = db.run_idle_maintenance()?;
 
 // Time travel — query as of past transaction counter
 db.execute("(query [:find ?age :as-of 1 :where [:alice :person/age ?age]])")?;
+
+// Semantic forget — close matching valid-time windows in one transaction.
+// Earlier :as-of snapshots remain unchanged.
+db.execute(r#"(forget [:find ?e ?a ?v
+                       :where [?e :person/inactive true]
+                              [?e ?a ?v]])"#)?;
 
 // Vicia-facing Rust code can use the compatibility alias for the same handle
 let _vicia = minigraf::ViciaDb::in_memory()?;

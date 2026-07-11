@@ -60,7 +60,7 @@ edn_vector = { "[" ~ edn_value* ~ "]" }
 edn_map    = { "{" ~ (edn_value ~ edn_value)* ~ "}" }
 
 // ── TOP-LEVEL COMMAND ─────────────────────────────────────────────────────
-command = { SOI ~ (transact_cmd | retract_cmd | query_cmd | rule_cmd) ~ EOI }
+command = { SOI ~ (transact_cmd | retract_cmd | forget_cmd | query_cmd | rule_cmd) ~ EOI }
 
 // ── TRANSACT ──────────────────────────────────────────────────────────────
 // (transact [facts...]) or (transact {:valid-from "ts"} [facts...])
@@ -70,6 +70,15 @@ transact_cmd = {
 
 // ── RETRACT ───────────────────────────────────────────────────────────────
 retract_cmd = { "(" ~ "retract" ~ fact_vector ~ ")" }
+
+// ── FORGET (bulk valid-time closure) ──────────────────────────────────────
+// (forget [query-or-facts]) or (forget {:valid-to "ts"} [query-or-facts]).
+// Restricting the options map to :valid-to only, and the query :find to three
+// plain variables, are semantic checks in the real parser.
+forget_cmd = {
+    "(" ~ "forget" ~ (valid_time_map ~ forget_payload | forget_payload) ~ ")"
+}
+forget_payload = { query_vector | fact_vector }
 
 // Fact vector: a vector of individual fact vectors
 fact_vector = { "[" ~ fact* ~ "]" }

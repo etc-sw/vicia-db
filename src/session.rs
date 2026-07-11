@@ -59,12 +59,22 @@ impl Session {
             let request: JVal = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(e) => {
-                    write_error(&mut writer, JVal::Null, "protocol", &format!("invalid JSON: {e}"))?;
+                    write_error(
+                        &mut writer,
+                        JVal::Null,
+                        "protocol",
+                        &format!("invalid JSON: {e}"),
+                    )?;
                     continue;
                 }
             };
             let Some(obj) = request.as_object() else {
-                write_error(&mut writer, JVal::Null, "protocol", "request must be a JSON object")?;
+                write_error(
+                    &mut writer,
+                    JVal::Null,
+                    "protocol",
+                    "request must be a JSON object",
+                )?;
                 continue;
             };
             let id = obj.get("id").cloned().unwrap_or(JVal::Null);
@@ -85,7 +95,12 @@ impl Session {
                     return Ok(());
                 }
                 other => {
-                    write_error(&mut writer, id, "protocol", &format!("unknown op {other:?}"))?;
+                    write_error(
+                        &mut writer,
+                        id,
+                        "protocol",
+                        &format!("unknown op {other:?}"),
+                    )?;
                 }
             }
         }
@@ -98,7 +113,12 @@ impl Session {
         writer: &mut impl Write,
     ) -> anyhow::Result<()> {
         let Some(datalog) = obj.get("datalog").and_then(JVal::as_str) else {
-            return write_error(writer, id, "protocol", "execute requires string field \"datalog\"");
+            return write_error(
+                writer,
+                id,
+                "protocol",
+                "execute requires string field \"datalog\"",
+            );
         };
         // Classify parse failures separately from execution failures. The
         // command is re-parsed inside `execute`; the duplicate parse is
@@ -113,6 +133,23 @@ impl Session {
             }
             Ok(QueryResult::Retracted(tx_id)) => {
                 let body = self.write_result_body("retracted", tx_id);
+                write_ok(writer, id, body)
+            }
+            Ok(QueryResult::Forgotten { tx_id, count }) => {
+                let mut body = match tx_id {
+                    Some(tx_id) => self.write_result_body("forgotten", tx_id),
+                    // Nothing matched: no tx_count consumed, no WAL entry —
+                    // vacuously durable.
+                    None => json!({
+                        "type": "forgotten",
+                        "tx_id": JVal::Null,
+                        "tx_count": self.db.current_tx_count(),
+                        "durability": "applied",
+                    }),
+                };
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("forgotten".to_string(), json!(count));
+                }
                 write_ok(writer, id, body)
             }
             Ok(QueryResult::QueryResults { vars, results }) => {
@@ -170,7 +207,11 @@ impl Session {
         match self.db.checkpoint() {
             Ok(()) => {
                 self.record_checkpoint("published");
-                write_ok(writer, id, json!({"type": "checkpoint", "durability": "published"}))
+                write_ok(
+                    writer,
+                    id,
+                    json!({"type": "checkpoint", "durability": "published"}),
+                )
             }
             Err(e) => write_error(writer, id, "storage", &e.to_string()),
         }
@@ -245,7 +286,7 @@ impl Session {
     fn record_checkpoint(&mut self, outcome: &'static str) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
         self.last_checkpoint_unix_ms = Some(now_ms);
         self.last_checkpoint_outcome = Some(outcome);
@@ -298,7 +339,9 @@ fn value_to_tagged_json(v: &Value) -> JVal {
             } else if f.is_infinite() {
                 json!({"$float": if *f > 0.0 { "inf" } else { "-inf" }})
             } else {
-                serde_json::Number::from_f64(*f).map(JVal::Number).unwrap_or(JVal::Null)
+                serde_json::Number::from_f64(*f)
+                    .map(JVal::Number)
+                    .unwrap_or(JVal::Null)
             }
         }
         Value::Boolean(b) => JVal::Bool(*b),
@@ -311,7 +354,10 @@ fn value_to_tagged_json(v: &Value) -> JVal {
 fn write_ok(writer: &mut impl Write, id: JVal, result: JVal) -> anyhow::Result<()> {
     let mut frame = json!({"ok": true, "result": result});
     if !id.is_null() {
-        frame["id"] = id;
+        frame
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("internal error: response frame is not an object"))?
+            .insert("id".to_string(), id);
     }
     writeln!(writer, "{frame}")?;
     writer.flush()?;
@@ -321,7 +367,10 @@ fn write_ok(writer: &mut impl Write, id: JVal, result: JVal) -> anyhow::Result<(
 fn write_error(writer: &mut impl Write, id: JVal, kind: &str, message: &str) -> anyhow::Result<()> {
     let mut frame = json!({"ok": false, "error": {"kind": kind, "message": message}});
     if !id.is_null() {
-        frame["id"] = id;
+        frame
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("internal error: error frame is not an object"))?
+            .insert("id".to_string(), id);
     }
     writeln!(writer, "{frame}")?;
     writer.flush()?;

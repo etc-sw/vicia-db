@@ -740,6 +740,35 @@ pub enum ValidAt {
     Slot(String),
 }
 
+/// Input source for a `(forget ...)` command: either an embedded query whose
+/// result rows name the EAV triples to close, or an explicit fact list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForgetSource {
+    /// Query-driven closure: the `:find` spec must be exactly three plain
+    /// variables binding entity, attribute, and value.
+    Query(DatalogQuery),
+    /// Explicit fact-list closure: plain `[entity attribute value]` triples
+    /// (per-fact valid-time maps are rejected — windows are discovered, not
+    /// supplied).
+    Facts(Vec<Pattern>),
+}
+
+/// Specification of a bulk valid-time closure (`(forget ...)`).
+///
+/// Semantic forgetting: every valid-time window of the matched EAV triples
+/// that contains the closure time `T` is truncated to end at `T`, in one
+/// atomic transaction. History is fully preserved — `:as-of` before the
+/// closure still shows the open windows, and re-asserting later restores
+/// the fact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForgetSpec {
+    /// Where the EAV triples to close come from.
+    pub source: ForgetSource,
+    /// Closure time `T` in millis since epoch. `None` = transaction time at
+    /// execution.
+    pub valid_to: Option<i64>,
+}
+
 /// A Datalog command (top-level form)
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatalogCommand {
@@ -751,6 +780,8 @@ pub enum DatalogCommand {
     Transact(Transaction),
     /// Retract facts
     Retract(Transaction),
+    /// Bulk valid-time closure (semantic forget)
+    Forget(ForgetSpec),
 }
 
 #[cfg(test)]

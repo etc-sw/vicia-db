@@ -807,6 +807,23 @@ impl FactStorage {
         Ok(facts)
     }
 
+    /// Get every fact record (assertions and retractions, all valid-time
+    /// windows) for one exact EAV triple. Index-driven via the entity scan;
+    /// used by `(forget ...)` to discover the windows to close.
+    pub(crate) fn facts_for_triple(
+        &self,
+        entity_id: &EntityId,
+        attribute: &Attribute,
+        value: &Value,
+    ) -> Result<Vec<Fact>> {
+        let value_bytes = encode_value(value);
+        Ok(self
+            .get_facts_by_entity(entity_id)?
+            .into_iter()
+            .filter(|f| &f.attribute == attribute && encode_value(&f.value) == value_bytes)
+            .collect())
+    }
+
     /// Get all facts for a specific attribute (index-driven).
     pub(crate) fn get_facts_by_attribute(&self, attribute: &Attribute) -> Result<Vec<Fact>> {
         use crate::storage::index::AevtKey;

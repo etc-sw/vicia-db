@@ -39,9 +39,13 @@
 //! Full gate run:
 //! `cargo test --release --test kill9_durability_test -- --ignored --nocapture`
 //!
-//! A8 extension point: add new write-path ops as one arm in
-//! `gen_stream_op`'s weight roll plus one `OpKind` variant plus one model
-//! rule in `verify_cycle`.
+//! A8: the op mix includes `forget` (bulk valid-time closure) targeting a
+//! previously acknowledged seq. The model tracks closed seqs; the export
+//! audit verifies every closure as a scoped-retract + truncated-re-assert
+//! pair set under a single tx_count (crash atomicity of the forget path),
+//! and excludes closed seqs from query targets. Future write-path ops follow
+//! the same recipe: one arm in `gen_stream_op`'s weight roll, one `OpKind`
+//! variant, one model rule in `verify_cycle`.
 
 #![cfg(all(unix, not(target_arch = "wasm32")))]
 
@@ -166,8 +170,18 @@ impl KillMode {
 }
 
 enum OpKind {
-    Transact { seq: u64, fact_count: u8 },
-    Query { target: u64 },
+    Transact {
+        seq: u64,
+        fact_count: u8,
+    },
+    Query {
+        target: u64,
+    },
+    /// A8 bulk valid-time closure of one previously acknowledged seq's entity.
+    Forget {
+        seq: u64,
+        fact_count: u8,
+    },
     Checkpoint,
     Status,
     Maintenance,
@@ -210,16 +224,38 @@ fn query_line(target: u64, id: usize) -> String {
     )
 }
 
+/// Close every fact of one seq's entity at the forget transaction time
+/// (query-driven form — the A8 primitive under test).
+fn forget_line(seq: u64, id: usize) -> String {
+    format!(
+        "{{\"op\":\"execute\",\"datalog\":\"(forget [:find ?e ?a ?v :where [?e :h/seq {seq}] [?e ?a ?v]])\",\"id\":{id}}}"
+    )
+}
+
 fn bare_op_line(op: &str, id: usize) -> String {
     format!("{{\"op\":\"{op}\",\"id\":{id}}}")
 }
 
-fn random_expected_seq(lineage: &Lineage, rng: &mut SplitMix64) -> Option<u64> {
-    if lineage.expected.is_empty() {
+/// Pick a random durable seq whose windows are still open: not closed in a
+/// previous cycle and not targeted by an earlier forget in this pipelined
+/// stream. Queries assert `rows == 1` and forgets assert `forgotten ==
+/// fact_count`, so both must draw from this set.
+fn random_open_seq(
+    lineage: &Lineage,
+    stream_closed: &BTreeMap<u64, u8>,
+    rng: &mut SplitMix64,
+) -> Option<(u64, u8)> {
+    let candidates: Vec<(u64, u8)> = lineage
+        .expected
+        .iter()
+        .filter(|(seq, _)| !lineage.closed.contains_key(seq) && !stream_closed.contains_key(seq))
+        .map(|(&seq, &fc)| (seq, fc))
+        .collect();
+    if candidates.is_empty() {
         return None;
     }
-    let n = rng.below(lineage.expected.len() as u64) as usize;
-    lineage.expected.keys().nth(n).copied()
+    let n = rng.below(candidates.len() as u64) as usize;
+    candidates.get(n).copied()
 }
 
 fn gen_stream_op(
@@ -228,29 +264,67 @@ fn gen_stream_op(
     cycle: u32,
     next_seq: &mut u64,
     index: usize,
+    stream_closed: &mut BTreeMap<u64, u8>,
 ) -> Op {
     let roll = rng.below(100);
-    // Weight table — the A8 extension point.
-    if roll < 70 {
+    let fallback_transact = |next_seq: &mut u64| {
         let seq = bump(next_seq);
-        Op { index, kind: OpKind::Transact { seq, fact_count: 1 }, line: transact_line(seq, cycle, 0, 1, index) }
-    } else if roll < 85 {
+        Op {
+            index,
+            kind: OpKind::Transact { seq, fact_count: 1 },
+            line: transact_line(seq, cycle, 0, 1, index),
+        }
+    };
+    // Weight table — A8 op mix: transact 65/15, query 8, forget 5,
+    // checkpoint 4, status 2, maintenance 1.
+    if roll < 65 {
+        fallback_transact(next_seq)
+    } else if roll < 80 {
         let seq = bump(next_seq);
-        Op { index, kind: OpKind::Transact { seq, fact_count: 3 }, line: transact_line(seq, cycle, 0, 3, index) }
+        Op {
+            index,
+            kind: OpKind::Transact { seq, fact_count: 3 },
+            line: transact_line(seq, cycle, 0, 3, index),
+        }
+    } else if roll < 88 {
+        match random_open_seq(lineage, stream_closed, rng) {
+            Some((target, _)) => Op {
+                index,
+                kind: OpKind::Query { target },
+                line: query_line(target, index),
+            },
+            None => fallback_transact(next_seq),
+        }
     } else if roll < 93 {
-        match random_expected_seq(lineage, rng) {
-            Some(target) => Op { index, kind: OpKind::Query { target }, line: query_line(target, index) },
-            None => {
-                let seq = bump(next_seq);
-                Op { index, kind: OpKind::Transact { seq, fact_count: 1 }, line: transact_line(seq, cycle, 0, 1, index) }
+        match random_open_seq(lineage, stream_closed, rng) {
+            Some((seq, fact_count)) => {
+                stream_closed.insert(seq, fact_count);
+                Op {
+                    index,
+                    kind: OpKind::Forget { seq, fact_count },
+                    line: forget_line(seq, index),
+                }
             }
+            None => fallback_transact(next_seq),
         }
     } else if roll < 97 {
-        Op { index, kind: OpKind::Checkpoint, line: bare_op_line("checkpoint", index) }
+        Op {
+            index,
+            kind: OpKind::Checkpoint,
+            line: bare_op_line("checkpoint", index),
+        }
     } else if roll < 99 {
-        Op { index, kind: OpKind::Status, line: bare_op_line("status", index) }
+        Op {
+            index,
+            kind: OpKind::Status,
+            line: bare_op_line("status", index),
+        }
     } else {
-        Op { index, kind: OpKind::Maintenance, line: bare_op_line("maintenance", index) }
+        Op {
+            index,
+            kind: OpKind::Maintenance,
+            line: bare_op_line("maintenance", index),
+        }
     }
 }
 
@@ -271,12 +345,17 @@ fn generate_workload(
     match mode {
         KillMode::RandomInstant => {
             let len = rng.range(cfg.stream_len.0, cfg.stream_len.1);
+            let mut stream_closed: BTreeMap<u64, u8> = BTreeMap::new();
             let ops: Vec<Op> = (0..len as usize)
-                .map(|i| gen_stream_op(lineage, rng, cycle, next_seq, i))
+                .map(|i| gen_stream_op(lineage, rng, cycle, next_seq, i, &mut stream_closed))
                 .collect();
             let est_micros = (lineage.per_op_est.as_micros() as u64).saturating_mul(len);
             let delay = Duration::from_micros(rng.below((est_micros * 9 / 10).max(1)));
-            Workload { ops, kill: KillPlan::AfterDelay(delay), mode }
+            Workload {
+                ops,
+                kill: KillPlan::AfterDelay(delay),
+                mode,
+            }
         }
         KillMode::MidCheckpoint | KillMode::MidMaintenance => {
             let burst = rng.range(cfg.burst_len.0, cfg.burst_len.1) as usize;
@@ -284,7 +363,11 @@ fn generate_workload(
                 .map(|i| {
                     let fact_count = if rng.below(100) < 80 { 1 } else { 3 };
                     let seq = bump(next_seq);
-                    Op { index: i, kind: OpKind::Transact { seq, fact_count }, line: transact_line(seq, cycle, 1, fact_count, i) }
+                    Op {
+                        index: i,
+                        kind: OpKind::Transact { seq, fact_count },
+                        line: transact_line(seq, cycle, 1, fact_count, i),
+                    }
                 })
                 .collect();
             let (final_op, final_kind) = if mode == KillMode::MidCheckpoint {
@@ -292,10 +375,21 @@ fn generate_workload(
             } else {
                 ("maintenance", OpKind::Maintenance)
             };
-            ops.push(Op { index: burst, kind: final_kind, line: bare_op_line(final_op, burst) });
+            ops.push(Op {
+                index: burst,
+                kind: final_kind,
+                line: bare_op_line(final_op, burst),
+            });
             let max_delay = (lineage.ckpt_est.as_micros() as u64 * 5 / 4).max(1);
             let delay = Duration::from_micros(rng.below(max_delay));
-            Workload { ops, kill: KillPlan::AfterResponses { count: burst, delay }, mode }
+            Workload {
+                ops,
+                kill: KillPlan::AfterResponses {
+                    count: burst,
+                    delay,
+                },
+                mode,
+            }
         }
     }
 }
@@ -318,7 +412,9 @@ fn sync_round_trip(stdin: &mut ChildStdin, stdout: &mut BufReader<ChildStdout>, 
     writeln!(stdin, "{req}").expect("write calibration request");
     stdin.flush().expect("flush calibration request");
     let mut line = String::new();
-    stdout.read_line(&mut line).expect("read calibration response");
+    stdout
+        .read_line(&mut line)
+        .expect("read calibration response");
     serde_json::from_str(line.trim()).expect("calibration response must be valid JSON")
 }
 
@@ -455,7 +551,12 @@ fn run_cycle(db_path: &Path, workload: &Workload, deadline: Duration) -> RawCycl
         .expect("reader thread done")
         .into_inner()
         .unwrap();
-    RawCycle { responses, signal: status.signal(), stderr: stderr_text, deadline_hit }
+    RawCycle {
+        responses,
+        signal: status.signal(),
+        stderr: stderr_text,
+        deadline_hit,
+    }
 }
 
 // ─── Analysis: responses → acknowledged set ──────────────────────────────────
@@ -465,6 +566,12 @@ struct CycleOutcome {
     acked: Vec<(u64, u8)>,
     /// Transactions without a complete ack: may survive (all-or-nothing).
     maybe: Vec<(u64, u8)>,
+    /// Forgets with a complete `ok:true` forgotten frame: the closure must
+    /// survive (seq → fact_count of the closed entity).
+    acked_forgets: Vec<(u64, u8)>,
+    /// Forgets without a complete ack: the closure may survive, all pair
+    /// records or none (single WAL entry).
+    maybe_forgets: Vec<(u64, u8)>,
     /// Kill confirmed to have landed in the trailing checkpoint/maintenance
     /// gap (every burst write acked, final op unanswered). Upper-bound
     /// approximation: the request may still have been unread.
@@ -474,8 +581,9 @@ struct CycleOutcome {
 fn analyze(workload: &Workload, raw: &RawCycle) -> Result<CycleOutcome, String> {
     let mut by_id: HashMap<usize, JVal> = HashMap::new();
     for line in &raw.responses {
-        let v: JVal = serde_json::from_str(line.trim())
-            .map_err(|_| "complete response line is not valid JSON (framing corruption)".to_string())?;
+        let v: JVal = serde_json::from_str(line.trim()).map_err(|_| {
+            "complete response line is not valid JSON (framing corruption)".to_string()
+        })?;
         let id = v
             .get("id")
             .and_then(|x| x.as_u64())
@@ -485,48 +593,96 @@ fn analyze(workload: &Workload, raw: &RawCycle) -> Result<CycleOutcome, String> 
 
     let mut acked = Vec::new();
     let mut maybe = Vec::new();
+    let mut acked_forgets = Vec::new();
+    let mut maybe_forgets = Vec::new();
     for op in &workload.ops {
         match by_id.get(&op.index) {
             Some(resp) => {
                 if resp["ok"] != JVal::Bool(true) {
                     let kind = resp["error"]["kind"].as_str().unwrap_or("?");
                     let msg = resp["error"]["message"].as_str().unwrap_or("?");
-                    return Err(format!("child rejected op {}: kind={kind} message={msg}", op.index));
+                    return Err(format!(
+                        "child rejected op {}: kind={kind} message={msg}",
+                        op.index
+                    ));
                 }
                 match &op.kind {
                     OpKind::Transact { seq, fact_count } => {
                         if resp["result"]["type"] != "transacted" {
-                            return Err(format!("transact op {} answered with a non-transacted frame", op.index));
+                            return Err(format!(
+                                "transact op {} answered with a non-transacted frame",
+                                op.index
+                            ));
                         }
                         acked.push((*seq, *fact_count));
                     }
                     OpKind::Query { target } => {
-                        let rows = resp["result"]["results"].as_array().map(|a| a.len()).unwrap_or(0);
+                        let rows = resp["result"]["results"]
+                            .as_array()
+                            .map(|a| a.len())
+                            .unwrap_or(0);
                         if rows != 1 {
-                            return Err(format!("query for durable seq {target} returned {rows} rows"));
+                            return Err(format!(
+                                "query for durable seq {target} returned {rows} rows"
+                            ));
                         }
+                    }
+                    OpKind::Forget { seq, fact_count } => {
+                        if resp["result"]["type"] != "forgotten" {
+                            return Err(format!(
+                                "forget op {} answered with a non-forgotten frame",
+                                op.index
+                            ));
+                        }
+                        // The target is durable with all windows open, so the
+                        // closure must cover exactly its fact_count triples.
+                        // (A wall-clock step backwards between the transact
+                        // and the forget could in principle void the match;
+                        // treated as a failure so it surfaces loudly.)
+                        let forgotten = resp["result"]["forgotten"].as_u64().unwrap_or(0);
+                        if forgotten != u64::from(*fact_count) {
+                            return Err(format!(
+                                "forget of seq {seq} closed {forgotten} triples, expected {fact_count}"
+                            ));
+                        }
+                        acked_forgets.push((*seq, *fact_count));
                     }
                     OpKind::Checkpoint | OpKind::Status | OpKind::Maintenance => {}
                 }
             }
-            None => {
-                if let OpKind::Transact { seq, fact_count } = &op.kind {
+            None => match &op.kind {
+                OpKind::Transact { seq, fact_count } => {
                     maybe.push((*seq, *fact_count));
                 }
-            }
+                OpKind::Forget { seq, fact_count } => {
+                    maybe_forgets.push((*seq, *fact_count));
+                }
+                _ => {}
+            },
         }
     }
 
-    let mid_ckpt = matches!(workload.mode, KillMode::MidCheckpoint | KillMode::MidMaintenance)
-        && !raw.deadline_hit
-        && workload.ops.last().is_some_and(|last| !by_id.contains_key(&last.index))
+    let mid_ckpt = matches!(
+        workload.mode,
+        KillMode::MidCheckpoint | KillMode::MidMaintenance
+    ) && !raw.deadline_hit
+        && workload
+            .ops
+            .last()
+            .is_some_and(|last| !by_id.contains_key(&last.index))
         && workload
             .ops
             .iter()
             .filter(|o| matches!(o.kind, OpKind::Transact { .. }))
             .all(|o| by_id.contains_key(&o.index));
 
-    Ok(CycleOutcome { acked, maybe, mid_ckpt })
+    Ok(CycleOutcome {
+        acked,
+        maybe,
+        acked_forgets,
+        maybe_forgets,
+        mid_ckpt,
+    })
 }
 
 // ─── Lineage: one .graph file across many kill cycles ────────────────────────
@@ -536,6 +692,9 @@ struct Lineage {
     db_path: PathBuf,
     /// seq → fact_count for every transaction that must be present.
     expected: BTreeMap<u64, u8>,
+    /// seq → fact_count for every acknowledged forget: the closure pair
+    /// records must be present under a single tx_count.
+    closed: BTreeMap<u64, u8>,
     cycles_on_file: u32,
     last_export_len: usize,
     ckpt_est: Duration,
@@ -550,6 +709,7 @@ impl Lineage {
             dir: Some(dir),
             db_path,
             expected: BTreeMap::new(),
+            closed: BTreeMap::new(),
             cycles_on_file: 0,
             last_export_len: 0,
             ckpt_est: Duration::from_millis(5),
@@ -592,9 +752,55 @@ impl Lineage {
 
 type SeqLocations = BTreeMap<u64, Vec<(EntityId, u64)>>;
 
+/// Closure records observed for one entity: tx_counts of scoped retracts and
+/// truncated re-asserts. A well-formed forget contributes `fact_count`
+/// retracts plus at most `fact_count` re-asserts (a window that began on the
+/// closure millisecond degrades to retract-only), all under ONE tx_count.
+#[derive(Default)]
+struct ClosureRecords {
+    retracts: Vec<u64>,
+    reasserts: Vec<u64>,
+}
+
+fn verify_closure_shape(seq: u64, fc: u8, orig_tx: u64, cl: &ClosureRecords) -> Result<(), String> {
+    if cl.retracts.len() != fc as usize {
+        return Err(format!(
+            "closure of seq={seq} has {} retracts, expected {fc} (partial closure applied)",
+            cl.retracts.len()
+        ));
+    }
+    if cl.reasserts.len() > fc as usize {
+        return Err(format!(
+            "closure of seq={seq} has {} re-asserts for {fc} triples",
+            cl.reasserts.len()
+        ));
+    }
+    let mut txs: Vec<u64> = cl
+        .retracts
+        .iter()
+        .chain(cl.reasserts.iter())
+        .copied()
+        .collect();
+    txs.sort_unstable();
+    txs.dedup();
+    if txs.len() != 1 {
+        return Err(format!(
+            "closure of seq={seq} split across {} tx_counts (atomicity violation)",
+            txs.len()
+        ));
+    }
+    if txs.first().copied().unwrap_or(0) <= orig_tx {
+        return Err(format!(
+            "closure of seq={seq} has tx_count not after the original assert"
+        ));
+    }
+    Ok(())
+}
+
 struct VerifyStats {
     export_len: usize,
     promoted: u32,
+    promoted_forgets: u32,
 }
 
 fn verify_cycle(
@@ -605,6 +811,7 @@ fn verify_cycle(
     cfg: &HarnessConfig,
 ) -> Result<VerifyStats, String> {
     lineage.expected.extend(outcome.acked.iter().copied());
+    lineage.closed.extend(outcome.acked_forgets.iter().copied());
 
     // Observer open: wal_checkpoint_threshold = usize::MAX is load-bearing —
     // without the sentinel, Drop would checkpoint and fold the WAL after
@@ -631,21 +838,57 @@ fn verify_cycle(
         .export_fact_log()
         .map_err(|e| format!("GATE unopenable file (export failed): {e}"))?;
 
+    // Classify every export record. Harness facts are asserted with
+    // open-ended windows; a forget contributes a scoped retract
+    // (asserted=false) plus, unless the window began on the closure
+    // millisecond, a truncated re-assert (asserted=true, finite valid_to).
+    // `seq_locs`/`groups` track original asserts only.
     let mut seq_locs: SeqLocations = BTreeMap::new();
     let mut groups: HashMap<EntityId, Vec<(&str, u64)>> = HashMap::new();
+    let mut closures: HashMap<EntityId, ClosureRecords> = HashMap::new();
     let mut max_tx = 0u64;
     for r in &export {
-        if !r.asserted {
-            return Err(format!("phantom retraction record at tx_count {}", r.tx_count));
-        }
         max_tx = max_tx.max(r.tx_count);
+        let finite_window = match r.valid_time {
+            minigraf::FactValidTime::Window { valid_to, .. } => valid_to != i64::MAX,
+            minigraf::FactValidTime::AllValidTime => {
+                return Err(format!(
+                    "legacy unscoped retraction at tx_count {} (harness never emits these)",
+                    r.tx_count
+                ));
+            }
+        };
+        if !r.asserted {
+            closures
+                .entry(r.entity)
+                .or_default()
+                .retracts
+                .push(r.tx_count);
+            continue;
+        }
+        if finite_window {
+            closures
+                .entry(r.entity)
+                .or_default()
+                .reasserts
+                .push(r.tx_count);
+            continue;
+        }
         let attr = r.attribute.as_str();
         if attr == ATTR_SEQ {
             let seq = match &r.value {
                 Value::Integer(i) if *i >= 0 => *i as u64,
-                _ => return Err(format!("non-integer :h/seq value at tx_count {}", r.tx_count)),
+                _ => {
+                    return Err(format!(
+                        "non-integer :h/seq value at tx_count {}",
+                        r.tx_count
+                    ));
+                }
             };
-            seq_locs.entry(seq).or_default().push((r.entity, r.tx_count));
+            seq_locs
+                .entry(seq)
+                .or_default()
+                .push((r.entity, r.tx_count));
         }
         groups.entry(r.entity).or_default().push((attr, r.tx_count));
     }
@@ -656,7 +899,10 @@ fn verify_cycle(
         match recs.len() {
             1 => {
                 if recs[0].0 != ATTR_SEQ {
-                    return Err("orphan sibling fact without :h/seq (partial transaction applied)".to_string());
+                    return Err(
+                        "orphan sibling fact without :h/seq (partial transaction applied)"
+                            .to_string(),
+                    );
                 }
             }
             3 => {
@@ -667,7 +913,9 @@ fn verify_cycle(
                 let mut attrs: Vec<&str> = recs.iter().map(|(a, _)| *a).collect();
                 attrs.sort_unstable();
                 if attrs != [ATTR_CYC, ATTR_MODE, ATTR_SEQ] {
-                    return Err("multi-fact transaction with unexpected attribute shape".to_string());
+                    return Err(
+                        "multi-fact transaction with unexpected attribute shape".to_string()
+                    );
                 }
             }
             n => return Err(format!("entity group with {n} records (expected 1 or 3)")),
@@ -693,6 +941,24 @@ fn verify_cycle(
         }
     }
 
+    // The A8 gate: every acknowledged forget present as a full closure —
+    // one scoped retract per triple, all records under a single tx_count
+    // strictly after the original assert.
+    for (&seq, &fc) in &lineage.closed {
+        let (entity, orig_tx) = match seq_locs.get(&seq) {
+            Some(v) if v.len() == 1 => (v[0].0, v[0].1),
+            _ => {
+                return Err(format!(
+                    "GATE closed seq={seq} lacks a unique original assert"
+                ));
+            }
+        };
+        let Some(cl) = closures.get(&entity) else {
+            return Err(format!("GATE lost acknowledged forget seq={seq}"));
+        };
+        verify_closure_shape(seq, fc, orig_tx, cl)?;
+    }
+
     // In-flight transactions: all-or-nothing. Present ones were WAL-fsynced
     // before the kill; the dead child's WAL is immutable, so present-now
     // means present-forever — promote them into the expected model.
@@ -713,10 +979,49 @@ fn verify_cycle(
         }
     }
 
+    // In-flight forgets: same all-or-nothing argument — the closure is one
+    // WAL entry, so either every pair record is present or none are.
+    let mut promoted_forgets = 0u32;
+    for &(seq, fc) in &outcome.maybe_forgets {
+        let (entity, orig_tx) = match seq_locs.get(&seq) {
+            Some(v) if v.len() == 1 => (v[0].0, v[0].1),
+            _ => {
+                return Err(format!(
+                    "in-flight forget target seq={seq} lost its original assert"
+                ));
+            }
+        };
+        if let Some(cl) = closures.get(&entity) {
+            verify_closure_shape(seq, fc, orig_tx, cl)?;
+            lineage.closed.insert(seq, fc);
+            promoted_forgets += 1;
+        }
+    }
+
     // No phantoms: everything present was either acknowledged or in-flight.
     for &seq in seq_locs.keys() {
         if !lineage.expected.contains_key(&seq) {
             return Err(format!("phantom seq={seq} present but never accounted for"));
+        }
+    }
+
+    // No phantom closures: every entity carrying closure records maps to a
+    // seq in the (now fully updated) closed model.
+    let entity_seq: HashMap<EntityId, u64> = seq_locs
+        .iter()
+        .flat_map(|(&seq, locs)| locs.iter().map(move |(e, _)| (*e, seq)))
+        .collect();
+    for entity in closures.keys() {
+        match entity_seq.get(entity) {
+            Some(seq) if lineage.closed.contains_key(seq) => {}
+            Some(seq) => {
+                return Err(format!(
+                    "phantom closure records for seq={seq} never forgotten"
+                ));
+            }
+            None => {
+                return Err("closure records for an entity with no original assert".to_string());
+            }
         }
     }
 
@@ -735,19 +1040,49 @@ fn verify_cycle(
         Ok(_) => return Err("probe transact returned an unexpected result kind".to_string()),
         Err(e) => return Err(format!("post-recovery write failed: {e}")),
     }
-    match db.execute(&format!("(query [:find ?v :where [:k{probe_seq} :h/seq ?v]])")) {
+    match db.execute(&format!(
+        "(query [:find ?v :where [:k{probe_seq} :h/seq ?v]])"
+    )) {
         Ok(QueryResult::QueryResults { results, .. }) if results.len() == 1 => {}
         Ok(_) => return Err("probe query did not return exactly one row".to_string()),
         Err(e) => return Err(format!("post-recovery query failed: {e}")),
     }
     lineage.expected.insert(probe_seq, 1);
 
+    // Post-recovery forget probe: the closure write path must work on the
+    // recovered file, and a current-time query must show the closed window.
+    match db.execute(&format!(
+        "(forget [:find ?e ?a ?v :where [?e :h/seq {probe_seq}] [?e ?a ?v]])"
+    )) {
+        Ok(QueryResult::Forgotten {
+            tx_id: Some(_),
+            count: 1,
+        }) => {}
+        Ok(QueryResult::Forgotten { .. }) => {
+            return Err("post-recovery forget did not close exactly one triple".to_string());
+        }
+        Ok(_) => return Err("probe forget returned an unexpected result kind".to_string()),
+        Err(e) => return Err(format!("post-recovery forget failed: {e}")),
+    }
+    match db.execute(&format!(
+        "(query [:find ?v :where [:k{probe_seq} :h/seq ?v]])"
+    )) {
+        Ok(QueryResult::QueryResults { results, .. }) if results.is_empty() => {}
+        Ok(_) => return Err("closed probe seq still visible at the current time".to_string()),
+        Err(e) => return Err(format!("post-forget query failed: {e}")),
+    }
+    lineage.closed.insert(probe_seq, 1);
+
     if (cycle + 1) % cfg.fold_every == 0 {
         db.checkpoint()
             .map_err(|e| format!("post-recovery checkpoint failed: {e}"))?;
     }
 
-    Ok(VerifyStats { export_len: export.len(), promoted })
+    Ok(VerifyStats {
+        export_len: export.len(),
+        promoted,
+        promoted_forgets,
+    })
     // db drops here, releasing the parent's file lock before the next spawn.
 }
 
@@ -756,7 +1091,9 @@ fn verify_cycle(
 #[derive(Default)]
 struct Telemetry {
     acked_total: u64,
+    forgets_acked: u64,
     promoted: u64,
+    promoted_forgets: u64,
     mid_ckpt_confirmed: u32,
     rotations: u32,
     deadline_hits: u32,
@@ -825,6 +1162,7 @@ fn run_harness(cfg: HarnessConfig) {
             Err(e) => fail(&mut lineage, &cfg, cycle, mode, &e),
         };
         t.acked_total += outcome.acked.len() as u64;
+        t.forgets_acked += outcome.acked_forgets.len() as u64;
         if outcome.mid_ckpt {
             t.mid_ckpt_confirmed += 1;
         }
@@ -833,6 +1171,7 @@ fn run_harness(cfg: HarnessConfig) {
             Ok(stats) => {
                 lineage.last_export_len = stats.export_len;
                 t.promoted += stats.promoted as u64;
+                t.promoted_forgets += stats.promoted_forgets as u64;
             }
             Err(e) => fail(&mut lineage, &cfg, cycle, mode, &e),
         }
@@ -840,10 +1179,12 @@ fn run_harness(cfg: HarnessConfig) {
     }
 
     eprintln!(
-        "A7 summary: cycles={} acked={} promoted={} mid_checkpoint_confirmed={} rotations={} deadline_hits={} wall={:.1}s",
+        "A7 summary: cycles={} acked={} forgets_acked={} promoted={} promoted_forgets={} mid_checkpoint_confirmed={} rotations={} deadline_hits={} wall={:.1}s",
         cfg.cycles,
         t.acked_total,
+        t.forgets_acked,
         t.promoted,
+        t.promoted_forgets,
         t.mid_ckpt_confirmed,
         t.rotations,
         t.deadline_hits,

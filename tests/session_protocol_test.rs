@@ -59,6 +59,33 @@ fn transact_reports_tx_and_durability() {
 }
 
 #[test]
+fn forget_reports_count_tx_and_durability() {
+    let responses = run_session(concat!(
+        "{\"op\":\"execute\",\"datalog\":\"(transact [[:a :name \\\"x\\\"]])\"}\n",
+        "{\"op\":\"execute\",\"datalog\":\"(forget [[:a :name \\\"x\\\"]])\"}\n",
+        "{\"op\":\"execute\",\"datalog\":\"(forget [[:a :name \\\"x\\\"]])\"}\n",
+    ));
+    let r = &responses[1];
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["result"]["type"], "forgotten");
+    assert_eq!(r["result"]["forgotten"], 1);
+    assert_eq!(r["result"]["tx_count"], 2);
+    assert_eq!(r["result"]["durability"], "applied");
+    assert!(r["result"]["tx_id"].is_u64(), "tx_id must be a number");
+
+    // Idempotent re-forget: nothing matched, no tx_count consumed, null tx_id.
+    let r2 = &responses[2];
+    assert_eq!(r2["ok"], true);
+    assert_eq!(r2["result"]["type"], "forgotten");
+    assert_eq!(r2["result"]["forgotten"], 0);
+    assert_eq!(r2["result"]["tx_count"], 2);
+    assert!(
+        r2["result"]["tx_id"].is_null(),
+        "no-op forget has null tx_id"
+    );
+}
+
+#[test]
 fn query_uses_tagged_value_encoding() {
     let responses = run_session(concat!(
         "{\"op\":\"execute\",\"datalog\":\"(transact [[:a :ref #uuid \\\"00000000-0000-0000-0000-000000000001\\\"] [:a :state :status/active] [:a :score 1.5] [:a :n 7]])\"}\n",
@@ -70,7 +97,8 @@ fn query_uses_tagged_value_encoding() {
     assert_eq!(responses.len(), 5, "expected 5 responses");
     let row = |i: usize| responses[i]["result"]["results"][0][0].clone();
     assert_eq!(
-        row(1)["$ref"], "00000000-0000-0000-0000-000000000001",
+        row(1)["$ref"],
+        "00000000-0000-0000-0000-000000000001",
         "Ref must be tagged"
     );
     assert_eq!(row(2)["$kw"], ":status/active", "Keyword must be tagged");
@@ -91,7 +119,9 @@ fn query_response_carries_variables() {
 
 #[test]
 fn id_is_echoed_verbatim() {
-    let responses = run_session("{\"op\":\"ping\",\"id\":42}\n{\"op\":\"ping\",\"id\":\"abc\"}\n{\"op\":\"ping\"}\n");
+    let responses = run_session(
+        "{\"op\":\"ping\",\"id\":42}\n{\"op\":\"ping\",\"id\":\"abc\"}\n{\"op\":\"ping\"}\n",
+    );
     assert_eq!(responses[0]["id"], 42);
     assert_eq!(responses[1]["id"], "abc");
     assert!(responses[2].get("id").is_none(), "no id when not sent");
@@ -168,7 +198,10 @@ fn checkpoint_then_status_reports_outcome() {
     assert_eq!(responses[1]["result"]["durability"], "published");
     let s = &responses[2]["result"];
     assert_eq!(s["last_checkpoint_outcome"], "published");
-    assert!(s["last_checkpoint_unix_ms"].is_u64(), "checkpoint time recorded");
+    assert!(
+        s["last_checkpoint_unix_ms"].is_u64(),
+        "checkpoint time recorded"
+    );
 }
 
 #[test]
@@ -199,7 +232,11 @@ fn export_since_returns_tail_records_with_tagged_values() {
     assert_eq!(result["head_tx_count"], 3);
 
     let records = result["records"].as_array().expect("records array");
-    assert_eq!(records.len(), 2, "tail past tx 1 has keyword tx + retraction");
+    assert_eq!(
+        records.len(),
+        2,
+        "tail past tx 1 has keyword tx + retraction"
+    );
 
     let keyword_record = &records[0];
     assert_eq!(keyword_record["tx_count"], 2);
@@ -286,7 +323,11 @@ mod child_process {
                 .expect("spawn minigraf --session");
             let stdin = child.stdin.take().unwrap();
             let stdout = BufReader::new(child.stdout.take().unwrap());
-            Self { child, stdin, stdout }
+            Self {
+                child,
+                stdin,
+                stdout,
+            }
         }
 
         fn round_trip(&mut self, request: &str) -> JVal {
@@ -360,7 +401,10 @@ mod child_process {
         // Fresh file, nothing committed yet: everything is in memory, so the
         // exact total is still knowable.
         assert_eq!(status["result"]["fact_count"], 1);
-        assert!(status["result"]["wal_bytes"].is_u64(), "WAL exists before checkpoint");
+        assert!(
+            status["result"]["wal_bytes"].is_u64(),
+            "WAL exists before checkpoint"
+        );
         assert!(status["result"]["delta_segments"].is_u64());
         let checkpoint = session.round_trip("{\"op\":\"checkpoint\"}");
         assert_eq!(checkpoint["result"]["durability"], "published");

@@ -192,6 +192,14 @@ impl<'a> Repl<'a> {
             DResult::Retracted(tx_id) => {
                 println!("✓ Retracted successfully (tx: {tx_id})");
             }
+            DResult::Forgotten { tx_id, count } => match tx_id {
+                Some(tx_id) => {
+                    println!("✓ Forgot {count} triple(s) (tx: {tx_id})");
+                }
+                None => {
+                    println!("✓ Nothing to forget (no matching valid-time windows)");
+                }
+            },
             DResult::QueryResults { vars, results } => {
                 if results.is_empty() {
                     println!("No results found.");

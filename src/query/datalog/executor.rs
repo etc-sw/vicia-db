@@ -74,6 +74,7 @@ fn collect_all_patterns(clauses: &[WhereClause]) -> Vec<Pattern> {
 ///     }
 ///     QueryResult::Transacted(tx_id) => println!("tx {}", tx_id),
 ///     QueryResult::Retracted(tx_id) => println!("retracted tx {}", tx_id),
+///     QueryResult::Forgotten { count, .. } => println!("closed {} triples", count),
 ///     QueryResult::Ok => {}
 /// }
 /// ```
@@ -87,6 +88,16 @@ pub enum QueryResult {
     /// (Unix milliseconds). Use [`crate::db::Minigraf::current_tx_count`] to retrieve
     /// the monotonic counter (`:as-of N` value) after a write.
     Retracted(TxId),
+    /// Bulk valid-time closure (`(forget ...)`) completed successfully.
+    Forgotten {
+        /// Transaction ID (Unix milliseconds) of the closure transaction.
+        /// `None` when `count` is 0 — nothing matched, no transaction was
+        /// written (no `tx_count` consumed, no WAL entry).
+        tx_id: Option<TxId>,
+        /// Number of distinct EAV triples that had at least one valid-time
+        /// window closed.
+        count: usize,
+    },
     /// Query results: list of variable bindings
     QueryResults {
         /// The variable names in the order they appear in the `:find` clause.
@@ -225,6 +236,11 @@ impl DatalogExecutor {
             DatalogCommand::Retract(tx) => self.execute_retract(tx),
             DatalogCommand::Query(query) => self.execute_query(query),
             DatalogCommand::Rule(rule) => self.execute_rule(rule),
+            // Forget needs the WAL-first write path and the write lock, which
+            // the bare executor does not own.
+            DatalogCommand::Forget(_) => Err(anyhow::anyhow!(
+                "(forget ...) must run via Minigraf::execute"
+            )),
         }
     }
 

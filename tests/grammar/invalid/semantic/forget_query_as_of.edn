@@ -1,0 +1,1 @@
+(forget [:find ?e ?a ?v :as-of 5 :where [?e ?a ?v]])

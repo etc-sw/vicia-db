@@ -126,7 +126,8 @@ fn run_cadence(path: &Path, config: CadenceConfig) -> Result<OpSamples> {
         let started = Instant::now();
         let mut command = String::from("(transact [");
         for fact_index in 0..RECEIPT_FACTS_PER_SLICE {
-            let target = deterministic_uuid(1_000_000_000 + slice * RECEIPT_FACTS_PER_SLICE + fact_index);
+            let target =
+                deterministic_uuid(1_000_000_000 + slice * RECEIPT_FACTS_PER_SLICE + fact_index);
             command.push_str(&format!(
                 r#"[:receipt-{slice}-{fact_index} :bench/ref #uuid "{target}"]"#
             ));

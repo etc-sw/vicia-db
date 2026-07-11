@@ -337,7 +337,11 @@ fn export_fact_log_since_spans_base_delta_and_pending_layers() -> Result<()> {
     }
 
     let tail = db.export_fact_log_since(20)?;
-    assert_eq!(tail.len(), 5, "tail past the delta layer is the pending set");
+    assert_eq!(
+        tail.len(),
+        5,
+        "tail past the delta layer is the pending set"
+    );
     assert!(
         tail.iter().all(|record| record.attribute == ":seq/pending"),
         "tail past tx 20 must only hold pending-layer records"

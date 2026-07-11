@@ -27,7 +27,9 @@ use crate::query::datalog::functions::{
 };
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
-use crate::query::datalog::types::{AttributeSpec, DatalogCommand, Transaction};
+use crate::query::datalog::types::{
+    AttributeSpec, DatalogCommand, ForgetSource, ForgetSpec, Transaction,
+};
 use crate::storage::backend::MemoryBackend;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::backend::file::FileBackend;
@@ -571,13 +573,23 @@ impl Minigraf {
         // Rule registration is treated as a write because it mutates the shared RuleRegistry.
         let is_write = matches!(
             cmd,
-            DatalogCommand::Transact(_) | DatalogCommand::Retract(_) | DatalogCommand::Rule(_)
+            DatalogCommand::Transact(_)
+                | DatalogCommand::Retract(_)
+                | DatalogCommand::Rule(_)
+                | DatalogCommand::Forget(_)
         );
 
         if is_write {
             let mut ctx = self.inner.write_lock.lock().map_err(|_| {
                 anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
             })?;
+
+            // Forget evaluates its embedded query under the write lock (the
+            // matched state cannot move between query and closure), then
+            // reuses the same WAL-first batch apply as transact/retract.
+            if let DatalogCommand::Forget(spec) = &cmd {
+                return self.execute_forget_locked(&mut ctx, spec);
+            }
 
             // Handle write commands with correct WAL-first ordering for Transact/Retract:
             // 1. Materialize facts (no storage mutation yet)
@@ -657,6 +669,77 @@ impl Minigraf {
             );
             executor.execute(cmd)
         }
+    }
+
+    /// Execute a `(forget ...)` bulk valid-time closure while holding the
+    /// write lock.
+    ///
+    /// Every window of the matched EAV triples that contains the closure time
+    /// `T` is replaced, in one transaction (one `tx_count`, one WAL entry), by
+    /// a scoped retraction of the old window plus a re-assertion truncated to
+    /// end at `T`. History is preserved: `:as-of` before the closure still
+    /// shows the open windows.
+    fn execute_forget_locked(
+        &self,
+        ctx: &mut WriteContext,
+        spec: &ForgetSpec,
+    ) -> Result<QueryResult> {
+        let now = crate::graph::types::tx_id_now();
+        let closure_time = spec.valid_to.unwrap_or_else(|| now.cast_signed());
+
+        let mut executor = DatalogExecutor::new_with_rules_and_functions(
+            self.inner.fact_storage.clone(),
+            self.inner.rules.clone(),
+            self.inner.functions.clone(),
+        );
+        executor.set_limits(
+            self.inner.options.max_derived_facts,
+            self.inner.options.max_results,
+        );
+
+        let triples = Minigraf::resolve_forget_triples(spec, &executor, closure_time)?;
+        let (facts, count) =
+            Minigraf::materialize_closure(&self.inner.fact_storage, &triples, closure_time)?;
+
+        // Nothing matched: no tx_count consumed, no WAL entry — idempotent.
+        if facts.is_empty() {
+            return Ok(QueryResult::Forgotten {
+                tx_id: None,
+                count: 0,
+            });
+        }
+
+        let tx_count = self.inner.fact_storage.allocate_tx_count();
+        let tx_id = now;
+        let stamped: Vec<Fact> = facts
+            .into_iter()
+            .map(|mut f| {
+                f.tx_id = tx_id;
+                f.tx_count = tx_count;
+                f
+            })
+            .collect();
+
+        // WAL first — if this fails, FactStorage is unchanged.
+        let should_checkpoint = WriteTransaction::wal_write_stamped_batch(
+            ctx,
+            &self.inner.options,
+            tx_count,
+            &stamped,
+        )?;
+
+        for fact in &stamped {
+            let _ = self.inner.fact_storage.load_fact(fact.clone())?;
+        }
+
+        if should_checkpoint {
+            Minigraf::do_checkpoint(&self.inner.fact_storage, ctx)?;
+        }
+
+        Ok(QueryResult::Forgotten {
+            tx_id: Some(tx_id),
+            count,
+        })
     }
 
     // ── Explicit transaction ──────────────────────────────────────────────────
@@ -967,6 +1050,9 @@ impl Minigraf {
             DatalogCommand::Rule(_) => {
                 anyhow::bail!("only (query ...) commands can be prepared; got rule")
             }
+            DatalogCommand::Forget(_) => {
+                anyhow::bail!("only (query ...) commands can be prepared; got forget")
+            }
         };
 
         prepare_query(
@@ -1093,6 +1179,137 @@ impl Minigraf {
         }
 
         Ok(facts)
+    }
+
+    /// Resolve the EAV triples a `(forget ...)` names — either by running the
+    /// embedded query pinned to the closure time, or by converting the
+    /// explicit fact list. Returns deduplicated triples.
+    pub(crate) fn resolve_forget_triples(
+        spec: &ForgetSpec,
+        executor: &DatalogExecutor,
+        closure_time: i64,
+    ) -> Result<Vec<(crate::graph::types::EntityId, String, Value)>> {
+        use crate::query::datalog::matcher::{edn_to_entity_id, edn_to_value};
+        use crate::query::datalog::types::{EdnValue, ValidAt};
+        use crate::storage::index::encode_value;
+        use std::collections::HashSet;
+
+        let mut seen: HashSet<(crate::graph::types::EntityId, String, Vec<u8>)> = HashSet::new();
+        let mut triples = Vec::new();
+
+        match &spec.source {
+            ForgetSource::Query(query) => {
+                // Evaluate at the closure time: matched facts are exactly
+                // those whose valid-time windows contain T.
+                let mut query = query.clone();
+                query.valid_at = Some(ValidAt::Timestamp(closure_time));
+
+                let QueryResult::QueryResults { results, .. } =
+                    executor.execute(DatalogCommand::Query(query))?
+                else {
+                    bail!("internal error: forget query did not return query results");
+                };
+
+                for row in results {
+                    let (Some(e), Some(a), Some(v)) = (row.first(), row.get(1), row.get(2)) else {
+                        bail!("internal error: forget query row does not have 3 columns");
+                    };
+                    let Value::Ref(entity) = e else {
+                        bail!(
+                            "forget query first :find variable must bind entities \
+                             (entity position in :where), got a non-entity value"
+                        );
+                    };
+                    let Value::Keyword(attr) = a else {
+                        bail!(
+                            "forget query second :find variable must bind attributes \
+                             (attribute position in :where), got a non-keyword value"
+                        );
+                    };
+                    if seen.insert((*entity, attr.clone(), encode_value(v))) {
+                        triples.push((*entity, attr.clone(), v.clone()));
+                    }
+                }
+            }
+            ForgetSource::Facts(patterns) => {
+                for pattern in patterns {
+                    let entity = edn_to_entity_id(&pattern.entity)
+                        .map_err(|e| anyhow::anyhow!("invalid entity: {}", e))?;
+                    let attr = match &pattern.attribute {
+                        AttributeSpec::Real(EdnValue::Keyword(k)) => k.clone(),
+                        AttributeSpec::Real(_) => bail!("attribute must be a keyword"),
+                        AttributeSpec::Pseudo(_) => bail!("cannot forget a pseudo-attribute"),
+                    };
+                    let value = edn_to_value(&pattern.value)
+                        .map_err(|e| anyhow::anyhow!("invalid value: {}", e))?;
+                    if seen.insert((entity, attr.clone(), encode_value(&value))) {
+                        triples.push((entity, attr, value));
+                    }
+                }
+            }
+        }
+
+        Ok(triples)
+    }
+
+    /// Materialize the closure of every valid-time window containing
+    /// `closure_time` for the given triples, as unstamped retract + truncated
+    /// re-assert fact pairs. Returns the facts and the number of distinct
+    /// triples that had at least one window closed.
+    pub(crate) fn materialize_closure(
+        storage: &FactStorage,
+        triples: &[(crate::graph::types::EntityId, String, Value)],
+        closure_time: i64,
+    ) -> Result<(Vec<Fact>, usize)> {
+        use crate::graph::storage::net_asserted_facts;
+
+        let mut facts = Vec::new();
+        let mut closed_triples = 0usize;
+
+        for (entity, attr, value) in triples {
+            let history = storage.facts_for_triple(entity, attr, value)?;
+            let mut closed_any = false;
+            // Overlapping windows that share a valid_from would truncate to
+            // the same (valid_from, T) re-assert — emit it once.
+            let mut reasserted_from: std::collections::HashSet<i64> =
+                std::collections::HashSet::new();
+
+            for window in net_asserted_facts(history) {
+                if window.valid_from <= closure_time && closure_time < window.valid_to {
+                    facts.push(Fact::retract_with_valid_time(
+                        *entity,
+                        attr.clone(),
+                        value.clone(),
+                        0,
+                        0,
+                        window.valid_from,
+                        window.valid_to,
+                    ));
+                    // valid_from == closure_time would re-assert an empty
+                    // (T, T) window no query can match — the retraction alone
+                    // already expresses the full closure.
+                    if window.valid_from < closure_time && reasserted_from.insert(window.valid_from)
+                    {
+                        facts.push(Fact::with_valid_time(
+                            *entity,
+                            attr.clone(),
+                            value.clone(),
+                            0,
+                            0,
+                            window.valid_from,
+                            closure_time,
+                        ));
+                    }
+                    closed_any = true;
+                }
+            }
+
+            if closed_any {
+                closed_triples = closed_triples.saturating_add(1);
+            }
+        }
+
+        Ok((facts, closed_triples))
     }
 
     // ── UDF registration ─────────────────────────────────────────────────────
@@ -1250,6 +1467,13 @@ impl<'a> WriteTransaction<'a> {
             }
             DatalogCommand::Query(_) => self.execute_read_command(cmd),
             DatalogCommand::Rule(rule) => self.execute_rule_command(rule),
+            // Staged forget would compute closure windows against staged
+            // valid_from sentinels that commit() re-stamps, silently missing
+            // the exact-window retraction keys — reject rather than lose data.
+            DatalogCommand::Forget(_) => Err(anyhow::anyhow!(
+                "(forget ...) is not supported inside an explicit WriteTransaction; \
+                 use Minigraf::execute"
+            )),
         }
     }
 

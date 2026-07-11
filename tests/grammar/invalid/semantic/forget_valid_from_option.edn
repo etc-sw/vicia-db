@@ -1,0 +1,1 @@
+(forget {:valid-from "2026-01-01"} [[:a :s 1]])

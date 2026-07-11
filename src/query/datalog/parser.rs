@@ -501,6 +501,7 @@ pub fn parse_datalog_command(input: &str) -> Result<DatalogCommand, String> {
                 "query" => parse_query(rest),
                 "transact" => parse_transact(rest),
                 "retract" => parse_retract(rest),
+                "forget" => parse_forget(rest),
                 "rule" => parse_rule(rest),
                 _ => Err(format!("Unknown command: {}", command)),
             }
@@ -1107,6 +1108,103 @@ fn parse_retract(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
     Ok(DatalogCommand::Retract(parse_transaction_elements(
         elements, "Retract",
     )?))
+}
+
+fn parse_forget(elements: &[EdnValue]) -> Result<DatalogCommand, String> {
+    // Parse (forget [:find ?e ?a ?v :where ...]), (forget [[e a v] ...]),
+    // or either form with a leading {:valid-to "ts"} options map.
+    if elements.is_empty() {
+        return Err("Forget requires a query vector or a vector of facts".to_string());
+    }
+
+    // SAFETY: is_empty() check above guarantees index 0 exists
+    #[allow(clippy::indexing_slicing)]
+    let first_element = &elements[0];
+
+    let (valid_to, payload) = if first_element.is_map() {
+        let map = first_element.as_map().ok_or_else(|| {
+            "internal error: is_map() true but as_map() returned None".to_string()
+        })?;
+        let (from, to) = parse_valid_time_map(map)?;
+        if from.is_some() {
+            return Err(
+                "Forget does not accept :valid-from; only :valid-to (the closure time)".to_string(),
+            );
+        }
+        let to = to.ok_or_else(|| "Forget options map requires :valid-to".to_string())?;
+        let payload = elements.get(1).ok_or_else(|| {
+            "Forget with options requires a query or facts vector after the map".to_string()
+        })?;
+        (Some(to), payload)
+    } else {
+        (None, first_element)
+    };
+
+    let payload_vec = payload
+        .as_vector()
+        .ok_or("Forget argument must be a query vector [:find ...] or a vector of facts")?;
+
+    let is_query = matches!(
+        payload_vec.first(),
+        Some(EdnValue::Keyword(k)) if k == ":find"
+    );
+
+    let source = if is_query {
+        let DatalogCommand::Query(query) = parse_query(std::slice::from_ref(payload))? else {
+            return Err("internal error: parse_query did not return a query".to_string());
+        };
+        if query.as_of.is_some() {
+            return Err(
+                "Forget query must not use :as-of; forget operates on the current \
+                 transaction-time state"
+                    .to_string(),
+            );
+        }
+        if query.valid_at.is_some() {
+            return Err(
+                "Forget query must not use :valid-at; the query is evaluated at the \
+                 closure time"
+                    .to_string(),
+            );
+        }
+        if query.find.len() != 3
+            || !query
+                .find
+                .iter()
+                .all(|f| matches!(f, FindSpec::Variable(_)))
+        {
+            return Err(
+                "Forget query :find must be exactly three plain variables binding \
+                 entity, attribute, and value"
+                    .to_string(),
+            );
+        }
+        ForgetSource::Query(query)
+    } else {
+        let mut patterns = Vec::new();
+        for fact in payload_vec {
+            let fact_vec = fact
+                .as_vector()
+                .ok_or("Each forget fact must be a vector [entity attribute value]")?;
+            if fact_vec.len() != 3 {
+                return Err(format!(
+                    "Forget fact must have exactly 3 elements (E A V) — valid-time \
+                     windows are discovered, not supplied; got {}",
+                    fact_vec.len()
+                ));
+            }
+            // SAFETY: len == 3 check above guarantees indices 0, 1, 2 exist
+            #[allow(clippy::indexing_slicing)]
+            patterns.push(Pattern::new(
+                fact_vec[0].clone(),
+                fact_vec[1].clone(),
+                fact_vec[2].clone(),
+            ));
+        }
+        ForgetSource::Facts(patterns)
+    };
+
+    Ok(DatalogCommand::Forget(ForgetSpec { source, valid_to }))
 }
 
 /// Convert a single EDN token to an Expr leaf, or recurse for a nested list.
@@ -2055,6 +2153,154 @@ mod tests {
             }
             _ => panic!("Expected Retract command"),
         }
+    }
+
+    #[test]
+    fn test_parse_forget_query_form() {
+        let input = r#"(forget [:find ?e ?a ?v :where [?e :session/expired true] [?e ?a ?v]])"#;
+        let cmd = parse_datalog_command(input).unwrap();
+
+        match cmd {
+            DatalogCommand::Forget(spec) => {
+                assert!(
+                    spec.valid_to.is_none(),
+                    "no options map means valid_to None"
+                );
+                match spec.source {
+                    ForgetSource::Query(q) => {
+                        assert_eq!(q.find.len(), 3);
+                        assert_eq!(q.where_clauses.len(), 2);
+                        assert!(q.as_of.is_none());
+                        assert!(q.valid_at.is_none());
+                    }
+                    ForgetSource::Facts(_) => panic!("Expected query source"),
+                }
+            }
+            _ => panic!("Expected Forget command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_forget_fact_list_form() {
+        let input = r#"(forget [[:alice :status :active] [:bob :status :active]])"#;
+        let cmd = parse_datalog_command(input).unwrap();
+
+        match cmd {
+            DatalogCommand::Forget(spec) => {
+                assert!(spec.valid_to.is_none());
+                match spec.source {
+                    ForgetSource::Facts(patterns) => assert_eq!(patterns.len(), 2),
+                    ForgetSource::Query(_) => panic!("Expected fact-list source"),
+                }
+            }
+            _ => panic!("Expected Forget command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_forget_with_valid_to() {
+        let input = r#"(forget {:valid-to "2026-07-01T00:00:00Z"} [[:alice :status :active]])"#;
+        let cmd = parse_datalog_command(input).unwrap();
+
+        match cmd {
+            DatalogCommand::Forget(spec) => {
+                assert!(spec.valid_to.is_some(), "options map must set valid_to");
+            }
+            _ => panic!("Expected Forget command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_forget_query_with_valid_to() {
+        let input =
+            r#"(forget {:valid-to "2026-07-01T00:00:00Z"} [:find ?e ?a ?v :where [?e ?a ?v]])"#;
+        let cmd = parse_datalog_command(input).unwrap();
+
+        match cmd {
+            DatalogCommand::Forget(spec) => {
+                assert!(spec.valid_to.is_some());
+                assert!(matches!(spec.source, ForgetSource::Query(_)));
+            }
+            _ => panic!("Expected Forget command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_valid_from() {
+        let input = r#"(forget {:valid-from "2026-07-01T00:00:00Z"} [[:alice :status :active]])"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(
+            err.contains(":valid-from"),
+            "error must mention :valid-from"
+        );
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_empty_options_map() {
+        let input = r#"(forget {} [[:alice :status :active]])"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(err.contains(":valid-to"), "error must mention :valid-to");
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_as_of_in_query() {
+        let input = r#"(forget [:find ?e ?a ?v :as-of 5 :where [?e ?a ?v]])"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(err.contains(":as-of"), "error must mention :as-of");
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_valid_at_in_query() {
+        let input =
+            r#"(forget [:find ?e ?a ?v :valid-at "2026-01-01T00:00:00Z" :where [?e ?a ?v]])"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(err.contains(":valid-at"), "error must mention :valid-at");
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_wrong_find_arity() {
+        let input = r#"(forget [:find ?e ?a :where [?e ?a ?v]])"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(
+            err.contains("three plain variables"),
+            "error must explain the find-spec requirement"
+        );
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_aggregate_find() {
+        let input = r#"(forget [:find ?e ?a (count ?v) :where [?e ?a ?v]])"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(
+            err.contains("three plain variables"),
+            "error must explain the find-spec requirement"
+        );
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_per_fact_window_map() {
+        let input = r#"(forget [[:alice :status :active {:valid-to "2026-01-01T00:00:00Z"}]])"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(
+            err.contains("exactly 3 elements"),
+            "error must explain that windows are discovered, not supplied"
+        );
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_bare_map_without_payload() {
+        let input = r#"(forget {:valid-to "2026-07-01T00:00:00Z"})"#;
+        let err = parse_datalog_command(input).unwrap_err();
+        assert!(
+            err.contains("after the map"),
+            "error must ask for the payload"
+        );
+    }
+
+    #[test]
+    fn test_parse_forget_rejects_empty() {
+        let err = parse_datalog_command("(forget)").unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]

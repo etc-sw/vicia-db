@@ -49,6 +49,7 @@ Success: `{"ok": true, "result": {...}, "id"?}`. Result bodies by type:
 
 - `{"type": "transacted", "tx_id": <unix-ms>, "tx_count": <n>, "durability": "applied"|"maintenance_pending"}`
 - `{"type": "retracted", ...same fields}`
+- `{"type": "forgotten", "forgotten": <count>, "tx_id": <unix-ms|null>, "tx_count": <n>, "durability": "applied"|"maintenance_pending"}`
 - `{"type": "query", "variables": ["?a", ...], "results": [[<value>, ...], ...]}`
 - `{"type": "ok"}` — non-query, non-write commands (e.g. `rule`)
 - `{"type": "status", ...}` — see Status fields
@@ -58,6 +59,24 @@ Success: `{"ok": true, "result": {...}, "id"?}`. Result bodies by type:
 - `{"type": "pong"}`, `{"type": "shutdown"}`
 
 Error: `{"ok": false, "error": {"kind": "...", "message": "..."}, "id"?}`.
+
+## forget (A8)
+
+`execute` accepts two bulk valid-time closure forms:
+
+```clojure
+(forget [:find ?e ?a ?v :where [?e :session/expired true] [?e ?a ?v]])
+(forget {:valid-to "2026-07-01T00:00:00Z"}
+        [[:session-1 :session/state :expired]])
+```
+
+The query `:find` must contain exactly three plain variables in EAV order.
+`:as-of` and `:valid-at` are rejected because the command always resolves
+the current transaction-time state at the closure time. Every matching
+valid-time window is replaced by an exact scoped retract and, when
+non-empty, a re-assertion truncated to `valid_to = T`. All records share one
+`tx_count` and one WAL entry. A no-match result reports `forgotten: 0` and
+`tx_id: null` without consuming a transaction count.
 
 ## export_since (A2) — status: frozen (caller-lane ACK 2026-07-11)
 
