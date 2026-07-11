@@ -344,6 +344,13 @@ impl StorageBackend for FileBackend {
         Ok(self.header.page_count)
     }
 
+    fn has_complete_page_prefix(&self, published_page_count: u64) -> Result<bool> {
+        let required_len = published_page_count
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("published database byte length overflow"))?;
+        Ok(self.file.metadata()?.len() >= required_len)
+    }
+
     fn close(&mut self) -> Result<()> {
         self.sync()
     }

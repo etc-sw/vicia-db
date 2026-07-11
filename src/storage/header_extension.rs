@@ -1,13 +1,15 @@
-#![allow(dead_code)]
-
 use crate::storage::{FileHeader, PAGE_SIZE};
 use anyhow::{Result, bail};
 
 pub(crate) const HEADER_EXTENSION_OFFSET: usize = 84;
-const HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX001";
-pub(crate) const HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 10;
-pub(crate) const HEADER_EXTENSION_LEN: usize =
+const LEGACY_HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX001";
+const HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX002";
+pub(crate) const LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 10;
+pub(crate) const HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 11;
+pub(crate) const LEGACY_HEADER_EXTENSION_LEN: usize =
     HeaderExtension::PREFIX_LEN + (HeaderManifestSlot::LEN * 2) + HeaderExtension::BASE_LAYOUT_LEN;
+pub(crate) const HEADER_EXTENSION_LEN: usize =
+    LEGACY_HEADER_EXTENSION_LEN + BasePageIntegrityDescriptor::LEN;
 const _: () = assert!(HEADER_EXTENSION_OFFSET + HEADER_EXTENSION_LEN <= PAGE_SIZE);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,12 +167,196 @@ impl HeaderManifestSlot {
     }
 }
 
+/// Page-0 authority for one generation-bound base-page checksum catalog.
+///
+/// The catalog is published after the covered immutable base pages. Fresh
+/// bases place it immediately after the coverage; v10 migrations may append it
+/// after an already-published delta lineage. Its exact byte length and CRC let
+/// readers checksum the catalog without scanning the base itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BasePageIntegrityDescriptor {
+    base_generation: u64,
+    covered_page_start: u64,
+    covered_page_count: u64,
+    catalog_page_start: u64,
+    catalog_page_count: u64,
+    catalog_len: u64,
+    catalog_checksum: u32,
+    descriptor_checksum: u32,
+}
+
+impl BasePageIntegrityDescriptor {
+    pub(crate) const LEN: usize = (8 * 6) + (4 * 2);
+
+    pub(crate) fn new(
+        base_generation: u64,
+        covered_page_start: u64,
+        covered_page_count: u64,
+        catalog_page_start: u64,
+        catalog_page_count: u64,
+        catalog_len: u64,
+        catalog_checksum: u32,
+    ) -> Result<Self> {
+        let mut descriptor = Self {
+            base_generation,
+            covered_page_start,
+            covered_page_count,
+            catalog_page_start,
+            catalog_page_count,
+            catalog_len,
+            catalog_checksum,
+            descriptor_checksum: 0,
+        };
+        descriptor.validate_layout()?;
+        descriptor.descriptor_checksum = descriptor.compute_checksum();
+        Ok(descriptor)
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self {
+            base_generation: 0,
+            covered_page_start: 0,
+            covered_page_count: 0,
+            catalog_page_start: 0,
+            catalog_page_count: 0,
+            catalog_len: 0,
+            catalog_checksum: 0,
+            descriptor_checksum: 0,
+        }
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self == Self::empty()
+    }
+
+    pub(crate) fn base_generation(self) -> u64 {
+        self.base_generation
+    }
+
+    pub(crate) fn covered_page_start(self) -> u64 {
+        self.covered_page_start
+    }
+
+    pub(crate) fn covered_page_count(self) -> u64 {
+        self.covered_page_count
+    }
+
+    pub(crate) fn covered_page_end(self) -> Result<u64> {
+        self.covered_page_start
+            .checked_add(self.covered_page_count)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity covered page range overflow"))
+    }
+
+    pub(crate) fn catalog_page_start(self) -> u64 {
+        self.catalog_page_start
+    }
+
+    pub(crate) fn catalog_page_count(self) -> u64 {
+        self.catalog_page_count
+    }
+
+    pub(crate) fn catalog_page_end(self) -> Result<u64> {
+        self.catalog_page_start
+            .checked_add(self.catalog_page_count)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog page range overflow"))
+    }
+
+    pub(crate) fn catalog_len(self) -> u64 {
+        self.catalog_len
+    }
+
+    pub(crate) fn catalog_checksum(self) -> u32 {
+        self.catalog_checksum
+    }
+
+    pub(crate) fn checksum_valid(self) -> bool {
+        self.is_empty() || self.descriptor_checksum == self.compute_checksum()
+    }
+
+    fn validate_layout(self) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        if self.base_generation == 0 {
+            bail!("Base integrity descriptor generation must be non-zero");
+        }
+        if self.covered_page_start == 0 || self.covered_page_count == 0 {
+            bail!("Base integrity descriptor must cover non-header pages");
+        }
+        if self.covered_page_end()? > self.catalog_page_start {
+            bail!("Base integrity catalog must not overlap covered pages");
+        }
+        if self.catalog_page_count == 0 || self.catalog_len == 0 {
+            bail!("Base integrity catalog page count and length must be non-zero");
+        }
+        let catalog_capacity = self
+            .catalog_page_count
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog capacity overflow"))?;
+        if self.catalog_len > catalog_capacity {
+            bail!("Base integrity catalog length exceeds its page capacity");
+        }
+        let minimum_len = self
+            .catalog_page_count
+            .saturating_sub(1)
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog minimum length overflow"))?;
+        if self.catalog_len <= minimum_len {
+            bail!("Base integrity catalog page count is not canonical for its length");
+        }
+        self.catalog_page_end()?;
+        Ok(())
+    }
+
+    fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut bytes = [0u8; Self::LEN];
+        bytes[0..8].copy_from_slice(&self.base_generation.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.covered_page_start.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.covered_page_count.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.catalog_page_start.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.catalog_page_count.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.catalog_len.to_le_bytes());
+        bytes[48..52].copy_from_slice(&self.catalog_checksum.to_le_bytes());
+        bytes[52..56].copy_from_slice(&self.descriptor_checksum.to_le_bytes());
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::LEN {
+            bail!("Base integrity descriptor length is invalid");
+        }
+        let descriptor = Self {
+            base_generation: read_u64_le(bytes, 0, "base integrity generation")?,
+            covered_page_start: read_u64_le(bytes, 8, "base integrity covered page start")?,
+            covered_page_count: read_u64_le(bytes, 16, "base integrity covered page count")?,
+            catalog_page_start: read_u64_le(bytes, 24, "base integrity catalog page start")?,
+            catalog_page_count: read_u64_le(bytes, 32, "base integrity catalog page count")?,
+            catalog_len: read_u64_le(bytes, 40, "base integrity catalog length")?,
+            catalog_checksum: read_u32_le(bytes, 48, "base integrity catalog checksum")?,
+            descriptor_checksum: read_u32_le(bytes, 52, "base integrity descriptor checksum")?,
+        };
+        if descriptor.is_empty() {
+            return Ok(descriptor);
+        }
+        descriptor.validate_layout()?;
+        if !descriptor.checksum_valid() {
+            bail!("Base integrity descriptor checksum mismatch");
+        }
+        Ok(descriptor)
+    }
+
+    fn compute_checksum(self) -> u32 {
+        crc32fast::hash(&self.to_bytes()[..Self::LEN - 4])
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HeaderExtension {
     primary: HeaderManifestSlot,
     secondary: HeaderManifestSlot,
     base_fact_page_start: u64,
     base_layout_checksum: u32,
+    base_integrity: BasePageIntegrityDescriptor,
 }
 
 impl HeaderExtension {
@@ -184,6 +370,7 @@ impl HeaderExtension {
             secondary,
             base_fact_page_start,
             base_layout_checksum: Self::compute_base_layout_checksum(base_fact_page_start),
+            base_integrity: BasePageIntegrityDescriptor::empty(),
         }
     }
 
@@ -203,32 +390,75 @@ impl HeaderExtension {
         self.base_fact_page_start
     }
 
+    pub(crate) fn base_integrity(&self) -> BasePageIntegrityDescriptor {
+        self.base_integrity
+    }
+
     pub(crate) fn with_base_fact_page_start(mut self, base_fact_page_start: u64) -> Result<Self> {
         if base_fact_page_start == 0 {
             bail!("Base fact pages must not start on page 0");
         }
         self.base_fact_page_start = base_fact_page_start;
         self.base_layout_checksum = Self::compute_base_layout_checksum(base_fact_page_start);
+        if !self.base_integrity.is_empty()
+            && self.base_integrity.covered_page_start() != base_fact_page_start
+        {
+            bail!("Base integrity coverage must start at the base fact page");
+        }
         Ok(self)
     }
 
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(HEADER_EXTENSION_LEN);
-        bytes.extend_from_slice(&HEADER_EXTENSION_MAGIC);
-        bytes.extend_from_slice(&HEADER_EXTENSION_FILE_FORMAT_VERSION.to_le_bytes());
+    pub(crate) fn with_base_integrity(
+        mut self,
+        base_integrity: BasePageIntegrityDescriptor,
+    ) -> Result<Self> {
+        if !base_integrity.is_empty() {
+            base_integrity.validate_layout()?;
+            if !base_integrity.checksum_valid() {
+                bail!("Base integrity descriptor checksum mismatch");
+            }
+            if base_integrity.covered_page_start() != self.base_fact_page_start {
+                bail!("Base integrity coverage must start at the base fact page");
+            }
+        }
+        self.base_integrity = base_integrity;
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.to_bytes_for_version(HEADER_EXTENSION_FILE_FORMAT_VERSION)
+    }
+
+    fn to_bytes_for_version(&self, file_format_version: u32) -> Result<Vec<u8>> {
+        let (magic, capacity) = match file_format_version {
+            LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION => {
+                (LEGACY_HEADER_EXTENSION_MAGIC, LEGACY_HEADER_EXTENSION_LEN)
+            }
+            HEADER_EXTENSION_FILE_FORMAT_VERSION => (HEADER_EXTENSION_MAGIC, HEADER_EXTENSION_LEN),
+            _ => bail!("Unsupported header extension file format version"),
+        };
+        let mut bytes = Vec::with_capacity(capacity);
+        bytes.extend_from_slice(&magic);
+        bytes.extend_from_slice(&file_format_version.to_le_bytes());
         bytes.extend_from_slice(&self.primary.to_bytes());
         bytes.extend_from_slice(&self.secondary.to_bytes());
         bytes.extend_from_slice(&self.base_fact_page_start.to_le_bytes());
         bytes.extend_from_slice(&self.base_layout_checksum.to_le_bytes());
-        debug_assert_eq!(bytes.len(), HEADER_EXTENSION_LEN);
-        bytes
+        if file_format_version == HEADER_EXTENSION_FILE_FORMAT_VERSION {
+            bytes.extend_from_slice(&self.base_integrity.to_bytes());
+        } else if !self.base_integrity.is_empty() {
+            bail!("v10 header extension cannot encode v11 base integrity metadata");
+        }
+        debug_assert_eq!(bytes.len(), capacity);
+        Ok(bytes)
     }
 
-    pub(crate) fn write_to_page0(&self, page: &mut [u8]) -> Result<()> {
+    fn write_to_page0_for_version(&self, file_format_version: u32, page: &mut [u8]) -> Result<()> {
         if page.len() != PAGE_SIZE {
             bail!("Header extension write requires a full page 0");
         }
-        let bytes = self.to_bytes();
+        let bytes = self.to_bytes_for_version(file_format_version)?;
         let extension_end = HEADER_EXTENSION_OFFSET
             .checked_add(bytes.len())
             .ok_or_else(|| anyhow::anyhow!("Header extension page range overflow"))?;
@@ -242,26 +472,38 @@ impl HeaderExtension {
         if page.len() < HEADER_EXTENSION_OFFSET {
             bail!("Page 0 is too short for legacy header");
         }
-        if file_format_version < HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        if file_format_version < LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION {
             return Ok(None);
         }
-        if file_format_version != HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        if file_format_version != LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
+            && file_format_version != HEADER_EXTENSION_FILE_FORMAT_VERSION
+        {
             bail!("Unsupported header extension file format version");
         }
 
+        let extension_len = if file_format_version == LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION {
+            LEGACY_HEADER_EXTENSION_LEN
+        } else {
+            HEADER_EXTENSION_LEN
+        };
         let Some(extension_bytes) =
-            page.get(HEADER_EXTENSION_OFFSET..HEADER_EXTENSION_OFFSET + HEADER_EXTENSION_LEN)
+            page.get(HEADER_EXTENSION_OFFSET..HEADER_EXTENSION_OFFSET + extension_len)
         else {
             bail!("Header extension is truncated");
         };
         if extension_bytes.iter().all(|byte| *byte == 0) {
-            bail!("Header extension is missing for v10 header");
+            bail!("Header extension is missing for v{file_format_version} header");
         }
 
         let magic = extension_bytes
             .get(0..HEADER_EXTENSION_MAGIC.len())
             .ok_or_else(|| anyhow::anyhow!("Header extension missing magic"))?;
-        if magic != HEADER_EXTENSION_MAGIC {
+        let expected_magic = if file_format_version == LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION {
+            LEGACY_HEADER_EXTENSION_MAGIC
+        } else {
+            HEADER_EXTENSION_MAGIC
+        };
+        if magic != expected_magic {
             bail!("Header extension magic mismatch");
         }
 
@@ -270,7 +512,7 @@ impl HeaderExtension {
             HEADER_EXTENSION_MAGIC.len(),
             "header extension file format version",
         )?;
-        if extension_file_format_version != HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        if extension_file_format_version != file_format_version {
             bail!("Unsupported header extension file format version");
         }
 
@@ -320,11 +562,26 @@ impl HeaderExtension {
             raw_base_fact_page_start
         };
 
+        let base_integrity = if file_format_version == HEADER_EXTENSION_FILE_FORMAT_VERSION {
+            BasePageIntegrityDescriptor::from_bytes(
+                extension_bytes
+                    .get(LEGACY_HEADER_EXTENSION_LEN..HEADER_EXTENSION_LEN)
+                    .ok_or_else(|| anyhow::anyhow!("Base integrity descriptor is truncated"))?,
+            )?
+        } else {
+            BasePageIntegrityDescriptor::empty()
+        };
+        if !base_integrity.is_empty() && base_integrity.covered_page_start() != base_fact_page_start
+        {
+            bail!("Base integrity coverage does not match the base fact page start");
+        }
+
         Ok(Some(Self {
             primary,
             secondary,
             base_fact_page_start,
             base_layout_checksum: Self::compute_base_layout_checksum(base_fact_page_start),
+            base_integrity,
         }))
     }
 
@@ -411,14 +668,17 @@ pub(crate) fn select_header_manifest_slot_from_page0(
 }
 
 pub(crate) fn build_header_page(header: FileHeader) -> Result<Vec<u8>> {
+    header.validate()?;
     let mut page = header.to_bytes();
     if page.len() > PAGE_SIZE {
         bail!("Header bytes exceed page size");
     }
     page.resize(PAGE_SIZE, 0);
 
-    if header.version == HEADER_EXTENSION_FILE_FORMAT_VERSION {
-        HeaderExtension::empty().write_to_page0(&mut page)?;
+    if header.version == LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
+        || header.version == HEADER_EXTENSION_FILE_FORMAT_VERSION
+    {
+        HeaderExtension::empty().write_to_page0_for_version(header.version, &mut page)?;
     } else if header.version > HEADER_EXTENSION_FILE_FORMAT_VERSION {
         bail!("Unsupported header extension file format version");
     }
@@ -430,15 +690,18 @@ pub(crate) fn build_header_page_with_extension(
     header: FileHeader,
     extension: HeaderExtension,
 ) -> Result<Vec<u8>> {
-    if header.version != HEADER_EXTENSION_FILE_FORMAT_VERSION {
-        bail!("Header extension requires v10 file format");
+    header.validate()?;
+    if header.version != LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
+        && header.version != HEADER_EXTENSION_FILE_FORMAT_VERSION
+    {
+        bail!("Header extension requires v10 or v11 file format");
     }
     let mut page = header.to_bytes();
     if page.len() > PAGE_SIZE {
         bail!("Header bytes exceed page size");
     }
     page.resize(PAGE_SIZE, 0);
-    extension.write_to_page0(&mut page)?;
+    extension.write_to_page0_for_version(header.version, &mut page)?;
     Ok(page)
 }
 
@@ -469,10 +732,11 @@ fn read_u64_le(bytes: &[u8], offset: usize, label: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        HEADER_EXTENSION_FILE_FORMAT_VERSION, HEADER_EXTENSION_LEN, HEADER_EXTENSION_OFFSET,
-        HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
-        HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection, build_header_page,
-        build_header_page_with_extension, select_header_manifest_slot,
+        BasePageIntegrityDescriptor, HEADER_EXTENSION_FILE_FORMAT_VERSION, HEADER_EXTENSION_LEN,
+        HEADER_EXTENSION_OFFSET, HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
+        HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection,
+        LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION, LEGACY_HEADER_EXTENSION_LEN,
+        build_header_page, build_header_page_with_extension, select_header_manifest_slot,
         select_header_manifest_slot_from_page0,
     };
     use crate::storage::{FORMAT_VERSION, FileHeader, PAGE_SIZE};
@@ -495,16 +759,17 @@ mod tests {
         let mut page = header.to_bytes();
         page.resize(PAGE_SIZE, 0);
         extension
-            .write_to_page0(&mut page)
+            .write_to_page0_for_version(file_format_version, &mut page)
             .expect("extension should fit in page 0");
         page
     }
 
     #[test]
-    fn current_format_publishes_v10_header_extension_gate() {
-        assert_eq!(FORMAT_VERSION, 10);
-        assert_eq!(FileHeader::new().version, 10);
-        assert_eq!(HEADER_EXTENSION_FILE_FORMAT_VERSION, 10);
+    fn current_format_publishes_v11_header_extension_gate() {
+        assert_eq!(FORMAT_VERSION, 11);
+        assert_eq!(FileHeader::new().version, 11);
+        assert_eq!(HEADER_EXTENSION_FILE_FORMAT_VERSION, 11);
+        assert_eq!(LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION, 10);
     }
 
     #[test]
@@ -560,7 +825,8 @@ mod tests {
 
     #[test]
     fn v10_header_without_extension_is_rejected() {
-        let header = FileHeader::new();
+        let mut header = FileHeader::new();
+        header.version = 10;
         let mut page = header.to_bytes();
         page.resize(PAGE_SIZE, 0);
         let result = select_header_manifest_slot_from_page0(header.version, &page);
@@ -591,7 +857,8 @@ mod tests {
 
     #[test]
     fn v10_header_extension_records_base_fact_page_start() {
-        let header = FileHeader::new();
+        let mut header = FileHeader::new();
+        header.version = 10;
         let extension = HeaderExtension::new(slot(12, 345), HeaderManifestSlot::empty())
             .with_base_fact_page_start(900)
             .expect("base start should be valid");
@@ -606,9 +873,66 @@ mod tests {
     }
 
     #[test]
+    fn v11_header_extension_round_trips_base_integrity_descriptor() {
+        let header = FileHeader::new();
+        let integrity = BasePageIntegrityDescriptor::new(7, 900, 20, 1_000, 2, 5_000, 0xDEAD_BEEF)
+            .expect("base integrity descriptor should build");
+        let extension = HeaderExtension::new(slot(12, 1_100), HeaderManifestSlot::empty())
+            .with_base_fact_page_start(900)
+            .expect("base start should be valid")
+            .with_base_integrity(integrity)
+            .expect("integrity should match the base start");
+
+        let page = build_header_page_with_extension(header, extension.clone())
+            .expect("v11 extension page should build");
+        let decoded = HeaderExtension::read_from_page0(header.version, &page)
+            .expect("v11 extension should decode")
+            .expect("v11 extension should be present");
+
+        assert_eq!(decoded, extension);
+        assert_eq!(decoded.base_integrity(), integrity);
+        assert_eq!(integrity.base_generation(), 7);
+        assert_eq!(integrity.covered_page_end().unwrap(), 920);
+        assert_eq!(integrity.catalog_page_end().unwrap(), 1_002);
+        assert_eq!(HEADER_EXTENSION_LEN, LEGACY_HEADER_EXTENSION_LEN + 56);
+    }
+
+    #[test]
+    fn v11_base_integrity_descriptor_checksum_mismatch_is_rejected() {
+        let integrity = BasePageIntegrityDescriptor::new(3, 1, 10, 11, 1, 1_000, 0xCAFE_BABE)
+            .expect("base integrity descriptor should build");
+        let extension = HeaderExtension::empty()
+            .with_base_integrity(integrity)
+            .expect("integrity should attach");
+        let mut page = page_with_extension(&extension);
+        let catalog_checksum_offset = HEADER_EXTENSION_OFFSET + LEGACY_HEADER_EXTENSION_LEN + 48;
+        page[catalog_checksum_offset] ^= 0x55;
+
+        let result = HeaderExtension::read_from_page0(11, &page);
+        assert!(
+            result.is_err(),
+            "base integrity descriptor corruption must reject page 0"
+        );
+    }
+
+    #[test]
+    fn v10_extension_cannot_encode_v11_integrity_metadata() {
+        let integrity = BasePageIntegrityDescriptor::new(3, 1, 10, 11, 1, 1_000, 0xCAFE_BABE)
+            .expect("base integrity descriptor should build");
+        let extension = HeaderExtension::empty()
+            .with_base_integrity(integrity)
+            .expect("integrity should attach");
+
+        assert!(
+            extension.to_bytes_for_version(10).is_err(),
+            "v10 must not silently drop v11 integrity metadata"
+        );
+    }
+
+    #[test]
     fn legacy_v10_extension_tail_defaults_base_fact_page_start_to_one() {
         let extension = HeaderExtension::new(slot(7, 100), HeaderManifestSlot::empty());
-        let mut page = page_with_extension(&extension);
+        let mut page = page_with_header_version_and_extension(10, &extension);
         let base_layout_start =
             HEADER_EXTENSION_OFFSET + HeaderExtension::PREFIX_LEN + HeaderManifestSlot::LEN * 2;
         page[base_layout_start..base_layout_start + HeaderExtension::BASE_LAYOUT_LEN].fill(0);
@@ -641,7 +965,13 @@ mod tests {
     #[test]
     fn v9_header_with_extension_like_tail_is_not_selected() {
         let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
-        let page = page_with_header_version_and_extension(9, &extension);
+        let mut header = FileHeader::new();
+        header.version = 9;
+        let mut page = header.to_bytes();
+        page.resize(PAGE_SIZE, 0);
+        let extension_bytes = extension.to_bytes().expect("extension should encode");
+        page[HEADER_EXTENSION_OFFSET..HEADER_EXTENSION_OFFSET + extension_bytes.len()]
+            .copy_from_slice(&extension_bytes);
         let header = FileHeader::from_bytes(&page).expect("legacy header should parse");
         let extension = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension read should work");
@@ -653,7 +983,7 @@ mod tests {
     #[test]
     fn v10_header_extension_round_trips_after_legacy_header() {
         let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
-        let page = page_with_extension(&extension);
+        let page = page_with_header_version_and_extension(10, &extension);
         let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
         let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension should decode")
@@ -661,14 +991,20 @@ mod tests {
 
         assert_eq!(decoded, extension);
         assert_eq!(HEADER_EXTENSION_OFFSET, FileHeader::new().to_bytes().len());
-        assert_eq!(extension.to_bytes().len(), HEADER_EXTENSION_LEN);
+        assert_eq!(
+            extension
+                .to_bytes_for_version(10)
+                .expect("v10 extension should encode")
+                .len(),
+            LEGACY_HEADER_EXTENSION_LEN
+        );
     }
 
     #[test]
     fn v10_header_with_empty_slots_is_no_delta_manifest() {
         let extension =
             HeaderExtension::new(HeaderManifestSlot::empty(), HeaderManifestSlot::empty());
-        let page = page_with_extension(&extension);
+        let page = page_with_header_version_and_extension(10, &extension);
         let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
         let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("empty extension should decode")
@@ -684,7 +1020,7 @@ mod tests {
     #[test]
     fn v10_header_selects_newest_valid_slot() {
         let extension = HeaderExtension::new(slot(7, 100), slot(8, 200));
-        let page = page_with_extension(&extension);
+        let page = page_with_header_version_and_extension(10, &extension);
         let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
         let decoded = HeaderExtension::read_from_page0(header.version, &page)
             .expect("extension should decode")
@@ -703,7 +1039,7 @@ mod tests {
     #[test]
     fn v10_header_rejects_wrong_extension_version() {
         let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
-        let mut page = page_with_extension(&extension);
+        let mut page = page_with_header_version_and_extension(10, &extension);
         let wrong_version_offset = HEADER_EXTENSION_OFFSET + 8;
         page[wrong_version_offset..wrong_version_offset + 4].copy_from_slice(&9u32.to_le_bytes());
         let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
@@ -718,7 +1054,7 @@ mod tests {
     #[test]
     fn v10_header_rejects_wrong_extension_magic() {
         let extension = HeaderExtension::new(slot(7, 100), slot(6, 200));
-        let mut page = page_with_extension(&extension);
+        let mut page = page_with_header_version_and_extension(10, &extension);
         page[HEADER_EXTENSION_OFFSET..HEADER_EXTENSION_OFFSET + 8].copy_from_slice(b"BADMAGIC");
         let header = FileHeader::from_bytes(&page).expect("v10 header should parse");
         let result = HeaderExtension::read_from_page0(header.version, &page);
@@ -828,7 +1164,7 @@ mod tests {
             HeaderManifestSlot::new(12, 345, 3, manifest_payload.len() as u64, checksum)
                 .expect("slot descriptor should be valid");
         let extension = HeaderExtension::new(descriptor, HeaderManifestSlot::empty());
-        let bytes = extension.to_bytes();
+        let bytes = extension.to_bytes().expect("extension should encode");
 
         assert_eq!(descriptor.manifest_page_start(), 345);
         assert_eq!(descriptor.manifest_page_count(), 3);

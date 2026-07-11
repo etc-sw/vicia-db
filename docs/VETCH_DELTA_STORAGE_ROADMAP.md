@@ -162,6 +162,7 @@ the result of progressively narrower gates:
 | A5-4 | Four 100K-base browser soft-threshold cycles atomically replaced compact images, reclaimed about 2.1K pages each, reset write latency, and a module DedicatedWorker passed open/write/query/maintenance. | The maintenance and worker deployment boundaries pass in real Chrome; bounded 1M open/memory remains Gate E work. |
 | A5-5 | Native- and Chrome-generated v10 fixtures run through both consumers with exact tagged temporal/ref results and one shared slot/manifest/segment/truncation/tail corruption corpus. | Semantic, portability, and recovery-policy parity pass; page-local base integrity and bounded browser reads remain coupled Gate E work. |
 | A5-6a | Query access planning is a deterministic internal boundary; selective index/fact I/O failures propagate instead of triggering a full scan, and declared fact ranges reject wrong-type pages. | Sparse browser reads can distinguish an explicit full-scan plan from a failed selective read without hiding corruption. |
+| A5-6b | File format v11 adds an in-file, generation/page-id-bound checksum catalog for every immutable base fact/index page; v10 migrates catalog-first/page0-last and BrowserDb durably commits that migration before returning. | Page-local corruption detection and the verified committed-read/export/backup boundary pass; sparse IndexedDB paging and the 1M bounded-memory matrix remain Gate E work. |
 
 ## Philosophy Fit
 
@@ -639,7 +640,7 @@ proof:
 | WAL is retired too early | Keep `CheckpointOutcome` as the WAL retire gate. |
 | Full rebuild sneaks into foreground Vetch work | Keep full rebuild/recompact as explicit maintenance only. |
 | As-of reads stay seconds-level | Treat Q1 as a separate read-path lane after T8 storage publish is fixed. |
-| File format churn | Stay within v10 header extension and manifest payload versioning; keep migration fallback. |
+| File format churn | v11 extends the existing page-0 extension with a base catalog descriptor; keep v10 migration fallback and the legacy 84-byte header stable. |
 
 ## Verification Cadence
 

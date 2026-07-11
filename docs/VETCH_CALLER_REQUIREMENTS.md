@@ -356,9 +356,11 @@ Vicia replaces the legacy load path.
 
 Status: tagged semantic parity, native↔browser portability, atomic rejection,
 manifest fallback, and the shared corruption corpus pass in the 2×2 Gate E
-matrix (23 headless-Chrome tests plus native consumers). Bounded 1M open,
-page-local base integrity, and 1M maintenance peak-memory/growth evidence remain
-open, so Gate E as a whole remains open.
+matrix. File format v11 now adds generation-bound page-local base integrity,
+and BrowserDb durably commits v10 migration before returning (26
+headless-Chrome tests plus native consumers). Bounded 1M open and 1M
+maintenance peak-memory/growth evidence remain open, so Gate E as a whole
+remains open.
 
 ## Recommended Work Order
 

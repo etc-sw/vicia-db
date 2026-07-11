@@ -116,6 +116,8 @@ errors are out of its scope — this table is the browser classification).
 | --- | --- | --- | --- |
 | `open` | Lock held by a live process | native | No handle. `.graph.lock` sidecar is hard-link-atomic; stale locks (dead PID, empty artifact) are removed automatically (`FileLock::acquire`, `src/storage/backend/file.rs`). |
 | `open` | Header checksum mismatch / bad magic / unsupported version | both | No handle; detected **at open**, not lazily (`src/storage/persistent_facts.rs` load path). The file is not modified. Browser reaches the same validation via `PersistentFactStorage::new` over the loaded pages. |
+| `open` / first committed read | v11 catalog/descriptor corruption, or a base fact/index page checksum mismatch | both | Catalog metadata corruption rejects open without rewriting the image. Base pages are verified lazily against their generation and absolute page id, so bounded open can succeed and the first read touching a corrupt page returns an error. Browser export and native backup use the same verified boundary. CRC32 detects accidental corruption; it does not authenticate hostile bytes. |
+| `open` | Automatic v10→v11 migration cannot commit | browser | No handle. Catalog pages and page 0 share one IndexedDB transaction; abort preserves the exact v10 image for retry. |
 | `open` | Non-empty file shorter than one page | native | No handle and no rewrite. A zero-byte path remains an intentional new-database creation surface; 1–4095 bytes are a visible truncation error. |
 | `open` / `importGraph` | Newest slot, manifest, or segment is corrupt while the previous manifest is valid | both | Opens on the previous complete manifest. The shared Gate E corpus verifies that base plus both earlier deltas remain visible and only the newest retraction is absent. |
 | `open` / `importGraph` | A selected older segment or both manifest slots are corrupt | both | No handle/replacement; base-only or plausible partial fallback is forbidden. |
@@ -196,7 +198,7 @@ Derived from the semantics above plus the A5 growth measurements
    binding now discovers IndexedDB through `globalThis`; the repeatable
    `bench-driver.cjs worker-smoke` gate passes open/write/query/maintenance in
    a real module DedicatedWorker. The
-   existing 1M full-load open shape (~420 MB per tab), page-local base
-   integrity, and 1M maintenance peak-memory proof remain Gate E blockers; do
+   existing 1M full-load open shape (~420 MB per handle) and 1M maintenance
+   peak-memory proof remain Gate E blockers; do
    not claim browser authority readiness until those bounded-storage gates are
    complete.

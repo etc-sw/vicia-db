@@ -817,8 +817,9 @@ consumers. All four producer→consumer cells match ten exact tagged query cases
 scalars, Ref, Keyword, null, current state, `:as-of`, valid-time,
 combined-time, retraction, and VAET joins. The browser-produced fixture also
 opens natively with all 13 ledger records, transaction counts, and the Ref
-retraction intact. Canonical imports export byte-for-byte and reimport with the
-same results.
+retraction intact. These fixtures are frozen v10 migration inputs: the first
+current-library import publishes v11, and the resulting v11 image then exports
+and reimports byte-for-byte with the same results.
 
 The shared corruption matrix covers bad magic/version/header checksum,
 non-empty short files, newest slot/manifest/segment fallback, missing and
@@ -830,13 +831,41 @@ unpublished tail is removed from IndexedDB and export; a physically incomplete
 declared prefix can serve the previous manifest but remains visibly
 non-exportable until repaired.
 
-Verdict: semantic, portability, and manifest-recovery parity pass. This matrix
-also exposed the remaining integrity blocker: with a selected delta manifest,
-v10 trusts base checksum identity instead of rereading every base page, so a
-base fact-page bit flip can silently alter results on both backends. Restoring a
-global O(base) checksum on every open would undo the T7A bounded-reopen result;
-the next storage slice must pair page-local authenticated reads with the
-bounded browser page source.
+Verdict at A5-5: semantic, portability, and manifest-recovery parity pass. The
+matrix exposed that v10 trusted base checksum identity when a delta was
+selected, allowing an unread base-page bit flip to evade open-time detection.
+A5-6b below closes that integrity half without restoring an O(base) open scan.
+
+### A5-6b: v11 Generation-Bound Page Integrity
+
+File format v11 stores one CRC32 per immutable base fact/index page in an
+in-file catalog. Each checksum includes the base generation and absolute page
+id; page 0 binds the catalog range, byte length, and CRC. Catalog size is
+`40 + 4 * covered_page_count` bytes, rounded to whole 4KB pages. This is
+accidental-corruption detection, not hostile-input authentication.
+
+Evidence run on 2026-07-11:
+
+- `cargo test --quiet`: passed the full native suite, including the v11
+  migration, corruption, publication-order, and generation regressions.
+- `cargo clippy --lib -- -D warnings`: passed.
+- `cargo test --target wasm32-unknown-unknown --lib --features browser --no-run`: passed.
+- `CHROMEDRIVER=... ./scripts/test-browser-wasm.sh`: 27 passed in real Chrome
+  150, including durable v10→v11 open migration, transaction-abort byte
+  preservation, and corrupt-base export rejection.
+- A page-id counting backend proves v11 open reads catalog metadata but zero
+  fact/index pages. Exact fact/EAVT bit flips open boundedly and fail on the
+  first selective query; catalog/descriptor/truncation corruption rejects open.
+- Native full-save and backup reject a corrupt selected base instead of
+  checksumming and republishing/copying it. Legacy v1–v9 range/checksum/decode
+  failures reject migration without changing page-0 authority; valid migration
+  appends a COW base while preserving duplicate rows, v9 scoped retractions,
+  and every old non-header page.
+
+This is not the 1M Gate E performance verdict. BrowserDb still calls
+`load_all_pages()` into a flat in-memory buffer at open; the next slice must
+replace that source with generation-aware on-demand IndexedDB paging and rerun
+the full 1M startup/query/growth/maintenance peak-memory matrix.
 
 ---
 

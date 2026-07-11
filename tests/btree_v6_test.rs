@@ -149,7 +149,7 @@ fn test_v6_migration_from_v5_eager() {
     use std::io::Read;
     f.read_exact(&mut header_bytes).unwrap();
     let version = u32::from_le_bytes(header_bytes[4..8].try_into().unwrap());
-    assert_eq!(version, 10, "header must be upgraded from v5 to v10");
+    assert_eq!(version, 11, "header must be upgraded from v5 to v11");
 }
 
 #[test]

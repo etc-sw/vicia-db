@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: A5-5 shared Gate E parity corpus (July 2026), 1217 native tests + 23 browser WASM tests ✅
+**Last Updated**: A5-6b v11 generation-bound page integrity (July 2026), 1271 native tests + 27 browser WASM tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1217 ✅ (1205 passing, 12 ignored)
-- ✅ 793 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A5-4 compact-copy identity/watermark guard, A5-5 tagged/native-browser/corruption corpus consumers, A9 backup identity/linearization/conflict/symlink/watermark guards, A7 FileLock crash-robustness guards, A2 since-tail page-probe/no-full-scan guards, and A8 forget parser plus short-WAL recovery guards)
+**Total Tests**: 1271 ✅ (1259 passing, 12 ignored)
+- ✅ 848 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v1–v9 duplicate/window-preserving COW migration gates, v10 delta manifest/segment/header migration gates, v11 descriptor/catalog codec and lazy fact/index corruption gates, bounded-open page-id accounting, fail-closed legacy migration, selected-delta base verification, full-save/backup anti-blessing guards, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A5-4 compact-copy identity/watermark guard, A5-5 tagged/native-browser/corruption corpus consumers, A9 backup identity/linearization/conflict/symlink/watermark guards, A7 FileLock crash-robustness guards, A2 since-tail page-probe/no-full-scan guards, and A8 forget parser plus short-WAL recovery guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -31,7 +31,7 @@
 - ✅ 10 UDF tests (integration, Phase 7.7b — custom aggregates, custom predicates, UDF as window function, name collision guards, runtime errors, thread safety)
 - ✅ 17 prepared statement tests (integration, Phase 7.8 — entity/value/as-of/valid-at slots, combined temporal+entity, AnyValidTime, error paths, plan reuse)
 - ✅ 3 grammar conformance tests (integration, Phase 7.9 — pest shadow grammar + EDN corpus)
-- ✅ 6 migration matrix tests (integration, Wave 3 #215 + v7/v8→v9 format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
+- ✅ 6 migration matrix tests (integration, Wave 3 #215 + legacy→v11 format migration — current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
 - ✅ 7 multi-value index tests (integration, #287 — same entity+attribute batch values survive indexed public query paths, ref edges, `:as-of`, `:valid-at`, retraction, checkpoint/reopen)
 - ✅ 5 retract valid-time tests (integration, Vetch ledger parity — scoped retract removes only the matching valid-time window, legacy retract still wipes all windows, Ref edge value, WriteTransaction parity, checkpoint/reopen)
 - ✅ 7 fact-log export tests (integration, Vetch ledger receipts — public append-only export includes `asserted`, `tx_id`, `tx_count`, valid-time scope, legacy retractions, scoped Ref-edge retractions, checkpoint/reopen; A2 since-tail subsequence equivalence across base/delta/pending layers and stored-cursor reopen polling)
@@ -45,7 +45,7 @@
 - ✅ 1 delta manifest recovery test (integration, Vetch delta storage — manifest recovery gate)
 - ✅ 1 header extension gate test (integration, Vetch delta storage — v10 extension module gate)
 - ✅ Agent-brief read-path benchmark harness (bench, Vetch Q1-A — current/as-of/prepared/export receipt-read surfaces; not counted as a test)
-- ✅ 5 index corruption tests (integration, Wave 3 #216 — checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
+- ✅ 4 index corruption tests (integration, v11 public API — header/catalog corruption rejects open; exact fact/EAVT pages fail closed on first selective query)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)
 - ✅ 10 XTDB compat tests (integration, Wave 3 #221 — Apache 2.0 semantic ports of XTDB concepts)
@@ -53,9 +53,9 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
-- ➕ 23 browser WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh`. A5-4 covers maintenance/failure ordering; A5-5 adds both-producer tagged portability, shared corruption/recovery, published-prefix trimming, and empty-buffer regressions. The same script is enforced by the Browser WASM CI job.)
+- ➕ 27 browser-WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh`. A5-4 covers maintenance/failure ordering; A5-5 adds both-producer tagged portability, shared corruption/recovery, published-prefix trimming, and empty-buffer regressions; A5-6b adds durable v10→v11 open migration success/abort, verified export corruption, and short-page prefix gates. The same script is enforced by the Browser WASM CI job.)
 
-**Status**: ✅ **All 1205 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
+**Status**: ✅ **All 1259 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -64,7 +64,7 @@
 **New tests added by Wave 3** (+87 total):
 - ✅ `wal_test.rs` — 9 new fault-injection tests (FaultInjectingBackend: write fail, flush fail, read fault, WAL CRC corruption, checkpoint atomicity, partial checkpoint recovery, multi-writer serialisation, concurrent write+checkpoint, backend error propagation)
 - ✅ `tests/migration_matrix_test.rs` — 6 migration tests (current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent)
-- ✅ `tests/index_corruption_test.rs` — 5 corruption-resilience tests (checksum corruption, btree leaf/internal no-panic, root pointer mismatch, non-critical corruption query check)
+- ✅ `tests/index_corruption_test.rs` — original Wave 3 no-panic corpus, now replaced by 4 strict v11 public-API gates (header/catalog open rejection plus exact fact/EAVT first-read failure)
 - ✅ `tests/concurrency_test.rs` — 5 new stress tests (stress readers during writer, failed write then success, rollback after partial work, open/write/checkpoint/query loop per thread, nightly stress loop)
 - ✅ `tests/property_test.rs` — 3 proptest property tests (EAV fact model, bi-temporal monotonicity, retract visibility)
 - ✅ `tests/smoke_test.rs` — 1 long-haul smoke test (500 entities × 10 attrs × 10 cycles, 7 invariants; `#[ignore]` nightly)
@@ -163,7 +163,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `BrowserBufferBackend` — in-memory `StorageBackend` over a flat page buffer, byte-identical to native `.graph` format
 - ✅ `IndexedDbBackend` — page-granular IndexedDB storage via `web-sys` + `wasm-bindgen`
 - ✅ `wasm-pack` build generating `minigraf-wasm/` with JS glue and TypeScript `.d.ts`
-- ✅ `wasm-bindgen-test` suite: 23 browser integration/unit tests (headless Chrome locally; wired into the Browser WASM CI job, with no cross-browser claim)
+- ✅ `wasm-bindgen-test` suite: 27 browser integration/unit tests (headless Chrome locally; wired into the Browser WASM CI job, with no cross-browser claim)
 
 **Phase 8.1b Features** (WASI, complete):
 - ✅ `FileBackend` verified under WASI capability-based filesystem (no changes needed)
@@ -477,16 +477,16 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 
 **Coverage**: ~93%
 
-### 9. FileHeader (`src/storage/mod.rs`) - ✅ Excellent (10 tests)
+### 9. FileHeader (`src/storage/mod.rs`) - ✅ Excellent (21 tests)
 
-- ✅ v9 serialisation: 84 bytes, correct field offsets
-- ✅ v9 roundtrip with all index root pages, checksum, header checksum, and `fact_page_count`
-- ✅ v3/v4/v5 headers accepted with appropriate zero-filling
-- ✅ v9 header with <84 bytes rejected
-- ✅ Header validation (magic, version range 1-9)
-- ✅ Version 0 and 10 rejected
-- ✅ `FORMAT_VERSION == 9`
-- ✅ **Byte-layout pin**: all fields at exact offsets with LE encoding verified (v9 update)
+- ✅ Current v11 legacy-header serialisation: 84 bytes with exact field offsets
+- ✅ Current v11 legacy-header roundtrip preserves the header checksum
+- ✅ v3, v4, and v6 legacy headers decode with version-appropriate zero-filled fields; v5 is accepted by validation
+- ✅ Truncated v4 and v7 headers are rejected
+- ✅ Header validation covers magic, versions 1–11, positive page count, and root/fact-page bounds
+- ✅ v9, v10, and v11 are accepted explicitly
+- ✅ `FORMAT_VERSION == 11`
+- ✅ **Byte-layout pin**: all legacy-header fields use their exact little-endian offsets in v11
 
 **Coverage**: ~98%
 
@@ -721,10 +721,10 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `execute_with_extra_bindings` — extra `BindValue`s beyond declared slots are silently ignored
 - ✅ `multiple_slots_same_execute` — multiple distinct `$slot` names resolved in a single `execute()` call
 
-### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 6 tests (Wave 3 #215 + v9 migration)
+### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 6 tests (Wave 3 #215 + v11 migration)
 
 - ✅ current format round-trip — facts written and read back correctly after save/load
-- ✅ v7 fixture migrate — committed v7 fixture opens and upgrades to current v9 format
+- ✅ v7 fixture migrate — committed v7 fixture opens and upgrades to current v11 format
 - ✅ v3 empty migrate — empty v3 database opens cleanly
 - ✅ corrupt magic — file with bad magic header returns `Err`, not panic
 - ✅ unsupported version — file with unrecognised format version returns `Err`
@@ -1029,17 +1029,17 @@ cargo test -- --nocapture
 - Prepared statements verified: entity/value/as-of/valid-at slot positions, AnyValidTime, combined temporal+entity (agentic loop pattern), plan reuse, all error paths (Phase 7.8)
 - Public API surface verified via rustdoc doctests and integration tests: `Minigraf::open`, `execute`, `prepare`, `export_fact_log`, `run_idle_maintenance`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9 + Vetch ledger export + Q3-A maintenance)
 - WAL fault injection verified: write-fail, flush-fail, read-fault, CRC corruption, checkpoint atomicity, concurrent write+checkpoint (Wave 3)
-- Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v9 migration)
+- Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v11 migration)
 - Multi-value index regression verified: same entity+attribute batch values survive indexed public query paths, ref edge lookups, temporal replay, retraction, and checkpoint/reopen (#287)
 - Retract valid-time parity verified: scoped retractions remove only the matching valid-time window while legacy retractions still wipe every valid-time window for the same EAV triple
 - Delta checkpoint integration verified: v10 multi-segment manifest append, base/delta and segment/segment `Value::Ref` edges, later-segment retractions, deterministic multi-delta export, and corrupt-slot fallback
 - Delta checkpoint crash recovery verified: unpublished delta bytes ignored, WAL replay preserved, selected corrupt/truncated deltas rejected, stale WAL skipped after header publish
-- Index corruption resilience verified: checksum corruption triggers rebuild, btree corruption returns Err not panic (Wave 3)
+- Index corruption resilience verified: v11 header/catalog corruption rejects open; exact fact/index corruption propagates from the first public query
 - Property-based testing verified: EAV model, bi-temporal monotonicity, retract visibility (Wave 3)
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 1217 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance/parity regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure + A9 linearized backup (plus 23 browser WASM tests, WASI, cross-platform compat, and fuzzing CI)
+- 1271 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance/parity regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure + A9 linearized backup + A5-6 fail-closed query/page integrity (plus 27 browser-WASM tests, WASI, cross-platform compat, and fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 

@@ -75,6 +75,18 @@ impl StorageBackend for MemoryBackend {
         Ok(self.page_count_internal())
     }
 
+    fn has_complete_page_prefix(&self, published_page_count: u64) -> Result<bool> {
+        let pages = self
+            .pages
+            .read()
+            .map_err(|_| anyhow::anyhow!("pages lock poisoned"))?;
+        Ok((0..published_page_count).all(|page_id| {
+            pages
+                .get(&page_id)
+                .is_some_and(|page| page.len() == PAGE_SIZE)
+        }))
+    }
+
     fn close(&mut self) -> Result<()> {
         // No-op for in-memory storage
         Ok(())
@@ -111,6 +123,18 @@ mod tests {
         let data = vec![42u8; 100]; // Wrong size
         let result = backend.write_page(0, &data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn incomplete_prefix_rejects_a_short_page() {
+        let backend = MemoryBackend::new();
+        backend
+            .pages
+            .write()
+            .unwrap()
+            .insert(0, vec![0; PAGE_SIZE - 1]);
+
+        assert!(!backend.has_complete_page_prefix(1).unwrap());
     }
 
     #[test]

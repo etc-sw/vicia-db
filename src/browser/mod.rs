@@ -96,13 +96,31 @@ impl BrowserDb {
     #[wasm_bindgen(js_name = open)]
     pub async fn open(db_name: &str) -> Result<BrowserDb, JsValue> {
         let idb = IndexedDbBackend::open(db_name).await?;
+        Self::open_from_idb(idb).await
+    }
+
+    async fn open_from_idb(idb: IndexedDbBackend) -> Result<BrowserDb, JsValue> {
         let existing = idb.load_all_pages().await?;
+        let existing_page_count = u64::try_from(existing.len())
+            .map_err(|_| JsValue::from_str("IndexedDB page count exceeds u64"))?;
 
         let buffer = BrowserBufferBackend::load_pages(existing);
         let mut pfs = PersistentFactStorage::new(buffer, 256)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        pfs.with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
+        let declared_page_count = pfs
+            .with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let migration_pages = take_dirty_pages(&mut pfs)?;
+        if !migration_pages.is_empty() {
+            // Data/catalog pages and page 0 become durable in one IndexedDB
+            // transaction before the migrated handle can escape.
+            if declared_page_count < existing_page_count {
+                let published_pages = pfs.with_backend(BrowserBufferBackend::all_pages);
+                idb.replace_all_pages(published_pages).await?;
+            } else {
+                idb.write_pages(migration_pages).await?;
+            }
+        }
         let fact_storage = pfs.storage().clone();
 
         Ok(BrowserDb {
@@ -363,7 +381,7 @@ impl BrowserDb {
         for id in 0..page_count as u64 {
             let page = inner
                 .pfs
-                .with_backend(|b| b.read_page_raw(id))
+                .read_published_page(id)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             blob.extend_from_slice(&page);
         }
@@ -707,6 +725,25 @@ mod tests {
 
     wasm_bindgen_test_configure!(run_in_browser);
 
+    const BASE_FACT_PAGE_START_OFFSET: usize = 84 + 12 + 80;
+
+    fn fixture_pages(bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
+        assert!(
+            bytes.len().is_multiple_of(crate::storage::PAGE_SIZE),
+            "fixture must contain complete pages"
+        );
+        bytes
+            .chunks_exact(crate::storage::PAGE_SIZE)
+            .enumerate()
+            .map(|(page_id, page)| (u64::try_from(page_id).unwrap(), page.to_vec()))
+            .collect()
+    }
+
+    fn page_map_version(pages: &std::collections::HashMap<u64, Vec<u8>>) -> u32 {
+        let page0 = pages.get(&0).expect("page map must contain page 0");
+        u32::from_le_bytes(page0[4..8].try_into().unwrap())
+    }
+
     fn assert_canonical_query_json(case: &QueryCase, encoded: &str) {
         let value: serde_json::Value =
             serde_json::from_str(encoded).expect("browser query JSON must parse");
@@ -782,6 +819,11 @@ mod tests {
     async fn gate_e_browser_consumer_matches_both_producers_and_round_trips() {
         let corpus = corpus();
         for source in [NATIVE_FIXTURE, BROWSER_FIXTURE] {
+            assert_eq!(
+                u32::from_le_bytes(source[4..8].try_into().unwrap()),
+                10,
+                "frozen Gate E producer fixtures remain v10 migration inputs"
+            );
             let db = BrowserDb::open_in_memory().expect("open Gate E browser consumer");
             db.import_graph(js_sys::Uint8Array::from(source))
                 .await
@@ -790,8 +832,9 @@ mod tests {
 
             let exported = db.export_graph().expect("export Gate E fixture").to_vec();
             assert_eq!(
-                exported, source,
-                "canonical import/export must be byte exact"
+                u32::from_le_bytes(exported[4..8].try_into().unwrap()),
+                crate::storage::FORMAT_VERSION,
+                "first import must publish the current format"
             );
             let reopened = BrowserDb::open_in_memory().expect("open round-trip consumer");
             reopened
@@ -799,7 +842,125 @@ mod tests {
                 .await
                 .expect("reimport browser export");
             assert_browser_queries(&reopened, &corpus.queries).await;
+            assert_eq!(
+                reopened
+                    .export_graph()
+                    .expect("re-export current graph")
+                    .to_vec(),
+                exported,
+                "current-format browser round-trip must be byte exact"
+            );
         }
+    }
+
+    #[wasm_bindgen_test]
+    async fn open_migrates_v10_and_persists_v11_before_return() {
+        let db_name = format!("vicia-open-v10-migration-{}", js_sys::Date::now());
+        let seed = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open seed IDB");
+        seed.replace_all_pages(fixture_pages(NATIVE_FIXTURE))
+            .await
+            .expect("seed frozen v10 fixture");
+        assert_eq!(
+            page_map_version(&seed.load_all_pages().await.expect("load v10 seed")),
+            10
+        );
+
+        let db = BrowserDb::open(&db_name)
+            .await
+            .expect("open must migrate and durably publish v11");
+        let corpus = corpus();
+        assert_browser_queries(&db, &corpus.queries).await;
+        let durable = seed
+            .load_all_pages()
+            .await
+            .expect("load durable migrated pages");
+        assert_eq!(page_map_version(&durable), crate::storage::FORMAT_VERSION);
+        let declared = u64::from_le_bytes(durable[&0][8..16].try_into().unwrap());
+        assert_eq!(
+            u64::try_from(durable.len()).unwrap(),
+            declared,
+            "open must commit every page in the migrated published prefix"
+        );
+        drop(db);
+
+        let reopened = BrowserDb::open(&db_name)
+            .await
+            .expect("durable v11 graph must reopen");
+        assert_browser_queries(&reopened, &corpus.queries).await;
+        assert_eq!(
+            seed.load_all_pages().await.expect("load second-open pages"),
+            durable,
+            "second open must not remigrate, grow, or rewrite the v11 image"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn open_migration_write_abort_preserves_exact_v10_image() {
+        let db_name = format!("vicia-open-v10-abort-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open seed IDB");
+        idb.replace_all_pages(fixture_pages(NATIVE_FIXTURE))
+            .await
+            .expect("seed frozen v10 fixture");
+        let before = idb
+            .load_all_pages()
+            .await
+            .expect("load pre-migration pages");
+        assert_eq!(page_map_version(&before), 10);
+
+        idb.fail_next_write_for_test();
+        let result = BrowserDb::open_from_idb(idb.clone_handle()).await;
+        assert!(
+            result.is_err(),
+            "open must not expose a handle when migration durability aborts"
+        );
+        assert_eq!(
+            idb.load_all_pages().await.expect("load aborted pages"),
+            before,
+            "aborted migration transaction must preserve the exact v10 authority"
+        );
+
+        let recovered = BrowserDb::open(&db_name)
+            .await
+            .expect("later normal open must still migrate the preserved v10 graph");
+        let corpus = corpus();
+        assert_browser_queries(&recovered, &corpus.queries).await;
+        assert_eq!(
+            page_map_version(&idb.load_all_pages().await.expect("load recovered pages")),
+            crate::storage::FORMAT_VERSION
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn export_rejects_corrupt_v11_base_page() {
+        use crate::storage::StorageBackend;
+
+        let db = BrowserDb::open_in_memory().expect("open in-memory consumer");
+        db.import_graph(js_sys::Uint8Array::from(NATIVE_FIXTURE))
+            .await
+            .expect("import and migrate fixture");
+        let exported = db.export_graph().expect("export migrated fixture").to_vec();
+        let base_start = u64::from_le_bytes(
+            exported[BASE_FACT_PAGE_START_OFFSET..BASE_FACT_PAGE_START_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        {
+            let mut inner = db.inner.borrow_mut();
+            inner.pfs.with_backend_mut(|backend| {
+                let mut page = backend.read_page_raw(base_start).unwrap();
+                page[crate::storage::PAGE_SIZE - 1] ^= 0x01;
+                backend.write_page(base_start, &page).unwrap();
+            });
+        }
+
+        assert!(
+            db.export_graph().is_err(),
+            "browser export must pass base pages through the v11 catalog boundary"
+        );
     }
 
     #[wasm_bindgen_test]
@@ -857,22 +1018,30 @@ mod tests {
                         }
                     }
                     "recover_latest" => {
+                        let legacy_published =
+                            published_byte_len(source).expect("legacy published length");
                         assert!(
-                            mutated.len() > published_byte_len(source).expect("published length"),
+                            mutated.len() > legacy_published,
                             "tail case must grow the physical image"
                         );
                         db.import_graph(js_sys::Uint8Array::from(mutated.as_slice()))
                             .await
                             .expect("browser must ignore unpublished tail");
                         assert_browser_queries(&db, &corpus.queries).await;
-                        let published =
-                            published_byte_len(source).expect("published source length");
+                        let exported = db.export_graph().expect("export trimmed graph").to_vec();
+                        let published = published_byte_len(&exported)
+                            .expect("migrated published source length");
                         assert_eq!(
-                            db.export_graph()
-                                .expect("export trimmed graph")
-                                .byte_length() as usize,
+                            exported.len(),
                             published,
                             "browser export must exclude unpublished tail"
+                        );
+                        assert_eq!(
+                            exported
+                                .get(legacy_published..legacy_published + 8)
+                                .expect("migration catalog magic must be published"),
+                            b"MGPGC001",
+                            "v11 catalog must replace, not publish, the legacy tail page"
                         );
                         let idb = IndexedDbBackend::open(&db_name)
                             .await

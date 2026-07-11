@@ -6,6 +6,7 @@
 
 use crate::storage::cache::PageCache;
 use crate::storage::index::FactRef;
+use crate::storage::page_integrity::BasePageIntegrityCatalog;
 use crate::storage::{PAGE_SIZE, StorageBackend};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -612,14 +613,41 @@ where
 /// rather than for the entire operation. On a cache hit [`PageCache::get_or_load`]
 /// never calls `read_page`, so no lock is acquired at all. All methods other than
 /// `read_page` are unimplemented and will panic if called.
-pub(crate) struct MutexStorageBackend<B>(pub(crate) Arc<Mutex<B>>);
+pub(crate) struct MutexStorageBackend<B> {
+    backend: Arc<Mutex<B>>,
+    base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
+}
+
+impl<B: StorageBackend> MutexStorageBackend<B> {
+    pub(crate) fn new(backend: Arc<Mutex<B>>) -> Self {
+        Self {
+            backend,
+            base_integrity: None,
+        }
+    }
+
+    pub(crate) fn verified(
+        backend: Arc<Mutex<B>>,
+        base_integrity: Arc<BasePageIntegrityCatalog>,
+    ) -> Self {
+        Self {
+            backend,
+            base_integrity: Some(base_integrity),
+        }
+    }
+}
 
 impl<B: StorageBackend> StorageBackend for MutexStorageBackend<B> {
     fn read_page(&self, page_id: u64) -> anyhow::Result<Vec<u8>> {
-        self.0
+        let page = self
+            .backend
             .lock()
             .map_err(|e| anyhow!("MutexStorageBackend lock poisoned: {e}"))?
-            .read_page(page_id)
+            .read_page(page_id)?;
+        if let Some(base_integrity) = &self.base_integrity {
+            base_integrity.verify_page(page_id, &page)?;
+        }
+        Ok(page)
     }
 
     #[allow(clippy::unimplemented)]
@@ -648,7 +676,7 @@ impl<B: StorageBackend> StorageBackend for MutexStorageBackend<B> {
     }
 
     fn is_new(&self) -> bool {
-        self.0.lock().map(|g| g.is_new()).unwrap_or(false)
+        self.backend.lock().map(|g| g.is_new()).unwrap_or(false)
     }
 }
 
@@ -659,7 +687,7 @@ impl<B: StorageBackend> StorageBackend for MutexStorageBackend<B> {
 // Fields are read by range_scan_* methods of the CommittedIndexReader impl.
 #[allow(dead_code)]
 pub struct OnDiskIndexReader<B: StorageBackend + 'static> {
-    backend: Arc<Mutex<B>>,
+    backend_adapter: MutexStorageBackend<B>,
     cache: Arc<PageCache>,
     pub(crate) eavt_root: u64,
     pub(crate) aevt_root: u64,
@@ -677,7 +705,26 @@ impl<B: StorageBackend + 'static> OnDiskIndexReader<B> {
         vaet_root: u64,
     ) -> Self {
         OnDiskIndexReader {
-            backend,
+            backend_adapter: MutexStorageBackend::new(backend),
+            cache,
+            eavt_root,
+            aevt_root,
+            avet_root,
+            vaet_root,
+        }
+    }
+
+    pub(crate) fn new_verified(
+        backend: Arc<Mutex<B>>,
+        cache: Arc<PageCache>,
+        base_integrity: Arc<BasePageIntegrityCatalog>,
+        eavt_root: u64,
+        aevt_root: u64,
+        avet_root: u64,
+        vaet_root: u64,
+    ) -> Self {
+        OnDiskIndexReader {
+            backend_adapter: MutexStorageBackend::verified(backend, base_integrity),
             cache,
             eavt_root,
             aevt_root,
@@ -696,8 +743,13 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         if self.eavt_root == 0 {
             return Ok(vec![]);
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan(self.eavt_root, start, end, &adapter, &self.cache)
+        range_scan(
+            self.eavt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 
     fn range_scan_aevt(
@@ -708,8 +760,13 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         if self.aevt_root == 0 {
             return Ok(vec![]);
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan(self.aevt_root, start, end, &adapter, &self.cache)
+        range_scan(
+            self.aevt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 
     fn range_scan_avet(
@@ -720,8 +777,13 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         if self.avet_root == 0 {
             return Ok(vec![]);
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan(self.avet_root, start, end, &adapter, &self.cache)
+        range_scan(
+            self.avet_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 
     fn range_scan_vaet(
@@ -732,8 +794,13 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         if self.vaet_root == 0 {
             return Ok(vec![]);
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan(self.vaet_root, start, end, &adapter, &self.cache)
+        range_scan(
+            self.vaet_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 }
 
@@ -753,8 +820,13 @@ impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
         if self.eavt_root == 0 {
             return Ok(Vec::new());
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan_entries(self.eavt_root, start, end, &adapter, &self.cache)
+        range_scan_entries(
+            self.eavt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 
     fn range_scan_aevt_entries(
@@ -770,8 +842,13 @@ impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
         if self.aevt_root == 0 {
             return Ok(Vec::new());
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan_entries(self.aevt_root, start, end, &adapter, &self.cache)
+        range_scan_entries(
+            self.aevt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 
     fn range_scan_avet_entries(
@@ -787,8 +864,13 @@ impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
         if self.avet_root == 0 {
             return Ok(Vec::new());
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan_entries(self.avet_root, start, end, &adapter, &self.cache)
+        range_scan_entries(
+            self.avet_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 
     fn range_scan_vaet_entries(
@@ -804,8 +886,13 @@ impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
         if self.vaet_root == 0 {
             return Ok(Vec::new());
         }
-        let adapter = MutexStorageBackend(Arc::clone(&self.backend));
-        range_scan_entries(self.vaet_root, start, end, &adapter, &self.cache)
+        range_scan_entries(
+            self.vaet_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+        )
     }
 }
 

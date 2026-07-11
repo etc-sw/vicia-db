@@ -146,7 +146,7 @@ let r2 = pq.execute(&[("tx", BindValue::TxCount(2)), ("entity", BindValue::Entit
 
 ```bash
 cargo run          # interactive Datalog REPL
-cargo test         # run 1205 passing tests (12 additional gates are ignored by default)
+cargo test         # run the native test suite
 cargo run < demos/demo_recursive.txt   # recursive rules demo
 ```
 
@@ -231,7 +231,7 @@ See the [Mobile Integration](https://github.com/project-minigraf/minigraf/wiki/U
 
 Published compatibility package: [`@minigraf/browser`](https://www.npmjs.com/package/@minigraf/browser) (IndexedDB-backed, `wasm-pack`). Vetch consumes the current checkout through its local `@vicia-db/browser` package boundary. Browser and native session queries share one lossless tagged JSON encoding; browser writes return ordered `tx_count` and durability/maintenance fields. Caller-scheduled `runIdleMaintenance()` atomically rebuilds a compact IndexedDB image when delta thresholds are crossed. Run the BrowserDb writer and O(total-history) maintenance in a dedicated worker under a Web Lock. See [`docs/DURABILITY_AND_CALLER_RULES.md`](docs/DURABILITY_AND_CALLER_RULES.md) and [`docs/MAINTENANCE_API_CONTRACT.md`](docs/MAINTENANCE_API_CONTRACT.md).
 
-WASI build (`wasm32-wasip1`) remains available as [`@minigraf/wasi`](https://www.npmjs.com/package/@minigraf/wasi) and as a GitHub Releases artifact. The native↔browser tagged portability/corruption matrix passes, but the 1M browser open path and page-local base integrity remain open requirements; maintenance availability alone is not a claim of full Vetch Gate E readiness.
+WASI build (`wasm32-wasip1`) remains available as [`@minigraf/wasi`](https://www.npmjs.com/package/@minigraf/wasi) and as a GitHub Releases artifact. File format v11 gives native and browser consumers the same generation-bound, page-local base integrity checks, and browser v10 migration is durable before `open()` returns. The 1M browser open path still loads every IndexedDB page into one in-memory buffer, so bounded-memory Gate E acceptance remains open; maintenance and page checksums alone are not a claim of full Vetch authority readiness.
 
 ### For Python / Node.js / Java / C
 

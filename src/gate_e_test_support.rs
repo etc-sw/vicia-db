@@ -130,13 +130,13 @@ pub(crate) fn apply_mutation(source: &[u8], mutation: &Mutation) -> Result<Vec<u
             bytes[offset] ^= 1;
         }
         Mutation::RemoveLastPage => {
-            if bytes.len() < PAGE_SIZE * 2 || bytes.len() % PAGE_SIZE != 0 {
+            if bytes.len() < PAGE_SIZE * 2 || !bytes.len().is_multiple_of(PAGE_SIZE) {
                 return Err("fixture must contain at least two complete pages".to_string());
             }
             bytes.truncate(bytes.len() - PAGE_SIZE);
         }
         Mutation::TruncateLastPageHalf => {
-            if bytes.len() < PAGE_SIZE * 2 || bytes.len() % PAGE_SIZE != 0 {
+            if bytes.len() < PAGE_SIZE * 2 || !bytes.len().is_multiple_of(PAGE_SIZE) {
                 return Err("fixture must contain at least two complete pages".to_string());
             }
             bytes.truncate(bytes.len() - PAGE_SIZE / 2);
@@ -392,15 +392,26 @@ mod native_tests {
                         }
                     }
                     "recover_latest" => {
+                        let legacy_published =
+                            published_byte_len(source).expect("legacy published source length");
                         let db = opened.expect("native must ignore unpublished tail");
                         for query in &corpus.queries {
                             assert_query(&db, query);
                         }
                         let backup = dir.path().join("published.graph");
                         db.backup_to(&backup).expect("backup published prefix");
+                        let migrated = std::fs::read(&path).expect("read migrated source");
+                        assert_eq!(
+                            migrated
+                                .get(legacy_published..legacy_published + 8)
+                                .expect("migration catalog magic must be published"),
+                            b"MGPGC001",
+                            "v11 catalog must replace, not publish, the legacy tail page"
+                        );
                         assert_eq!(
                             std::fs::metadata(&backup).expect("backup metadata").len() as usize,
-                            published_byte_len(source).expect("published source length"),
+                            published_byte_len(&migrated)
+                                .expect("migrated published source length"),
                             "native backup must exclude unpublished tail"
                         );
                     }

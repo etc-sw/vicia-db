@@ -54,10 +54,10 @@ The design target is:
 
 ## Current Storage Boundary
 
-The current v10 file has page 0 with the legacy 84-byte header plus the delta manifest extension area. The base header still carries four committed index roots and checksums. `PersistentFactStorage::save()` can currently take three internal paths:
+The current v11 file has page 0 with the legacy 84-byte header, the two v10 delta-manifest slots, and a generation-bound base-page integrity descriptor. The base header still carries four committed index roots and the legacy aggregate checksum. `PersistentFactStorage::save()` can currently take four internal paths:
 
 1. No-op when there is no dirty state.
-2. Delta segment publish when a clean v10 base has pending facts and no visible delta manifest.
+2. Delta segment publish when a clean v11 base has pending facts and no visible delta manifest.
 3. Multi-segment delta publish when a visible delta has new pending facts: the new segment contains only the pending facts, and the newly published manifest preserves previous segment descriptors plus the appended segment.
 4. Full rebuild from base-plus-pending when the delta path is not available, and copy-on-write recompact from base-plus-delta facts when visible delta maintenance or repair is required.
 
@@ -73,9 +73,10 @@ This design preserves that discipline. It changes what a checkpoint/flush writes
 
 ## Format Direction
 
-Use a v10 format extension in page 0. The existing 84-byte v9 header remains the base section. v10 adds a double-buffered delta manifest pointer area in the unused space of page 0.
+The existing 84-byte v9 header remains the base section. v10 added a double-buffered delta manifest pointer area in the unused space of page 0. v11 preserves those fields and appends one base-integrity descriptor; valid v10 files upgrade in place by appending a catalog and publishing only page 0.
 
-The v10 header extension should contain:
+The page-0 extension now contains the v10 manifest/base-layout fields plus the
+v11 base-integrity descriptor:
 
 | Field | Purpose |
 | --- | --- |
@@ -87,10 +88,20 @@ The v10 header extension should contain:
 | `delta_manifest_slot0_descriptor_checksum` / `slot1_descriptor_checksum` | Checksum of the slot descriptor fields. A corrupt slot is ignored if the alternate slot is valid. |
 | `base_fact_page_start` | First packed fact page of the currently published base. Defaults to page `1` for older v10 extension tails. Copy-on-write recompact publishes a later start page. |
 | `base_layout_checksum` | Checksum over `base_fact_page_start`, so a corrupt base-start pointer rejects reopen instead of silently reading page `1`. |
+| `base_generation` | Non-zero identity for the immutable base covered by the catalog. Full/COW publication increments it; v10 migration begins at generation `1`. |
+| `covered_page_start` / `covered_page_count` | Exact contiguous fact/index page range protected by the catalog. |
+| `catalog_page_start` / `catalog_page_count` / `catalog_len` | Exact in-file `MGPGC001` catalog location and canonical byte length. |
+| `catalog_checksum` / `descriptor_checksum` | CRC32 for the exact catalog encoding and its page-0 descriptor. CRC32 detects accidental corruption; it is not authentication. |
+
+The flat catalog has an intentional 64 MiB metadata ceiling, protecting up to
+16,777,206 active-base pages (just under 64 GiB at 4 KiB/page). Readers and
+legacy migration fail before allocation or page scans when that active-base
+range is exceeded. This is not a global `.graph` size limit: published delta,
+manifest, and older copy-on-write lineage pages may extend beyond that range.
 
 Publish rule:
 
-1. Write and sync all new fact pages, delta pages, and manifest payload pages. FileBackend append writes update only the in-memory page count; disk page 0 is not modified here.
+1. Write and sync all new fact pages, delta pages, and manifest payload pages. A new base also writes, syncs, and reads back its per-page catalog. FileBackend append writes update only the in-memory page count; disk page 0 is not modified here.
 2. Fill the inactive manifest slot with generation, page range, length, payload checksum, and descriptor checksum.
 3. Write and sync page 0 as the publish point.
 4. Only after this succeeds, wire readers and retire WAL entries covered by the checkpoint.
@@ -104,6 +115,8 @@ Recovery rule:
 - If a newer slot, manifest payload, or delta segment is corrupt but an older slot passes all checks, fall back to the older slot.
 - If no usable slot remains for a committed delta state, report file corruption. Do not silently open base-only.
 - Ignore corrupt trailing delta/manifest pages that were never published by page 0.
+- Validate the v11 descriptor and catalog at open without scanning the base.
+- Verify each fact/index page against its generation and absolute page id when a committed reader first loads it. Never turn a checksum/I/O failure into a different query plan or bless it during full save, recompact, export, or backup.
 
 This borrows redb's root-publish discipline without importing redb's allocator or MVCC page model.
 
@@ -172,7 +185,7 @@ Behavior:
 - Candidate deduplication must use full-history identity, not just E/A/V.
 - The reader may return a `Vec<FactRef>` initially because the current trait returns vectors. A later streaming trait can be designed only after correctness is locked.
 
-The first reader implementation proved merge semantics against the existing index key types and test fixtures. The current branch writes v10 files with one or more visible delta segments. A checkpoint over a visible delta appends only the pending facts as a new segment and publishes a manifest list through the inactive slot; it does not rewrite previously selected delta facts.
+The first reader implementation proved merge semantics against the existing index key types and test fixtures. The current branch writes v11 files with one or more visible delta segments. A checkpoint over a visible delta appends only the pending facts as a new segment and publishes a manifest list through the inactive slot; it does not rewrite previously selected delta facts.
 
 ## Flush Semantics
 
@@ -184,7 +197,7 @@ After `wal_write_stamped_batch` applies facts to `FactStorage`, checkpoint/flush
 Initial policy:
 
 - Keep public `checkpoint()` as the API name.
-- Internally prefer delta flush when the existing file is v10-capable and the delta segment count/bytes are below thresholds.
+- Internally prefer delta flush when the existing file has a current v11 base and the delta segment count/bytes are below thresholds.
 - Use full rebuild for repair, migration, format upgrade, or explicit
   maintenance. Segment-growth thresholds are surfaced to idle maintenance; they
   must not trigger hidden recompact inside foreground `checkpoint()`.

@@ -82,12 +82,23 @@ impl BrowserBufferBackend {
     pub fn exportable_page_count(&self) -> Result<u64> {
         let page_count = self.declared_page_count()?;
         for page_id in 0..page_count {
-            if !self.pages.contains_key(&page_id) {
-                anyhow::bail!(
-                    "Published database is truncated: page {} of {} is missing",
-                    page_id,
-                    page_count
-                );
+            match self.pages.get(&page_id) {
+                None => {
+                    anyhow::bail!(
+                        "Published database is truncated: page {} of {} is missing",
+                        page_id,
+                        page_count
+                    );
+                }
+                Some(page) if page.len() != PAGE_SIZE => {
+                    anyhow::bail!(
+                        "Published database page {} has invalid length {} (expected {})",
+                        page_id,
+                        page.len(),
+                        PAGE_SIZE
+                    );
+                }
+                Some(_) => {}
             }
         }
         Ok(page_count)
@@ -151,6 +162,14 @@ impl StorageBackend for BrowserBufferBackend {
 
     fn page_count(&self) -> Result<u64> {
         Ok(self.pages.len() as u64)
+    }
+
+    fn has_complete_page_prefix(&self, published_page_count: u64) -> Result<bool> {
+        Ok((0..published_page_count).all(|page_id| {
+            self.pages
+                .get(&page_id)
+                .is_some_and(|page| page.len() == PAGE_SIZE)
+        }))
     }
 
     fn close(&mut self) -> Result<()> {
@@ -266,6 +285,22 @@ mod tests {
         let mut buf = BrowserBufferBackend::new();
         assert_eq!(buf.retain_declared_prefix().unwrap(), 0);
         assert_eq!(buf.exportable_page_count().unwrap(), 0);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn short_published_page_is_neither_complete_nor_exportable() {
+        let mut header = FileHeader::new();
+        header.page_count = 2;
+        let mut page0 = header.to_bytes();
+        page0.resize(PAGE_SIZE, 0);
+        let pages = HashMap::from([(0u64, page0), (1u64, vec![0; PAGE_SIZE - 1])]);
+        let buf = BrowserBufferBackend::load_pages(pages);
+
+        assert!(!buf.has_complete_page_prefix(2).unwrap());
+        assert!(
+            buf.exportable_page_count().is_err(),
+            "short published pages must not form a portable graph image"
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub(crate) mod delta_segment;
 pub(crate) mod header_extension;
 pub mod index;
 pub mod packed_pages;
+pub(crate) mod page_integrity;
 pub mod persistent_facts;
 
 use anyhow::Result;
@@ -64,10 +65,11 @@ pub const MAGIC_NUMBER: [u8; 4] = *b"MGRF";
 
 /// Current file format version.
 ///
-/// v10 keeps the 84-byte legacy header layout and reserves the rest of page 0
-/// for double-buffered delta manifest descriptors. v9 and older files still
-/// load through the migration path.
-pub const FORMAT_VERSION: u32 = 10;
+/// v11 keeps the 84-byte legacy header layout and extends page 0 with a
+/// generation-bound base-page integrity catalog descriptor alongside the
+/// double-buffered delta manifest descriptors. v10 and older files still load
+/// through the migration path.
+pub const FORMAT_VERSION: u32 = 11;
 
 /// fact_page_format: legacy one-per-page (v4 and earlier, or unset byte = 0x00).
 pub const FACT_PAGE_FORMAT_ONE_PER_PAGE: u8 = 0x01;
@@ -100,6 +102,18 @@ pub trait StorageBackend: Send + Sync {
     /// Get the total number of pages in the storage.
     fn page_count(&self) -> Result<u64>;
 
+    /// Return whether every page in `[0, published_page_count)` is physically
+    /// present. Backends should override this when they can answer from file
+    /// length or page keys without reading the complete prefix.
+    fn has_complete_page_prefix(&self, published_page_count: u64) -> Result<bool> {
+        for page_id in 0..published_page_count {
+            if !matches!(self.read_page(page_id), Ok(page) if page.len() == PAGE_SIZE) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Close the storage backend.
     ///
     /// Performs final sync and cleanup.
@@ -119,7 +133,7 @@ pub trait StorageBackend: Send + Sync {
 
 /// Legacy file header for .graph files — 84 bytes.
 ///
-/// v10 stores header extensions after these 84 bytes in the rest of page 0.
+/// v10+ stores header extensions after these 84 bytes in the rest of page 0.
 ///
 /// Layout (all fields little-endian):
 ///   0..4    magic ("MGRF")
@@ -134,7 +148,7 @@ pub trait StorageBackend: Send + Sync {
 ///   64..68  index_checksum (u32)
 ///   68      fact_page_format (u8)
 ///   69..72  _padding ([u8; 3])
-///   72..80  fact_page_count (u64)     — new in v6; v10 uses the header
+///   72..80  fact_page_count (u64)     — new in v6; v10+ use the header
 ///                                      extension for the first base fact page
 ///   80..84  header_checksum (u32)    — new in v7
 #[derive(Debug, Clone, Copy)]
@@ -469,8 +483,8 @@ mod tests {
     }
 
     #[test]
-    fn test_format_version_is_10() {
-        assert_eq!(FORMAT_VERSION, 10);
+    fn test_format_version_is_11() {
+        assert_eq!(FORMAT_VERSION, 11);
     }
 
     #[test]
@@ -484,6 +498,13 @@ mod tests {
     fn test_validate_accepts_version_10() {
         let mut h = FileHeader::new();
         h.version = 10;
+        assert!(h.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_version_11() {
+        let mut h = FileHeader::new();
+        h.version = 11;
         assert!(h.validate().is_ok());
     }
 
@@ -532,7 +553,7 @@ mod tests {
     fn test_new_header_has_current_version() {
         let header = FileHeader::new();
         assert_eq!(header.version, FORMAT_VERSION);
-        assert_eq!(header.version, 10);
+        assert_eq!(header.version, 11);
     }
 
     #[test]
@@ -571,7 +592,7 @@ mod tests {
         assert_eq!(b.len(), 84, "legacy header must be exactly 84 bytes");
 
         assert_eq!(&b[0..4], b"MGRF");
-        assert_eq!(&b[4..8], &10u32.to_le_bytes());
+        assert_eq!(&b[4..8], &11u32.to_le_bytes());
         assert_eq!(&b[8..16], &0x0102_0304_0506_0708_u64.to_le_bytes());
         assert_eq!(&b[16..24], &0x1112_1314_1516_1718_u64.to_le_bytes());
         assert_eq!(&b[24..32], &0x2122_2324_2526_2728_u64.to_le_bytes());

@@ -6,8 +6,8 @@ Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 landed 2026-07-11 (A2's `export_since` frame frozen after harrekki-lane
 ACK; A5 evidence gate and A5-4 browser maintenance passed — see the A5 block),
 and A8/A9 landed. The shared native/browser tagged, portability, and corruption
-corpus has also landed. Remaining known implementation work is bounded browser
-open plus page-local integrity; remaining acceptance proof includes the real
+corpus and A5-6a/b fail-closed page integrity work have also landed. Remaining
+known implementation work is bounded browser open; remaining acceptance proof includes the real
 Gate D Vetch trace and a 1M browser maintenance peak-memory run. This line sits
 after Q3-B on the Vetch delta-storage roadmap and does not modify any delta
 gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md` apply
@@ -48,7 +48,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G2 | No incremental change surface; `export_fact_log()` is full-export only (`src/db.rs:761`). | Public API audit. | **Harrekki P0 #2** ("what changed since my last tick"). Vetch consumes via stored cursor. Slice A2. |
 | G3 | Value-range predicates evaluate post-scan in memory; AVET/VAET range scans exist at storage layer but executor never pushes comparisons into them. | `eval_binop` (`src/query/datalog/executor.rs` ~2200); `threshold_filter` 57.8 ms at 10K (`docs/BENCHMARKS.md`). | Neither caller asks now. Vetch viewport culling is Vetch-owned UI projection; harrekki decay-candidate queries are benchmark-first (P1 #6 note). Demoted to candidate (A3). |
 | G4 | Single-fact cap `MAX_FACT_BYTES` = 4080 bytes (`src/storage/packed_pages.rs:47`); no documented chunking convention. | Insert-time validation. | Both callers pin payloads (harrekki: blobs/packets; Vetch: even note text) **outside** the graph — pointers/hashes only. Guard-rail doc only (A4). |
-| G5 | Browser backend is write-through with no WAL; open still loads **all** IndexedDB pages into memory and cross-tab coordination remains caller-owned. | `src/browser/mod.rs`, `src/browser/maintenance.rs`, `src/browser/indexeddb.rs`. | **Vetch P0/P1** — A5-4 closes maintenance/failure behavior and A5-5 closes tagged/portable/corruption parity. Remaining Gate E implementation blockers are bounded 1M open and page-local integrity; 1M maintenance peak memory still needs evidence. |
+| G5 | Browser backend is write-through with no WAL; open still loads **all** IndexedDB pages into memory and cross-tab coordination remains caller-owned. | `src/browser/mod.rs`, `src/browser/maintenance.rs`, `src/browser/indexeddb.rs`. | **Vetch P0/P1** — A5-4 closes maintenance/failure behavior, A5-5 closes tagged/portable/corruption parity, and A5-6b closes page-local base integrity plus durable v10 migration. Remaining Gate E implementation blocker is bounded 1M open; 1M maintenance peak memory still needs evidence. |
 | G6 | `docs/BENCHMARKS.md` 100K/1M current-view rows predate v1.1.0 selective pushdown. | Query Latency section note ("unchanged from v0.8.0"). | Both callers demand caller-shaped evidence before API growth. Slice A0 (expanded). |
 | G7 | History grows monotonically; no forget or erasure surface. | Full-history identity invariant. | Harrekki splits this: semantic forget = **bulk valid-time closure** (P1 #6, plannable → A8); physical erasure/vacuum = P2, opt-in, auditable (stays an open decision). |
 | G8 | No long-lived session access for external (non-Rust) callers; harrekki currently spawns the CLI per call. | `~/projects/harrekki/src/harrekki/dev_system_minigraf.clj` (one-shot STDIO). | **Harrekki P0 #1** — framed pipe mode. Slice A6. |
@@ -206,8 +206,8 @@ write durability fields landed later in A5-4.
   semantics + failure classification + canonical tagged encoding),
   `docs/BENCHMARKS.md` "Browser Open at Scale" re-measure and "A5: Browser
   IndexedDB Growth", six wasm atomicity tests in `src/browser/`.
-  Vicia still owns bounded 1M open and page-local integrity before the final
-  browser cutover decision can move to vetch-app.
+  A5-6b later closed page-local integrity; Vicia still owns bounded 1M open
+  before the final browser cutover decision can move to vetch-app.
 - Progress (2026-07-11): **import atomicity LANDED** — `importGraph` now
   commits the durable replacement in a single IndexedDB `clear`+`put`
   transaction *before* the live handle switches (was: swap-then-flush, which
@@ -291,14 +291,16 @@ the old live/durable browser state on rejected import, and omit unpublished
 tail pages from export/backup. A complete fallback image remains portable; a
 physically incomplete prefix stays queryable through fallback but export fails
 visibly until repair. Browser and session results share `src/json_value.rs`.
-The repeatable CI entrypoint runs all 23 browser tests in headless Chrome.
+The repeatable CI entrypoint now runs 27 browser-WASM tests in headless Chrome;
+the three A5-6b additions cover durable migration success, atomic abort, and
+verified export.
 
 This still does **not** close Vetch Gate E. Browser open loads every page into
-renderer memory; the recorded 1M shape remains about 420 MB per tab. The
-existing v10 base checksum also does not detect an unread base-fact-page bit
-flip when a selected delta manifest is present. Next browser storage work is a
-generation-bound page-on-demand source with page-local integrity, followed by
-the 1M open/query/growth/maintenance peak-memory matrix.
+renderer/worker memory; the recorded 1M shape remains about 420 MB per handle.
+A5-6b now detects an unread base-fact/index-page bit flip through a
+generation-bound in-file catalog even when a selected delta is present. Next
+browser storage work is a page-on-demand IndexedDB source using that verifier,
+followed by the 1M open/query/growth/maintenance peak-memory matrix.
 
 #### A5-6a — Fail-closed query access boundary (DONE 2026-07-11)
 
@@ -315,6 +317,27 @@ Declared packed-fact page ranges also reject short or wrong-type pages instead
 of silently omitting their facts. This is the reusable query/storage boundary
 for the sparse browser source and page verifier; it does not itself make
 BrowserDb page-on-demand or close Gate E.
+
+#### A5-6b — Generation-bound base-page integrity (DONE 2026-07-11)
+
+File format v11 keeps the 84-byte legacy header and both v10 manifest slots,
+then adds a checksummed descriptor for one in-file `MGPGC001` catalog. The
+catalog stores one CRC32 for every immutable base fact/index page and binds it
+to the base generation plus absolute page id. Open reads page 0 and catalog
+metadata but no base pages; selective, temporal, full-history, export, and
+backup paths verify a base page when they actually read it. CRC32 is accidental
+corruption detection, not authentication.
+
+Fresh/full/COW publishers sync and read back the catalog before publishing page
+0. Valid v1–v9 graphs append a COW v11 base after the complete legacy image,
+preserving duplicate rows and v9 scoped retractions; a complete v10 graph
+appends only the catalog without rewriting base, delta, or manifest bytes.
+Corrupt legacy base data fails before page 0 changes. BrowserDb
+commits migration dirty pages and page 0 in one IndexedDB transaction before
+returning a handle, and an injected transaction abort preserves the exact v10
+image. The native suite is green, and real Chrome passes 27 browser-WASM tests.
+Gate E remains open because the IndexedDB source is still
+eager/full-load and the 1M bounded-memory matrix has not run on a sparse source.
 
 ### A8 — Bulk valid-time closure, the "forget" primitive (DONE 2026-07-11)
 

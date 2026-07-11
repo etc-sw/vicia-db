@@ -124,6 +124,9 @@ appear in runtime output today — runtime codes are tracked in
 | STG-022 | Page id overflow writing fact pages | Storage |
 | STG-023 | Page index exceeds u64::MAX | Storage |
 | STG-024 | Pending fact count exceeds u64::MAX | Storage |
+| STG-025 | Base page integrity verification failed | Storage |
+| STG-026 | Legacy fact migration validation failed | Storage |
+| STG-027 | Base page integrity catalog exceeds metadata limit | Storage |
 | WAL-001 | Invalid WAL magic number | WAL |
 | WAL-002 | Unsupported WAL version | WAL |
 | WAL-003 | Fact serialised size exceeds maximum | WAL |
@@ -1794,6 +1797,69 @@ prefix shorter than 4096 bytes is rejected without rewriting it.
 - This should never occur under normal operation. File a bug.
 
 **Scenario**: An extremely long-running write session accumulated more unflushed facts than u64 can count.
+
+### STG-025 Base page integrity verification failed
+
+**Error text**: `Base page integrity checksum mismatch for page <n>` (also
+catalog magic/length/checksum/descriptor variants)
+
+**Cause**: File format v11 could not verify the generation-bound checksum
+catalog, or a fact/index page no longer matches the checksum bound to its base
+generation and absolute page id. Catalog metadata failures reject open; a base
+page mismatch appears when the first query/export/backup reads that page.
+
+**Resolution**:
+- Stop using the handle and restore a known-good backup. Do not retry a full
+  save or copy the damaged file as repair; those paths intentionally reject the
+  corrupt base.
+- If this followed a storage or transfer failure, keep the original bytes for
+  diagnosis. CRC32 detects accidental corruption and is not hostile-input
+  authentication.
+
+**Scenario**: A bit flip in an otherwise decodable packed fact page is detected
+when a selective query resolves its `FactRef`.
+
+### STG-026 Legacy fact migration validation failed
+
+**Error text**: `Failed to deserialize legacy fact at page <n>` or `Failed to
+deserialize v1 fact at page <n>` (also fact-range, checksum, node-count, and
+incomplete-prefix variants)
+
+**Cause**: A v1–v9 graph declares a fact range that conflicts with its
+`node_count` or index roots, contains a missing/undecodable page, fails its
+historical checksum rule, or does not have a complete published prefix.
+Migration fails closed rather than skipping a record, shortening the range, or
+choosing an attacker-controlled sparse append offset.
+
+**Resolution**:
+- Restore a complete legacy file or a known-good backup, then reopen with the
+  current library. The failed migration leaves page 0 on the legacy version.
+  A valid migration appends its v11 base after the legacy image and preserves
+  all original non-header pages until the final page-0 publish.
+
+**Scenario**: A v5 root corrupted to page 1 would imply zero fact pages despite
+a non-zero `node_count`; migration rejects instead of publishing an empty v11
+database.
+
+### STG-027 Base page integrity catalog exceeds metadata limit
+
+**Error text**: `Base page integrity catalog exceeds the supported
+67108864-byte metadata limit`
+
+**Cause**: A v11 descriptor or legacy migration input claims more than
+16,777,206 pages in the active immutable base. The flat checksum catalog would
+exceed its intentional 64 MiB eager-metadata ceiling (just under 64 GiB of
+4 KiB base pages), so the reader rejects it before allocating the catalog or
+scanning the claimed page range.
+
+**Resolution**:
+- Treat an unexpected occurrence as malformed or unsupported metadata and keep
+  the original bytes for diagnosis.
+- For a legitimately larger active base, use a supported release with a
+  different integrity-catalog design; do not patch header counts manually.
+
+**Scenario**: A sparse legacy file declares billions of fact pages in an
+attempt to trigger an unbounded checksum scan during migration.
 
 ---
 

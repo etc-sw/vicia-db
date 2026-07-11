@@ -20,12 +20,16 @@ use crate::storage::delta_manifest::{
 };
 use crate::storage::delta_segment::{DeltaSegment, write_segment_pages};
 use crate::storage::header_extension::{
-    HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName, HeaderManifestSlotRecoveryReason,
-    HeaderManifestSlotSelection, build_header_page, build_header_page_with_extension,
-    select_header_manifest_slot_from_page0,
+    BasePageIntegrityDescriptor, HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
+    HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection, build_header_page,
+    build_header_page_with_extension, select_header_manifest_slot_from_page0,
 };
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey, encode_value};
 use crate::storage::packed_pages::{PackedFactPacker, pack_facts};
+use crate::storage::page_integrity::{
+    BasePageIntegrityCatalog, catalog_crc32,
+    compute_page_checksum as compute_integrity_page_checksum,
+};
 use crate::storage::{
     CommittedFactReader, CommittedIndexReader, FileHeader, PAGE_SIZE, StorageBackend,
 };
@@ -46,12 +50,11 @@ fn normalize_legacy_retractions(facts: &mut [Fact]) {
     }
 }
 
-/// Compute the CRC32 sync checksum over all facts (used in tests only).
+/// Compute the legacy v4 CRC32 checksum over all facts.
 ///
 /// Sorts facts by `(tx_count, entity_bytes, attribute)` before hashing to
 /// produce a stable total order independent of Vec insertion order.
-#[cfg(all(test, not(target_arch = "wasm32")))]
-fn compute_index_checksum(facts: &[Fact]) -> u32 {
+fn compute_index_checksum(facts: &[Fact]) -> Result<u32> {
     let mut sorted: Vec<&Fact> = facts.iter().collect();
     sorted.sort_by(|a, b| {
         a.tx_count
@@ -61,11 +64,38 @@ fn compute_index_checksum(facts: &[Fact]) -> u32 {
     });
     let mut hasher = Hasher::new();
     for fact in sorted {
-        let bytes = postcard::to_allocvec(fact)
-            .expect("BUG: failed to serialize Fact for index checksum; this should never happen");
+        let bytes = postcard::to_allocvec(fact)?;
         hasher.update(&bytes);
     }
-    hasher.finalize()
+    Ok(hasher.finalize())
+}
+
+/// Return the exclusive end of a legacy one-fact-per-page range.
+///
+/// v1-v3 publish only header + fact pages. v4 may append four paged-blob
+/// indexes, whose first non-zero root starts immediately after the facts.
+/// `node_count` was the canonical fact count in every one-per-page writer and
+/// prevents a corrupt root from silently shortening or extending migration.
+fn legacy_one_per_page_fact_end(header: &FileHeader) -> Result<u64> {
+    let expected_end = header
+        .node_count
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("Legacy fact page range overflow"))?;
+    let first_index_page = [
+        header.eavt_root_page,
+        header.aevt_root_page,
+        header.avet_root_page,
+        header.vaet_root_page,
+    ]
+    .into_iter()
+    .filter(|page_id| *page_id > 0)
+    .min();
+    let fact_end = first_index_page.unwrap_or(header.page_count);
+
+    if fact_end > header.page_count || fact_end != expected_end {
+        anyhow::bail!("Legacy one-per-page fact range does not match node_count and index roots");
+    }
+    Ok(fact_end)
 }
 
 /// CommittedFactReader backed by a PageCache + shared backend.
@@ -77,8 +107,6 @@ fn compute_index_checksum(facts: &[Fact]) -> u32 {
 // dyn dispatch — Rust's dead-code lint does not track trait-impl field reads
 // when the impl is behind dyn dispatch.
 struct CommittedFactLoaderImpl<B: StorageBackend> {
-    #[allow(dead_code)]
-    backend: Arc<Mutex<B>>,
     #[allow(dead_code)]
     page_cache: Arc<PageCache>,
     /// Pre-built adapter reused on every `resolve()` call.
@@ -109,11 +137,7 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
     fn stream_all(&self) -> anyhow::Result<Vec<crate::graph::types::Fact>> {
         let n = self.committed_fact_pages.load(Ordering::SeqCst);
         let first_fact_page = self.committed_fact_page_start.load(Ordering::SeqCst);
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        crate::storage::packed_pages::read_all_from_pages(&*backend, first_fact_page, n)
+        crate::storage::packed_pages::read_all_from_pages(&self.backend_adapter, first_fact_page, n)
     }
 
     fn for_each_fact(
@@ -122,11 +146,12 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
     ) -> anyhow::Result<()> {
         let n = self.committed_fact_pages.load(Ordering::SeqCst);
         let first_fact_page = self.committed_fact_page_start.load(Ordering::SeqCst);
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        crate::storage::packed_pages::for_each_from_pages(&*backend, first_fact_page, n, visit)
+        crate::storage::packed_pages::for_each_from_pages(
+            &self.backend_adapter,
+            first_fact_page,
+            n,
+            visit,
+        )
     }
 
     fn for_each_fact_since(
@@ -174,12 +199,8 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
 
         // Stream only the tail pages; the boundary page may still hold
         // leading facts at or below `since`, so keep the filter.
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
         crate::storage::packed_pages::for_each_from_pages(
-            &*backend,
+            &self.backend_adapter,
             first_fact_page.saturating_add(lo),
             n.saturating_sub(lo),
             &mut |fact| {
@@ -221,6 +242,14 @@ struct RecompactCandidate {
     base_fact_page_start: u64,
     fact_page_count: u64,
     checkpoint_tx_count: u64,
+    base_integrity: Arc<BasePageIntegrityCatalog>,
+}
+
+struct BaseIntegrityWrite {
+    catalog: Arc<BasePageIntegrityCatalog>,
+    descriptor: BasePageIntegrityDescriptor,
+    aggregate_checksum: u32,
+    published_page_count: u64,
 }
 
 impl LayeredFactLoaderImpl {
@@ -297,39 +326,15 @@ struct FactV1 {
 /// Persistent fact storage with serialization support.
 ///
 /// Architecture:
-/// - Page 0: File header (metadata)
-/// - Page 1+: Serialized facts (one fact per page, for simplicity)
+/// - Page 0: versioned header, delta-manifest slots, and base-integrity authority.
+/// - Packed fact pages plus on-disk EAVT/AEVT/AVET/VAET B+trees.
+/// - Optional append-only delta segments and manifests between recompactions.
+/// - An in-file, generation-bound checksum catalog for every immutable base page.
 ///
-/// # Storage Strategy (Phase 3-5)
-///
-/// Current implementation uses a simple "load all, save all" approach:
-/// - On open: Deserialize all facts into memory (FactStorage)
-/// - All operations: Work on in-memory `Vec<Fact>`
-/// - On save: Serialize all facts back to disk
-///
-/// **Trade-offs:**
-/// - ✅ Simple, correct, easy to reason about
-/// - ✅ Fast queries (no disk I/O)
-/// - ✅ Good for embedded use cases with small-medium datasets
-/// - ❌ Memory usage = entire database size
-/// - ❌ Not scalable to very large datasets
-///
-/// **Scalability:**
-/// - Works well for <100K facts (typical use case)
-/// - Memory footprint: ~100-200 bytes per fact
-/// - Example: 100K facts ≈ 10-20MB memory (acceptable for embedded)
-///
-/// # Future: Phase 6 (Performance)
-///
-/// Phase 6 will introduce page-based access with indexes:
-/// - EAVT, AEVT, AVET, VAET indexes (in-memory B-trees)
-/// - On-demand fact loading from disk
-/// - LRU cache for hot pages
-/// - Memory-mapped file access (optional)
-/// - Target: Scale to millions of facts with bounded memory
-///
-/// The page-based backend (StorageBackend) is designed to support this
-/// future architecture without breaking changes.
+/// Committed facts and indexes are resolved lazily through a bounded page cache;
+/// only pending writes live in the mutable in-memory [`FactStorage`]. Full base
+/// publication and copy-on-write recompact write data and integrity metadata
+/// before page 0, while delta checkpoints preserve the selected base identity.
 pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     backend: Arc<Mutex<B>>,
     page_cache: Arc<PageCache>,
@@ -340,6 +345,8 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     delta_manifest_selection: PersistedManifestSelection,
     committed_fact_pages: Arc<AtomicU64>,
     committed_fact_page_start: Arc<AtomicU64>,
+    base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
+    write_blocked_legacy: bool,
 }
 
 impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
@@ -365,6 +372,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             delta_manifest_selection: PersistedManifestSelection::NoDeltaManifest,
             committed_fact_pages,
             committed_fact_page_start,
+            base_integrity: None,
+            write_blocked_legacy: false,
         };
 
         // Try to load existing data.
@@ -393,9 +402,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     }
 
     fn base_fact_loader(&self) -> Arc<dyn CommittedFactReader> {
+        let backend_adapter = match &self.base_integrity {
+            Some(base_integrity) => {
+                MutexStorageBackend::verified(self.backend.clone(), base_integrity.clone())
+            }
+            None => MutexStorageBackend::new(self.backend.clone()),
+        };
         Arc::new(CommittedFactLoaderImpl {
-            backend: self.backend.clone(),
-            backend_adapter: MutexStorageBackend(self.backend.clone()),
+            backend_adapter,
             page_cache: self.page_cache.clone(),
             committed_fact_pages: self.committed_fact_pages.clone(),
             committed_fact_page_start: self.committed_fact_page_start.clone(),
@@ -422,14 +436,25 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             return Ok(());
         }
 
-        let base_index_reader = Arc::new(OnDiskIndexReader::new(
-            self.backend.clone(),
-            self.page_cache.clone(),
-            header.eavt_root_page,
-            header.aevt_root_page,
-            header.avet_root_page,
-            header.vaet_root_page,
-        ));
+        let base_index_reader = Arc::new(match &self.base_integrity {
+            Some(base_integrity) => OnDiskIndexReader::new_verified(
+                self.backend.clone(),
+                self.page_cache.clone(),
+                base_integrity.clone(),
+                header.eavt_root_page,
+                header.aevt_root_page,
+                header.avet_root_page,
+                header.vaet_root_page,
+            ),
+            None => OnDiskIndexReader::new(
+                self.backend.clone(),
+                self.page_cache.clone(),
+                header.eavt_root_page,
+                header.aevt_root_page,
+                header.avet_root_page,
+                header.vaet_root_page,
+            ),
+        });
         let index_reader: Arc<dyn CommittedIndexReader> = if delta_segments.is_empty() {
             base_index_reader
         } else {
@@ -531,6 +556,119 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         ))
     }
 
+    /// Upgrade a complete v10 published image by appending integrity metadata
+    /// and publishing only page 0. Existing base, delta, and manifest bytes are
+    /// preserved exactly. If the published prefix is physically incomplete but
+    /// recoverable through an older manifest, leave it on v10 and make the
+    /// handle read-only rather than filling holes or changing export behavior.
+    fn migrate_v10_to_v11(
+        &mut self,
+        header: &FileHeader,
+        page0: &[u8],
+        delta_selection: &PersistedManifestSelection,
+    ) -> Result<bool> {
+        let extension = HeaderExtension::read_from_page0(header.version, page0)?
+            .ok_or_else(|| anyhow::anyhow!("v10 migration requires a header extension"))?;
+        let base_page_end = match delta_selection {
+            PersistedManifestSelection::NoDeltaManifest => header.page_count,
+            PersistedManifestSelection::Use { manifest, .. } => {
+                manifest.base_identity().page_count()
+            }
+            PersistedManifestSelection::RecoveryRequired { .. } => {
+                anyhow::bail!("Cannot migrate a v10 graph that requires manifest recovery")
+            }
+        };
+        let base_page_start = extension.base_fact_page_start();
+        if base_page_end < base_page_start {
+            anyhow::bail!("v10 base page range is invalid");
+        }
+
+        let covered_page_count = base_page_end.saturating_sub(base_page_start);
+        if covered_page_count > 0 {
+            // Validate the eager metadata footprint before checking a sparse
+            // published prefix or scanning any base page.
+            BasePageIntegrityCatalog::encoded_len_for_page_count(covered_page_count)?;
+        }
+
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+
+        // A fallback-safe v10 image may intentionally have missing newest
+        // manifest pages. Migrating such an image would either create sparse
+        // published holes or silently turn them into zero pages on native.
+        // Preserve the exact v10 recovery state and block writes instead.
+        let published_prefix_complete = backend.has_complete_page_prefix(header.page_count)?;
+
+        if covered_page_count == 0 {
+            let roots_are_empty = header.eavt_root_page == 0
+                && header.aevt_root_page == 0
+                && header.avet_root_page == 0
+                && header.vaet_root_page == 0;
+            let delta_is_empty = match delta_selection {
+                PersistedManifestSelection::NoDeltaManifest => true,
+                PersistedManifestSelection::Use { manifest, .. } => manifest.segments().is_empty(),
+                PersistedManifestSelection::RecoveryRequired { .. } => false,
+            };
+            if base_page_start != 1
+                || header.fact_page_count != 0
+                || header.node_count != 0
+                || !roots_are_empty
+                || !delta_is_empty
+            {
+                anyhow::bail!("Non-canonical empty v10 base cannot migrate to v11");
+            }
+
+            let mut migrated_header = *header;
+            migrated_header.version = crate::storage::FORMAT_VERSION;
+            migrated_header.page_count = 1;
+            migrated_header.header_checksum = compute_header_checksum(&migrated_header);
+            let migrated_page0 = build_header_page(migrated_header)?;
+            backend.write_page(0, &migrated_page0)?;
+            backend.sync()?;
+            return Ok(true);
+        }
+
+        if !published_prefix_complete {
+            if covered_page_count > 0 {
+                let aggregate =
+                    compute_page_checksum(&*backend, base_page_start, covered_page_count)?;
+                if aggregate != header.index_checksum {
+                    anyhow::bail!("Base checksum mismatch during v10 recovery");
+                }
+            }
+            drop(backend);
+            self.write_blocked_legacy = true;
+            return Ok(false);
+        }
+
+        let integrity = write_base_integrity_catalog(
+            &mut *backend,
+            1,
+            base_page_start,
+            covered_page_count,
+            header.page_count,
+            (covered_page_count > 0).then_some(header.index_checksum),
+        )?;
+
+        let mut migrated_header = *header;
+        migrated_header.version = crate::storage::FORMAT_VERSION;
+        migrated_header.page_count = integrity.published_page_count;
+        migrated_header.header_checksum = compute_header_checksum(&migrated_header);
+        let migrated_extension = HeaderExtension::new(extension.primary(), extension.secondary())
+            .with_base_fact_page_start(base_page_start)?
+            .with_base_integrity(integrity.descriptor)?;
+        let migrated_page0 = build_header_page_with_extension(migrated_header, migrated_extension)?;
+
+        // Data and catalog were synced by write_base_integrity_catalog. Page 0
+        // is the only publish write and remains v10 on every earlier failure.
+        backend.write_page(0, &migrated_page0)?;
+        backend.sync()?;
+        drop(backend);
+        Ok(true)
+    }
+
     fn build_next_manifest_extension(
         header: &FileHeader,
         page0: &[u8],
@@ -546,7 +684,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 ..
             } => Ok((
                 HeaderExtension::new(extension.primary(), descriptor)
-                    .with_base_fact_page_start(extension.base_fact_page_start())?,
+                    .with_base_fact_page_start(extension.base_fact_page_start())?
+                    .with_base_integrity(extension.base_integrity())?,
                 HeaderManifestSlotName::Secondary,
             )),
             HeaderManifestSlotSelection::Use {
@@ -554,13 +693,15 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 ..
             } => Ok((
                 HeaderExtension::new(descriptor, extension.secondary())
-                    .with_base_fact_page_start(extension.base_fact_page_start())?,
+                    .with_base_fact_page_start(extension.base_fact_page_start())?
+                    .with_base_integrity(extension.base_integrity())?,
                 HeaderManifestSlotName::Primary,
             )),
             HeaderManifestSlotSelection::NoDeltaManifest
             | HeaderManifestSlotSelection::RecoveryRequired { .. } => Ok((
                 HeaderExtension::new(descriptor, HeaderManifestSlot::empty())
-                    .with_base_fact_page_start(extension.base_fact_page_start())?,
+                    .with_base_fact_page_start(extension.base_fact_page_start())?
+                    .with_base_integrity(extension.base_integrity())?,
                 HeaderManifestSlotName::Primary,
             )),
         }
@@ -719,24 +860,24 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             &self.page_cache,
             next3,
         )?;
-        backend.sync()?;
-
         let total_data_pages = next4.saturating_sub(1);
-        let checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+        backend.sync()?;
+        let integrity =
+            write_base_integrity_catalog(&mut *backend, 1, 1, total_data_pages, next4, None)?;
         let mut header = FileHeader::new();
-        header.page_count = next4;
+        header.page_count = integrity.published_page_count;
         header.node_count = node_count;
         header.last_checkpointed_tx_count = checkpoint_tx_count;
         header.eavt_root_page = eavt_root;
         header.aevt_root_page = aevt_root;
         header.avet_root_page = avet_root;
         header.vaet_root_page = vaet_root;
-        header.index_checksum = checksum;
+        header.index_checksum = integrity.aggregate_checksum;
         header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
         header.fact_page_count = num_fact_pages;
         header.header_checksum = compute_header_checksum(&header);
 
-        let header_page = build_header_page(header)?;
+        let header_page = build_header_page_with_base_integrity(header, 1, integrity.descriptor)?;
         let manifest_selection =
             select_header_manifest_slot_from_page0(header.version, &header_page)?;
         backend.write_page(0, &header_page)?;
@@ -748,6 +889,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.committed_fact_pages
             .store(num_fact_pages, Ordering::SeqCst);
         self.committed_fact_page_start.store(1, Ordering::SeqCst);
+        self.base_integrity = Some(integrity.catalog);
         self.last_checkpointed_tx_count = checkpoint_tx_count;
         self.storage.restore_tx_counter_from(checkpoint_tx_count);
         self.dirty = false;
@@ -756,8 +898,68 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         Ok(())
     }
 
+    /// Publish decoded legacy facts as a copy-on-write v11 base.
+    ///
+    /// The candidate starts after the complete legacy published image, so an
+    /// interrupted migration leaves the old page-0 authority and every page it
+    /// references untouched. Only the final page-0 write switches formats.
+    fn publish_legacy_facts_as_v11(
+        &mut self,
+        header: &FileHeader,
+        mut facts: Vec<Fact>,
+    ) -> Result<()> {
+        if header.version < 9 {
+            normalize_legacy_retractions(&mut facts);
+        }
+        let fact_count = u64::try_from(facts.len())
+            .map_err(|_| anyhow::anyhow!("legacy fact count exceeds u64::MAX"))?;
+        if fact_count != header.node_count {
+            anyhow::bail!(
+                "Legacy fact count does not match header node_count; refusing partial migration"
+            );
+        }
+        let max_tx = facts
+            .iter()
+            .map(|fact| fact.tx_count)
+            .max()
+            .unwrap_or(0)
+            .max(header.last_checkpointed_tx_count);
+
+        {
+            let backend = self
+                .backend
+                .lock()
+                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+            if !backend.has_complete_page_prefix(header.page_count)? {
+                anyhow::bail!(
+                    "Legacy published page range is physically incomplete; refusing sparse COW migration"
+                );
+            }
+        }
+
+        self.storage.clear()?;
+        self.storage.restore_tx_counter_from(max_tx);
+
+        let candidate =
+            self.write_cow_candidate_from_source(header.page_count, 1, max_tx, move |visit| {
+                for fact in facts {
+                    visit(fact)?;
+                }
+                Ok(())
+            })?;
+        self.publish_recompact_candidate(candidate)?;
+        Ok(())
+    }
+
     fn write_recompact_candidate_from_visible_facts(&mut self) -> Result<RecompactCandidate> {
         let checkpoint_tx_count = self.storage.current_tx_count();
+        let base_generation = self
+            .base_integrity
+            .as_ref()
+            .map(|catalog| catalog.base_generation())
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity generation overflow"))?;
 
         let base_fact_page_start = {
             let backend = self
@@ -769,6 +971,22 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             curr_header.validate()?;
             curr_header.page_count
         };
+        let source = self.storage.clone();
+        self.write_cow_candidate_from_source(
+            base_fact_page_start,
+            base_generation,
+            checkpoint_tx_count,
+            move |visit| source.for_each_fact(visit),
+        )
+    }
+
+    fn write_cow_candidate_from_source(
+        &mut self,
+        base_fact_page_start: u64,
+        base_generation: u64,
+        checkpoint_tx_count: u64,
+        source: impl FnOnce(&mut dyn FnMut(Fact) -> Result<()>) -> Result<()>,
+    ) -> Result<RecompactCandidate> {
         if base_fact_page_start == 0 {
             anyhow::bail!("Recompact base candidate cannot start on page 0");
         }
@@ -776,7 +994,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let mut packer = PackedFactPacker::new(base_fact_page_start);
         let mut index_entries = new_index_entries_with_capacity(0);
         let mut node_count = 0u64;
-        self.storage.for_each_fact(|fact| {
+        source(&mut |fact| {
             let fact_ref = packer.push(&fact)?;
             push_index_entries_for_fact(&mut index_entries, &fact, fact_ref);
             node_count = node_count
@@ -836,30 +1054,41 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             next3,
         )?;
 
-        backend.sync()?;
-
         let total_data_pages = next4.saturating_sub(base_fact_page_start);
-        let checksum = compute_page_checksum(&*backend, base_fact_page_start, total_data_pages)?;
+        backend.sync()?;
+        let integrity = write_base_integrity_catalog(
+            &mut *backend,
+            base_generation,
+            base_fact_page_start,
+            total_data_pages,
+            next4,
+            None,
+        )?;
         let mut header = FileHeader::new();
-        header.page_count = next4;
+        header.page_count = integrity.published_page_count;
         header.node_count = node_count;
         header.last_checkpointed_tx_count = checkpoint_tx_count;
         header.eavt_root_page = eavt_root;
         header.aevt_root_page = aevt_root;
         header.avet_root_page = avet_root;
         header.vaet_root_page = vaet_root;
-        header.index_checksum = checksum;
+        header.index_checksum = integrity.aggregate_checksum;
         header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
         header.fact_page_count = num_fact_pages;
         header.header_checksum = compute_header_checksum(&header);
 
-        let header_page = build_header_page_with_base_start(header, base_fact_page_start)?;
+        let header_page = build_header_page_with_base_integrity(
+            header,
+            base_fact_page_start,
+            integrity.descriptor,
+        )?;
         Ok(RecompactCandidate {
             header,
             header_page,
             base_fact_page_start,
             fact_page_count: num_fact_pages,
             checkpoint_tx_count,
+            base_integrity: integrity.catalog,
         })
     }
 
@@ -885,6 +1114,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .store(candidate.fact_page_count, Ordering::SeqCst);
         self.committed_fact_page_start
             .store(candidate.base_fact_page_start, Ordering::SeqCst);
+        self.base_integrity = Some(candidate.base_integrity);
         self.last_checkpointed_tx_count = candidate.checkpoint_tx_count;
         self.dirty = false;
         self.wire_committed_readers(&candidate.header, Vec::new())?;
@@ -926,10 +1156,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
         }
 
-        let base_fact_page_start =
-            HeaderExtension::read_from_page0(header.version, &raw_header_bytes)?
-                .map(|extension| extension.base_fact_page_start())
-                .unwrap_or(1);
+        let header_extension = HeaderExtension::read_from_page0(header.version, &raw_header_bytes)?;
+        let base_fact_page_start = header_extension
+            .as_ref()
+            .map(HeaderExtension::base_fact_page_start)
+            .unwrap_or(1);
         if (base_fact_page_start == 0 || base_fact_page_start >= header.page_count.max(1))
             && header.fact_page_count > 0
         {
@@ -937,6 +1168,18 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
         self.committed_fact_page_start
             .store(base_fact_page_start, Ordering::SeqCst);
+        self.base_integrity = if header.version == crate::storage::FORMAT_VERSION {
+            let extension = header_extension
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("v11 database is missing its header extension"))?;
+            let backend = self
+                .backend
+                .lock()
+                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+            load_v11_base_integrity(&*backend, &header, extension)?
+        } else {
+            None
+        };
 
         let (header_manifest_selection, delta_manifest_selection, selected_delta_segments) = {
             let backend = self
@@ -945,7 +1188,6 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
             Self::load_usable_delta_selection(&*backend, &header, &raw_header_bytes)?
         };
-        self.header_manifest_selection = header_manifest_selection;
         if let PersistedManifestSelection::RecoveryRequired { reason } = delta_manifest_selection {
             let reason = match reason {
                 PersistedManifestRecoveryReason::CorruptManifestSlot => "corrupt manifest slot",
@@ -953,6 +1195,12 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             };
             anyhow::bail!("Delta manifest recovery required: {reason}");
         }
+        if header.version == 10
+            && self.migrate_v10_to_v11(&header, &raw_header_bytes, &delta_manifest_selection)?
+        {
+            return self.load();
+        }
+        self.header_manifest_selection = header_manifest_selection;
         self.delta_manifest_selection = delta_manifest_selection;
         let selected_delta_manifest = self.delta_manifest_selection.manifest().cloned();
         let selected_delta_has_segments = selected_delta_manifest
@@ -970,12 +1218,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         if fact_page_format == 0
             || fact_page_format == crate::storage::FACT_PAGE_FORMAT_ONE_PER_PAGE
         {
-            // Legacy one-per-page format (v4 or earlier): load all facts, then migrate to v5.
-            self.load_one_per_page_legacy(&header)?;
-            self.storage.restore_tx_counter()?;
-            self.dirty = true;
-            self.save()?;
-            return Ok(());
+            let facts = self.read_one_per_page_legacy(&header)?;
+            return self.publish_legacy_facts_as_v11(&header, facts);
         }
 
         // Packed fact-page format (v6+).
@@ -999,14 +1243,75 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.committed_fact_pages
             .store(num_fact_pages, Ordering::SeqCst);
 
+        // v6-v9 packed images predate the page-local catalog but do carry an
+        // aggregate checksum. Validate that legacy authority before any
+        // migration write; otherwise a decodable bit flip could be rebuilt and
+        // blessed as a fresh v11 base. Historical files may checksum all base
+        // pages or fact pages only, so accept either exact legacy rule. The
+        // decoded facts are then appended as a COW candidate; no page selected
+        // by the legacy header is overwritten before page 0 publishes v11.
+        if (6..10).contains(&header.version) {
+            let has_index_root = [
+                header.eavt_root_page,
+                header.aevt_root_page,
+                header.avet_root_page,
+                header.vaet_root_page,
+            ]
+            .into_iter()
+            .any(|page_id| page_id > 0);
+            if num_fact_pages == 0 && (header.node_count > 0 || has_index_root) {
+                anyhow::bail!(
+                    "Non-empty legacy metadata declares no fact pages; refusing data-loss migration"
+                );
+            }
+
+            if num_fact_pages > 0 {
+                BasePageIntegrityCatalog::encoded_len_for_page_count(num_fact_pages)?;
+                let backend = self
+                    .backend
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+                let fact_checksum =
+                    compute_page_checksum(&*backend, base_fact_page_start, num_fact_pages)?;
+                if fact_checksum != header.index_checksum {
+                    let full_page_count = header.page_count.saturating_sub(base_fact_page_start);
+                    BasePageIntegrityCatalog::encoded_len_for_page_count(full_page_count)?;
+                    let full_checksum =
+                        compute_page_checksum(&*backend, base_fact_page_start, full_page_count)?;
+                    if full_checksum != header.index_checksum {
+                        anyhow::bail!(
+                            "Legacy base checksum mismatch; refusing to migrate corrupt v{} data",
+                            header.version
+                        );
+                    }
+                }
+            }
+
+            let facts = if num_fact_pages > 0 {
+                let backend = self
+                    .backend
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+                crate::storage::packed_pages::read_all_from_pages(
+                    &*backend,
+                    base_fact_page_start,
+                    num_fact_pages,
+                )?
+            } else {
+                Vec::new()
+            };
+            return self.publish_legacy_facts_as_v11(&header, facts);
+        }
+
         // Compute page-based checksum to verify data integrity.
         // New files (post-fix): checksum covers ALL pages (facts + indexes).
         // Old files (pre-fix): checksum covers only fact pages.
         // Try full checksum first; fall back to fact-only for backwards compat.
-        let needs_format_upgrade = header.version < crate::storage::FORMAT_VERSION;
+        let needs_format_upgrade =
+            header.version < crate::storage::FORMAT_VERSION && !self.write_blocked_legacy;
         let needs_rebuild = if selected_delta_has_segments {
             if needs_format_upgrade {
-                anyhow::bail!("Delta manifest requires current v10 file format");
+                anyhow::bail!("Delta manifest requires the current file format");
             }
             if header.eavt_root_page == 0 {
                 anyhow::bail!("Delta manifest requires base index roots");
@@ -1020,6 +1325,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             true
         } else if num_fact_pages == 0 || header.eavt_root_page == 0 {
             num_fact_pages > 0 // rebuild if facts exist but no index root
+        } else if header.version == crate::storage::FORMAT_VERSION {
+            false // v11 base pages are verified lazily through the catalog.
         } else {
             let backend = self
                 .backend
@@ -1127,26 +1434,30 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 next3,
             )?;
 
-            // Write header with full-coverage checksum (facts + indexes)
+            // Publish a v11 base only after fact/index pages and their catalog
+            // are durable.
             let total_data_pages = next4.saturating_sub(1);
-            let full_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
+            backend.sync()?;
+            let integrity =
+                write_base_integrity_catalog(&mut *backend, 1, 1, total_data_pages, next4, None)?;
 
             let mut new_header = FileHeader::new();
-            new_header.page_count = next4;
+            new_header.page_count = integrity.published_page_count;
             new_header.node_count = all_facts.len() as u64;
             new_header.last_checkpointed_tx_count = max_tx;
             new_header.eavt_root_page = eavt_root;
             new_header.aevt_root_page = aevt_root;
             new_header.avet_root_page = avet_root;
             new_header.vaet_root_page = vaet_root;
-            new_header.index_checksum = full_checksum;
+            new_header.index_checksum = integrity.aggregate_checksum;
             new_header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
             new_header.fact_page_count = num_fact_pages;
 
             let write_checksum = compute_header_checksum(&new_header);
             new_header.header_checksum = write_checksum;
 
-            let header_page = build_header_page(new_header)?;
+            let header_page =
+                build_header_page_with_base_integrity(new_header, 1, integrity.descriptor)?;
             let manifest_selection =
                 select_header_manifest_slot_from_page0(new_header.version, &header_page)?;
             backend.write_page(0, &header_page)?;
@@ -1159,18 +1470,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             self.committed_fact_pages
                 .store(num_fact_pages, Ordering::SeqCst);
             self.committed_fact_page_start.store(1, Ordering::SeqCst);
+            self.base_integrity = Some(integrity.catalog);
 
-            // Wire OnDiskIndexReader
-            let index_reader: std::sync::Arc<dyn crate::storage::CommittedIndexReader> =
-                std::sync::Arc::new(OnDiskIndexReader::new(
-                    self.backend.clone(),
-                    self.page_cache.clone(),
-                    eavt_root,
-                    aevt_root,
-                    avet_root,
-                    vaet_root,
-                ));
-            self.storage.set_committed_index_reader(index_reader);
+            self.wire_committed_readers(&new_header, Vec::new())?;
         } else {
             // No rebuild needed - validate header checksum for v7+ files
             // Re-read header from disk to get any updates from rebuild path
@@ -1199,43 +1501,34 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         Ok(())
     }
 
-    /// Load facts from legacy one-per-page format (v4 and earlier).
-    fn load_one_per_page_legacy(&mut self, header: &FileHeader) -> Result<usize> {
-        let page_count = header.page_count;
+    /// Read only the fact range from a legacy one-per-page image.
+    ///
+    /// v4 index-blob pages follow the facts and are deliberately ignored: the
+    /// fact log plus its CRC is the migration authority and v11 rebuilds all
+    /// indexes from it.
+    fn read_one_per_page_legacy(&self, header: &FileHeader) -> Result<Vec<Fact>> {
+        let fact_page_end = legacy_one_per_page_fact_end(header)?;
         let backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        let mut loaded: usize = 0;
-        let mut skipped: usize = 0;
-        for page_id in 1..page_count {
+        let capacity = usize::try_from(header.node_count)
+            .map_err(|_| anyhow::anyhow!("Legacy fact count exceeds memory limits"))?;
+        let mut facts = Vec::new();
+        facts
+            .try_reserve_exact(capacity)
+            .map_err(|_| anyhow::anyhow!("Legacy fact allocation exceeds memory limits"))?;
+        for page_id in 1..fact_page_end {
             let page = backend.read_page(page_id)?;
-            // Try to deserialize a fact from this page (legacy format: raw postcard bytes)
-            match postcard::from_bytes::<Fact>(&page) {
-                Ok(mut fact) => {
-                    if header.version < 9 && !fact.asserted {
-                        fact.valid_from = RETRACT_ALL_VALID_FROM;
-                        fact.valid_to = VALID_TIME_FOREVER;
-                    }
-                    self.storage.load_fact(fact)?;
-                    loaded = loaded.saturating_add(1);
-                }
-                Err(e) => {
-                    skipped = skipped.saturating_add(1);
-                    eprintln!(
-                        "Warning: failed to deserialize fact at page {}: {}. Skipping.",
-                        page_id, e
-                    );
-                }
-            }
+            let fact = postcard::from_bytes::<Fact>(&page).map_err(|error| {
+                anyhow::anyhow!("Failed to deserialize legacy fact at page {page_id}: {error}")
+            })?;
+            facts.push(fact);
         }
-        if skipped > 0 {
-            eprintln!(
-                "Warning: {} facts failed to deserialize during legacy load (version {})",
-                skipped, header.version
-            );
+        if header.version == 4 && compute_index_checksum(&facts)? != header.index_checksum {
+            anyhow::bail!("Legacy v4 fact checksum mismatch; refusing corrupt migration");
         }
-        Ok(loaded)
+        Ok(facts)
     }
 
     /// Migrate a v1 file (Phase 3 format, no bi-temporal fields) to v2.
@@ -1258,29 +1551,17 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
         let header_page = backend.read_page(0)?;
         let header = FileHeader::from_bytes(&header_page)?;
-        let page_count = header.page_count;
+        let fact_page_end = legacy_one_per_page_fact_end(&header)?;
 
-        // Read all v1 facts (track deserialization failures)
+        // Read all v1 facts. Any missing or undecodable page is corruption;
+        // migration must not publish a partially reconstructed database.
         let mut v1_facts: Vec<FactV1> = Vec::new();
-        let mut skipped: usize = 0;
-        for page_id in 1..page_count {
+        for page_id in 1..fact_page_end {
             let page = backend.read_page(page_id)?;
-            match postcard::from_bytes::<FactV1>(&page) {
-                Ok(fact) => v1_facts.push(fact),
-                Err(e) => {
-                    skipped = skipped.saturating_add(1);
-                    eprintln!(
-                        "Warning: failed to deserialize v1 fact at page {}: {}. Skipping.",
-                        page_id, e
-                    );
-                }
-            }
-        }
-        if skipped > 0 {
-            eprintln!(
-                "Warning: {} v1 facts failed to deserialize during migration",
-                skipped
-            );
+            let fact = postcard::from_bytes::<FactV1>(&page).map_err(|error| {
+                anyhow::anyhow!("Failed to deserialize v1 fact at page {page_id}: {error}")
+            })?;
+            v1_facts.push(fact);
         }
         drop(backend);
 
@@ -1316,187 +1597,60 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             migrated.push(fact);
         }
 
-        self.storage.clear()?;
-        for fact in migrated {
-            self.storage.load_fact(fact)?;
-        }
-        self.storage.restore_tx_counter()?;
-
-        // Persist in v2 format immediately
-        self.dirty = true;
-        self.save()?;
-        Ok(())
+        self.publish_legacy_facts_as_v11(&header, migrated)
     }
 
-    /// Migrate a v5 file (paged-blob indexes) to v6 (on-disk B+tree indexes).
+    /// Migrate a v5 packed base and paged-blob indexes to a COW v11 base.
     fn migrate_v5_to_v6(&mut self, header: &FileHeader) -> Result<()> {
-        let num_fact_pages = {
-            let first_index_page = [
-                header.eavt_root_page,
-                header.aevt_root_page,
-                header.avet_root_page,
-                header.vaet_root_page,
-            ]
+        let roots = [
+            header.eavt_root_page,
+            header.aevt_root_page,
+            header.avet_root_page,
+            header.vaet_root_page,
+        ];
+        let has_index_root = roots.iter().any(|page_id| *page_id > 0);
+        let first_index_page = roots
             .iter()
-            .filter(|&&p| p > 0)
+            .filter(|&&page_id| page_id > 0)
             .copied()
             .min()
             .unwrap_or(header.page_count);
-            first_index_page.saturating_sub(1)
-        };
+        let num_fact_pages = first_index_page.saturating_sub(1);
 
-        // Validate the calculated range contains valid pages.
-        // If the file was in an inconsistent state (partial checkpoint),
-        // the calculated range might be incorrect. Do a quick validation
-        // by checking that the first fact page can be read (doesn't need to
-        // be a packed page - the index checksum will catch any real corruption).
-        let validated_num_fact_pages = if num_fact_pages > 0 {
+        if num_fact_pages == 0 && (header.node_count > 0 || has_index_root) {
+            anyhow::bail!(
+                "Non-empty v5 metadata declares no fact pages; refusing data-loss migration"
+            );
+        }
+
+        // Validate the calculated range and checksum before writing an
+        // append-only candidate. A missing first page is corruption, not an
+        // empty database.
+        if num_fact_pages > 0 {
+            BasePageIntegrityCatalog::encoded_len_for_page_count(num_fact_pages)?;
             let backend = self
                 .backend
                 .lock()
                 .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-            // Just verify we can read the page - actual validation happens via checksum
-            if backend.read_page(1).is_ok() {
-                num_fact_pages
-            } else {
-                eprintln!(
-                    "Warning: cannot read first fact page (page 1). Header claims {}. Using 0.",
-                    num_fact_pages
-                );
-                0
+            backend
+                .read_page(1)
+                .map_err(|error| anyhow::anyhow!("Cannot read first v5 fact page: {error}"))?;
+            let fact_checksum = compute_page_checksum(&*backend, 1, num_fact_pages)?;
+            if fact_checksum != header.index_checksum {
+                anyhow::bail!("Legacy base checksum mismatch; refusing to migrate corrupt v5 data");
             }
-        } else {
-            num_fact_pages
-        };
+        }
 
-        let mut all_facts = if validated_num_fact_pages > 0 {
+        let facts = if num_fact_pages > 0 {
             let backend = self
                 .backend
                 .lock()
                 .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-            crate::storage::packed_pages::read_all_from_pages(
-                &*backend,
-                1,
-                validated_num_fact_pages,
-            )?
+            crate::storage::packed_pages::read_all_from_pages(&*backend, 1, num_fact_pages)?
         } else {
             Vec::new()
         };
-        normalize_legacy_retractions(&mut all_facts);
-
-        let (fact_pages, fact_refs) = pack_facts(&all_facts, 1)?;
-        let new_fact_page_count = u64::try_from(fact_pages.len())
-            .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
-        self.committed_fact_pages
-            .store(new_fact_page_count, Ordering::SeqCst);
-        self.committed_fact_page_start.store(1, Ordering::SeqCst);
-        let (eavt, aevt, avet, vaet) = build_sorted_index_entries(&all_facts, &fact_refs);
-        let node_count = u64::try_from(all_facts.len())
-            .map_err(|_| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
-        let max_tx = all_facts
-            .iter()
-            .map(|fact| fact.tx_count)
-            .max()
-            .unwrap_or(header.last_checkpointed_tx_count);
-
-        let mut backend = self
-            .backend
-            .lock()
-            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
-        self.page_cache.invalidate_from(1);
-        for (i, page_data) in fact_pages.iter().enumerate() {
-            let page_offset =
-                u64::try_from(i).map_err(|_| anyhow::anyhow!("page index {i} exceeds u64::MAX"))?;
-            let page_id = 1u64
-                .checked_add(page_offset)
-                .ok_or_else(|| anyhow::anyhow!("page id overflow writing fact pages"))?;
-            backend.write_page(page_id, page_data)?;
-        }
-        // Use the actual end of fact pages as the start for new index pages, NOT
-        // header.page_count — that field comes from the (possibly untrusted) file
-        // on disk and may be a huge fuzz-crafted value that causes build_btree to
-        // write leaf pages at a ~TB offset, then compute_page_checksum to loop
-        // over billions of pages.
-        let next_free = 1u64
-            .checked_add(new_fact_page_count)
-            .ok_or_else(|| anyhow::anyhow!("page count overflow computing next_free"))?;
-
-        let (eavt_root, next_free2) = build_btree(
-            btree_entries(eavt.into_iter())?.into_iter(),
-            &mut *backend,
-            &self.page_cache,
-            next_free,
-        )?;
-        let (aevt_root, next_free3) = build_btree(
-            btree_entries(aevt.into_iter())?.into_iter(),
-            &mut *backend,
-            &self.page_cache,
-            next_free2,
-        )?;
-        let (avet_root, next_free4) = build_btree(
-            btree_entries(avet.into_iter())?.into_iter(),
-            &mut *backend,
-            &self.page_cache,
-            next_free3,
-        )?;
-        let (vaet_root, final_next_free) = build_btree(
-            btree_entries(vaet.into_iter())?.into_iter(),
-            &mut *backend,
-            &self.page_cache,
-            next_free4,
-        )?;
-
-        let mut new_header = FileHeader::new(); // current format
-        new_header.page_count = final_next_free;
-        new_header.node_count = node_count;
-        new_header.last_checkpointed_tx_count = max_tx;
-        new_header.eavt_root_page = eavt_root;
-        new_header.aevt_root_page = aevt_root;
-        new_header.avet_root_page = avet_root;
-        new_header.vaet_root_page = vaet_root;
-        // Checksum over all data pages (facts + indexes)
-        let total_data_pages = final_next_free.saturating_sub(1);
-        let computed_checksum = compute_page_checksum(&*backend, 1, total_data_pages)?;
-        new_header.index_checksum = computed_checksum;
-        new_header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
-        new_header.fact_page_count = new_fact_page_count;
-        new_header.header_checksum = compute_header_checksum(&new_header);
-
-        let header_page = build_header_page(new_header)?;
-        let manifest_selection =
-            select_header_manifest_slot_from_page0(new_header.version, &header_page)?;
-        backend.write_page(0, &header_page)?;
-        backend.sync()?;
-        drop(backend);
-
-        self.header_manifest_selection = manifest_selection;
-        self.delta_manifest_selection = PersistedManifestSelection::NoDeltaManifest;
-        self.last_checkpointed_tx_count = max_tx;
-
-        let loader: Arc<dyn crate::storage::CommittedFactReader> =
-            Arc::new(CommittedFactLoaderImpl {
-                backend: self.backend.clone(),
-                backend_adapter: MutexStorageBackend(self.backend.clone()),
-                page_cache: self.page_cache.clone(),
-                committed_fact_pages: self.committed_fact_pages.clone(),
-                committed_fact_page_start: self.committed_fact_page_start.clone(),
-            });
-        self.storage.set_committed_reader(loader);
-
-        let index_reader: Arc<dyn crate::storage::CommittedIndexReader> =
-            Arc::new(OnDiskIndexReader::new(
-                self.backend.clone(),
-                self.page_cache.clone(),
-                eavt_root,
-                aevt_root,
-                avet_root,
-                vaet_root,
-            ));
-        self.storage.set_committed_index_reader(index_reader);
-
-        self.storage.restore_tx_counter_from(max_tx);
-        self.dirty = false;
-        Ok(())
+        self.publish_legacy_facts_as_v11(header, facts)
     }
 
     /// Consume this storage and return the underlying backend.
@@ -1645,10 +1799,15 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         if !self.dirty {
             return Ok(CheckpointOutcome::Noop);
         }
+        if self.write_blocked_legacy {
+            anyhow::bail!(
+                "Legacy graph recovery is read-only until a complete published image is repaired"
+            );
+        }
 
         // ── Step A: read current header + stream old B+tree entries BEFORE overwriting ──
         let pending_facts = self.storage.get_pending_facts();
-        if let Ok(Some(outcome)) = self.try_save_delta_segment(&pending_facts) {
+        if let Some(outcome) = self.try_save_delta_segment(&pending_facts)? {
             return Ok(outcome);
         }
         if matches!(
@@ -1659,6 +1818,13 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             return self.publish_recompact_candidate(candidate);
         }
 
+        let base_generation = self
+            .base_integrity
+            .as_ref()
+            .map(|catalog| catalog.base_generation())
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity generation overflow"))?;
         let mut backend = self
             .backend
             .lock()
@@ -1675,6 +1841,13 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             Err(_) if backend.is_new() => FileHeader::new(),
             Err(e) => anyhow::bail!("Failed to read header from existing file: {}", e),
         };
+
+        // A full save republishes the existing base under a new generation.
+        // Verify the entire old generation before any page can be overwritten,
+        // otherwise latent corruption could be checksummed and blessed as new.
+        if let Some(base_integrity) = &self.base_integrity {
+            verify_base_integrity_pages(&*backend, base_integrity)?;
+        }
 
         // Stream committed B+tree entries BEFORE writing new pages that may overlap
         let committed_eavt: Vec<(EavtKey, FactRef)> = if curr_header.eavt_root_page != 0 {
@@ -1773,14 +1946,19 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         // must already be on stable storage.
         backend.sync()?;
 
-        // CRC32 over ALL data pages (facts + indexes), excluding page 0 (header).
-        // This detects corruption in both fact pages and B+tree index pages.
         let total_data_pages = next4.saturating_sub(base_fact_page_start);
-        let checksum = compute_page_checksum(&*backend, base_fact_page_start, total_data_pages)?;
+        let integrity = write_base_integrity_catalog(
+            &mut *backend,
+            base_generation,
+            base_fact_page_start,
+            total_data_pages,
+            next4,
+            None,
+        )?;
 
         // ── Step E: write header (last write = crash-safe boundary) ─────────────
         let mut header = FileHeader::new(); // current format
-        header.page_count = next4;
+        header.page_count = integrity.published_page_count;
         let pending_len = u64::try_from(pending_facts.len())
             .map_err(|_| anyhow::anyhow!("pending fact count exceeds u64::MAX"))?;
         header.node_count = curr_header
@@ -1792,12 +1970,16 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         header.aevt_root_page = aevt_root;
         header.avet_root_page = avet_root;
         header.vaet_root_page = vaet_root;
-        header.index_checksum = checksum;
+        header.index_checksum = integrity.aggregate_checksum;
         header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
         header.fact_page_count = new_total_fact_pages;
         header.header_checksum = compute_header_checksum(&header);
 
-        let header_page = build_header_page_with_base_start(header, base_fact_page_start)?;
+        let header_page = build_header_page_with_base_integrity(
+            header,
+            base_fact_page_start,
+            integrity.descriptor,
+        )?;
         let manifest_selection =
             select_header_manifest_slot_from_page0(header.version, &header_page)?;
         backend.write_page(0, &header_page)?;
@@ -1810,30 +1992,12 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .store(new_total_fact_pages, Ordering::SeqCst);
         self.committed_fact_page_start
             .store(base_fact_page_start, Ordering::SeqCst);
+        self.base_integrity = Some(integrity.catalog);
         self.last_checkpointed_tx_count = self.storage.current_tx_count();
         self.dirty = false;
 
-        // ── Step F: wire CommittedFactReader and CommittedIndexReader ────────────
-        let loader: Arc<dyn crate::storage::CommittedFactReader> =
-            Arc::new(CommittedFactLoaderImpl {
-                backend: self.backend.clone(),
-                backend_adapter: MutexStorageBackend(self.backend.clone()),
-                page_cache: self.page_cache.clone(),
-                committed_fact_pages: self.committed_fact_pages.clone(),
-                committed_fact_page_start: self.committed_fact_page_start.clone(),
-            });
-        self.storage.set_committed_reader(loader);
-
-        let index_reader: Arc<dyn crate::storage::CommittedIndexReader> =
-            Arc::new(OnDiskIndexReader::new(
-                self.backend.clone(),
-                self.page_cache.clone(),
-                eavt_root,
-                aevt_root,
-                avet_root,
-                vaet_root,
-            ));
-        self.storage.set_committed_index_reader(index_reader);
+        // ── Step F: wire verified committed readers ──────────────────────────────
+        self.wire_committed_readers(&header, Vec::new())?;
 
         // Clear pending — all data now on disk
         self.storage.post_checkpoint_clear();
@@ -1962,6 +2126,27 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         f(&*guard)
     }
 
+    /// Read one published browser page, verifying immutable base pages against
+    /// the selected generation catalog in the same backend read.
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    pub(crate) fn read_published_page(&self, page_id: u64) -> Result<Vec<u8>> {
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned during browser export"))?;
+        let page = backend.read_page(page_id)?;
+        if let Some(base_integrity) = &self.base_integrity {
+            let covered_start = base_integrity.covered_page_start();
+            let covered_end = covered_start
+                .checked_add(base_integrity.covered_page_count())
+                .ok_or_else(|| anyhow::anyhow!("Base integrity page range overflow"))?;
+            if page_id >= covered_start && page_id < covered_end {
+                base_integrity.verify_page(page_id, &page)?;
+            }
+        }
+        Ok(page)
+    }
+
     /// Run a closure with mutable access to the underlying storage backend.
     ///
     /// Used by the browser WASM layer to drain dirty pages after `save()`.
@@ -1983,6 +2168,9 @@ impl PersistentFactStorage<FileBackend> {
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned during backup"))?;
+        if let Some(base_integrity) = &self.base_integrity {
+            verify_base_integrity_pages(&*backend, base_integrity)?;
+        }
         backend.copy_published_image_to(destination)
     }
 }
@@ -1994,6 +2182,268 @@ impl<B: StorageBackend + 'static> Drop for PersistentFactStorage<B> {
             let _ = self.save();
         }
     }
+}
+
+fn write_base_integrity_catalog(
+    backend: &mut dyn StorageBackend,
+    base_generation: u64,
+    covered_page_start: u64,
+    covered_page_count: u64,
+    catalog_page_start: u64,
+    expected_aggregate_checksum: Option<u32>,
+) -> Result<BaseIntegrityWrite> {
+    if covered_page_count == 0 {
+        let catalog = Arc::new(BasePageIntegrityCatalog::build(0, 1, Vec::new())?);
+        return Ok(BaseIntegrityWrite {
+            catalog,
+            descriptor: BasePageIntegrityDescriptor::empty(),
+            aggregate_checksum: expected_aggregate_checksum.unwrap_or(0),
+            published_page_count: catalog_page_start,
+        });
+    }
+    let covered_page_end = covered_page_start
+        .checked_add(covered_page_count)
+        .ok_or_else(|| anyhow::anyhow!("Base integrity covered page range overflow"))?;
+    if catalog_page_start < covered_page_end {
+        anyhow::bail!("Base integrity catalog overlaps covered base pages");
+    }
+
+    // Reject unsupported metadata sizes before reading the base or allocating
+    // its checksum vector. This is both the writer bound and the migration
+    // bound for attacker-controlled legacy headers.
+    BasePageIntegrityCatalog::encoded_len_for_page_count(covered_page_count)?;
+
+    let checksum_capacity = usize::try_from(covered_page_count)
+        .map_err(|_| anyhow::anyhow!("Base integrity page count exceeds memory limits"))?;
+    let mut page_checksums = Vec::new();
+    page_checksums
+        .try_reserve_exact(checksum_capacity)
+        .map_err(|_| anyhow::anyhow!("Base integrity catalog allocation exceeds memory limits"))?;
+    let mut aggregate = Hasher::new();
+    for offset in 0..covered_page_count {
+        let page_id = covered_page_start
+            .checked_add(offset)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity page id overflow"))?;
+        let page = backend.read_page(page_id)?;
+        if page.len() != PAGE_SIZE {
+            anyhow::bail!(
+                "Base integrity page {} has invalid length {}",
+                page_id,
+                page.len()
+            );
+        }
+        aggregate.update(&page);
+        page_checksums.push(compute_integrity_page_checksum(
+            base_generation,
+            page_id,
+            &page,
+        )?);
+    }
+
+    let aggregate_checksum = aggregate.finalize();
+    if let Some(expected) = expected_aggregate_checksum
+        && aggregate_checksum != expected
+    {
+        anyhow::bail!(
+            "Base checksum mismatch during v11 migration: expected {expected:#010x}, got {aggregate_checksum:#010x}"
+        );
+    }
+
+    let catalog = Arc::new(BasePageIntegrityCatalog::build(
+        base_generation,
+        covered_page_start,
+        page_checksums,
+    )?);
+    let encoded = catalog.encode()?;
+    let catalog_len = u64::try_from(encoded.len())
+        .map_err(|_| anyhow::anyhow!("Base integrity catalog length exceeds u64"))?;
+    let catalog_page_count = catalog_len
+        .checked_add(PAGE_SIZE as u64 - 1)
+        .ok_or_else(|| anyhow::anyhow!("Base integrity catalog page count overflow"))?
+        / PAGE_SIZE as u64;
+    let catalog_checksum = catalog_crc32(&encoded);
+    let descriptor = BasePageIntegrityDescriptor::new(
+        base_generation,
+        covered_page_start,
+        covered_page_count,
+        catalog_page_start,
+        catalog_page_count,
+        catalog_len,
+        catalog_checksum,
+    )?;
+
+    for offset in 0..catalog_page_count {
+        let page_id = catalog_page_start
+            .checked_add(offset)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog page id overflow"))?;
+        let byte_start_u64 = offset
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog byte offset overflow"))?;
+        let byte_start = usize::try_from(byte_start_u64)
+            .map_err(|_| anyhow::anyhow!("Base integrity catalog byte offset exceeds usize"))?;
+        let byte_end = byte_start.saturating_add(PAGE_SIZE).min(encoded.len());
+        let mut page = vec![0u8; PAGE_SIZE];
+        page.get_mut(..byte_end.saturating_sub(byte_start))
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog page slice out of bounds"))?
+            .copy_from_slice(
+                encoded
+                    .get(byte_start..byte_end)
+                    .ok_or_else(|| anyhow::anyhow!("Base integrity catalog bytes out of bounds"))?,
+            );
+        backend.write_page(page_id, &page)?;
+    }
+
+    // Catalog bytes must be durable and readable before page 0 can publish
+    // their descriptor.
+    backend.sync()?;
+    let decoded = read_base_integrity_catalog(backend, descriptor)?;
+    if decoded.as_ref() != catalog.as_ref() {
+        anyhow::bail!("Base integrity catalog read-back does not match written catalog");
+    }
+
+    Ok(BaseIntegrityWrite {
+        catalog,
+        descriptor,
+        aggregate_checksum,
+        published_page_count: descriptor.catalog_page_end()?,
+    })
+}
+
+fn read_base_integrity_catalog(
+    backend: &dyn StorageBackend,
+    descriptor: BasePageIntegrityDescriptor,
+) -> Result<Arc<BasePageIntegrityCatalog>> {
+    if descriptor.is_empty() {
+        anyhow::bail!("Base integrity catalog descriptor is empty");
+    }
+    if !descriptor.checksum_valid() {
+        anyhow::bail!("Base integrity catalog descriptor checksum mismatch");
+    }
+
+    let expected_len =
+        BasePageIntegrityCatalog::encoded_len_for_page_count(descriptor.covered_page_count())?;
+    let descriptor_len = usize::try_from(descriptor.catalog_len())
+        .map_err(|_| anyhow::anyhow!("Base integrity catalog length exceeds memory limits"))?;
+    if descriptor_len != expected_len {
+        anyhow::bail!("Base integrity catalog length does not match its covered page count");
+    }
+
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(expected_len)
+        .map_err(|_| anyhow::anyhow!("Base integrity catalog allocation exceeds memory limits"))?;
+    let mut remaining = expected_len;
+    for offset in 0..descriptor.catalog_page_count() {
+        let page_id = descriptor
+            .catalog_page_start()
+            .checked_add(offset)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog page id overflow"))?;
+        let page = backend.read_page(page_id)?;
+        if page.len() != PAGE_SIZE {
+            anyhow::bail!(
+                "Base integrity catalog page {} has invalid length {}",
+                page_id,
+                page.len()
+            );
+        }
+        let payload_len = remaining.min(PAGE_SIZE);
+        bytes.extend_from_slice(
+            page.get(..payload_len)
+                .ok_or_else(|| anyhow::anyhow!("Base integrity catalog page is truncated"))?,
+        );
+        if page
+            .get(payload_len..)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity catalog padding is truncated"))?
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            anyhow::bail!("Base integrity catalog padding must be zero");
+        }
+        remaining = remaining.saturating_sub(payload_len);
+    }
+    if remaining != 0 || bytes.len() != expected_len {
+        anyhow::bail!("Base integrity catalog is truncated");
+    }
+    if catalog_crc32(&bytes) != descriptor.catalog_checksum() {
+        anyhow::bail!("Base integrity catalog checksum mismatch");
+    }
+
+    let catalog = BasePageIntegrityCatalog::decode(&bytes)?;
+    if catalog.base_generation() != descriptor.base_generation()
+        || catalog.covered_page_start() != descriptor.covered_page_start()
+        || catalog.covered_page_count() != descriptor.covered_page_count()
+    {
+        anyhow::bail!("Base integrity catalog identity does not match page 0 descriptor");
+    }
+    Ok(Arc::new(catalog))
+}
+
+fn verify_base_integrity_pages(
+    backend: &dyn StorageBackend,
+    catalog: &BasePageIntegrityCatalog,
+) -> Result<()> {
+    for offset in 0..catalog.covered_page_count() {
+        let page_id = catalog
+            .covered_page_start()
+            .checked_add(offset)
+            .ok_or_else(|| anyhow::anyhow!("Base integrity page id overflow"))?;
+        let page = backend.read_page(page_id)?;
+        catalog.verify_page(page_id, &page)?;
+    }
+    Ok(())
+}
+
+fn load_v11_base_integrity(
+    backend: &dyn StorageBackend,
+    header: &FileHeader,
+    extension: &HeaderExtension,
+) -> Result<Option<Arc<BasePageIntegrityCatalog>>> {
+    let descriptor = extension.base_integrity();
+    if descriptor.is_empty() {
+        let roots_are_empty = header.eavt_root_page == 0
+            && header.aevt_root_page == 0
+            && header.avet_root_page == 0
+            && header.vaet_root_page == 0;
+        if header.fact_page_count == 0
+            && header.node_count == 0
+            && roots_are_empty
+            && extension.base_fact_page_start() == 1
+            && header.page_count == 1
+        {
+            return Ok(None);
+        }
+        anyhow::bail!("Non-canonical empty or unprotected v11 database");
+    }
+    if descriptor.covered_page_start() != extension.base_fact_page_start() {
+        anyhow::bail!("Base integrity coverage does not match base fact page start");
+    }
+    if descriptor.catalog_page_end()? > header.page_count {
+        anyhow::bail!("Base integrity catalog exceeds published page count");
+    }
+    let covered_page_end = descriptor.covered_page_end()?;
+    let fact_page_end = extension
+        .base_fact_page_start()
+        .checked_add(header.fact_page_count)
+        .ok_or_else(|| anyhow::anyhow!("Base fact page range overflow"))?;
+    if fact_page_end > covered_page_end {
+        anyhow::bail!("Base fact page range exceeds integrity coverage");
+    }
+    if header.fact_page_count == 0 {
+        anyhow::bail!("Protected v11 base must declare at least one packed fact page");
+    }
+    let roots = [
+        ("EAVT", header.eavt_root_page),
+        ("AEVT", header.aevt_root_page),
+        ("AVET", header.avet_root_page),
+        ("VAET", header.vaet_root_page),
+    ];
+    for (name, root) in roots {
+        if root == 0 || root < descriptor.covered_page_start() || root >= covered_page_end {
+            anyhow::bail!("{name} root is outside base integrity coverage");
+        }
+    }
+
+    read_base_integrity_catalog(backend, descriptor).map(Some)
 }
 
 /// Compute CRC32 checksum over a range of pages on the backend.
@@ -2063,12 +2513,15 @@ fn compute_header_checksum_from_bytes(bytes: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-fn build_header_page_with_base_start(
+fn build_header_page_with_base_integrity(
     header: FileHeader,
     base_fact_page_start: u64,
+    base_integrity: BasePageIntegrityDescriptor,
 ) -> Result<Vec<u8>> {
     if header.version == crate::storage::FORMAT_VERSION {
-        let extension = HeaderExtension::empty().with_base_fact_page_start(base_fact_page_start)?;
+        let extension = HeaderExtension::empty()
+            .with_base_fact_page_start(base_fact_page_start)?
+            .with_base_integrity(base_integrity)?;
         build_header_page_with_extension(header, extension)
     } else {
         build_header_page(header)
@@ -2294,6 +2747,7 @@ mod tests {
         header_bytes[0..4].copy_from_slice(&MAGIC_NUMBER);
         header_bytes[4..8].copy_from_slice(&1u32.to_le_bytes()); // version = 1
         header_bytes[8..16].copy_from_slice(&3u64.to_le_bytes()); // page_count = 3
+        header_bytes[16..24].copy_from_slice(&2u64.to_le_bytes()); // node_count = 2 facts
         backend.write_page(0, &header_bytes).unwrap();
 
         // Write facts (one per page)
@@ -2305,6 +2759,69 @@ mod tests {
         }
 
         backend
+    }
+
+    fn write_single_fact_v11(path: &std::path::Path) -> Uuid {
+        let entity = Uuid::new_v4();
+        let mut storage =
+            PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+        storage
+            .storage()
+            .transact(
+                vec![(
+                    entity,
+                    ":integrity/name".to_string(),
+                    Value::String("Source A".to_string()),
+                )],
+                None,
+            )
+            .unwrap();
+        storage.mark_dirty();
+        storage.save().unwrap();
+        drop(storage);
+        entity
+    }
+
+    fn read_header_and_extension(path: &std::path::Path) -> (FileHeader, HeaderExtension) {
+        let bytes = std::fs::read(path).unwrap();
+        let page0 = bytes.get(..PAGE_SIZE).expect("graph must contain page 0");
+        let header = FileHeader::from_bytes(page0).unwrap();
+        let extension = HeaderExtension::read_from_page0(header.version, page0)
+            .unwrap()
+            .expect("current graph must contain a header extension");
+        (header, extension)
+    }
+
+    fn flip_page_byte(path: &std::path::Path, page_id: u64, byte_offset: usize) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let page_start = usize::try_from(page_id).unwrap() * PAGE_SIZE;
+        let offset = page_start + byte_offset;
+        let byte = bytes.get_mut(offset).expect("target page byte must exist");
+        *byte ^= 0x01;
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn downgrade_current_base_to_v10(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let (mut header, extension) = read_header_and_extension(path);
+        let integrity = extension.base_integrity();
+        let base_end = integrity.covered_page_end().unwrap();
+        assert_eq!(
+            integrity.catalog_page_start(),
+            base_end,
+            "fresh v11 fixture must place the catalog immediately after its base"
+        );
+
+        header.version = 10;
+        header.page_count = base_end;
+        header.header_checksum = compute_header_checksum(&header);
+        let v10_extension = HeaderExtension::empty()
+            .with_base_fact_page_start(extension.base_fact_page_start())
+            .unwrap();
+        let page0 = build_header_page_with_extension(header, v10_extension).unwrap();
+        bytes.get_mut(..PAGE_SIZE).unwrap().copy_from_slice(&page0);
+        bytes.truncate(usize::try_from(base_end).unwrap() * PAGE_SIZE);
+        std::fs::write(path, bytes).unwrap();
     }
 
     #[test]
@@ -2364,7 +2881,196 @@ mod tests {
     }
 
     #[test]
-    fn test_save_writes_v4_header() {
+    fn corrupt_v1_fact_rejects_migration_without_publishing() {
+        let mut backend = make_v1_backend();
+        backend.write_page(1, &vec![0xFF; PAGE_SIZE]).unwrap();
+        let inspection = backend.clone();
+
+        let result = PersistentFactStorage::new(backend, 256);
+        assert!(result.is_err(), "undecodable v1 fact must reject migration");
+        let header = FileHeader::from_bytes(&inspection.read_page(0).unwrap()).unwrap();
+        assert_eq!(
+            header.version, 1,
+            "failed v1 migration must not publish v11"
+        );
+    }
+
+    #[test]
+    fn corrupt_v4_fact_rejects_migration_without_publishing() {
+        let mut backend = MemoryBackend::new();
+        let mut header = FileHeader::new();
+        header.version = 4;
+        header.page_count = 2;
+        header.node_count = 1;
+        header.fact_page_format = crate::storage::FACT_PAGE_FORMAT_ONE_PER_PAGE;
+        let mut page0 = header.to_bytes();
+        page0.resize(PAGE_SIZE, 0);
+        backend.write_page(0, &page0).unwrap();
+        backend.write_page(1, &vec![0xFF; PAGE_SIZE]).unwrap();
+        let inspection = backend.clone();
+
+        let result = PersistentFactStorage::new(backend, 256);
+        assert!(result.is_err(), "undecodable v4 fact must reject migration");
+        let header = FileHeader::from_bytes(&inspection.read_page(0).unwrap()).unwrap();
+        assert_eq!(
+            header.version, 4,
+            "failed v4 migration must not publish v11"
+        );
+    }
+
+    #[test]
+    fn corrupt_v7_packed_base_rejects_migration_without_publishing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let mut corrupt = include_bytes!("../../tests/fixtures/compat.graph").to_vec();
+        assert_eq!(u32::from_le_bytes(corrupt[4..8].try_into().unwrap()), 7);
+        corrupt[PAGE_SIZE * 2 - 1] ^= 0x01;
+        std::fs::write(path, &corrupt).unwrap();
+
+        let result = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256);
+        assert!(
+            result.is_err(),
+            "corrupt v7 packed base must not be rebuilt into v11"
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            corrupt,
+            "failed v7 migration must preserve the legacy image byte-exact"
+        );
+    }
+
+    #[test]
+    fn valid_v7_migration_appends_cow_base_and_preserves_legacy_pages() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let legacy = include_bytes!("../../tests/fixtures/compat.graph").to_vec();
+        let legacy_header = FileHeader::from_bytes(&legacy[..PAGE_SIZE]).unwrap();
+        assert_eq!(legacy_header.version, 7);
+        assert_eq!(
+            usize::try_from(legacy_header.page_count).unwrap() * PAGE_SIZE,
+            legacy.len()
+        );
+        std::fs::write(path, &legacy).unwrap();
+
+        let migrated = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+            .expect("valid v7 graph must migrate through an append-only candidate");
+        assert_eq!(
+            u64::try_from(migrated.storage().get_all_facts().unwrap().len()).unwrap(),
+            legacy_header.node_count
+        );
+        drop(migrated);
+
+        let current = std::fs::read(path).unwrap();
+        let current_header = FileHeader::from_bytes(&current[..PAGE_SIZE]).unwrap();
+        let extension = HeaderExtension::read_from_page0(current_header.version, &current)
+            .unwrap()
+            .expect("migrated v11 header must contain its extension");
+        assert_eq!(current_header.version, crate::storage::FORMAT_VERSION);
+        assert_eq!(current_header.node_count, legacy_header.node_count);
+        assert_eq!(extension.base_fact_page_start(), legacy_header.page_count);
+        assert_eq!(
+            &current[PAGE_SIZE..legacy.len()],
+            &legacy[PAGE_SIZE..],
+            "v7 migration must leave every legacy non-header page byte-exact"
+        );
+    }
+
+    #[test]
+    fn v9_cow_migration_preserves_scoped_retraction_identity() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let entity = Uuid::from_u128(0x900);
+        let value = Value::String("windowed".to_string());
+        let facts = vec![
+            Fact::with_valid_time(
+                entity,
+                ":legacy/window".to_string(),
+                value.clone(),
+                10,
+                1,
+                100,
+                200,
+            ),
+            Fact::with_valid_time(
+                entity,
+                ":legacy/window".to_string(),
+                value.clone(),
+                20,
+                2,
+                300,
+                400,
+            ),
+            Fact::retract_with_valid_time(
+                entity,
+                ":legacy/window".to_string(),
+                value.clone(),
+                30,
+                3,
+                100,
+                200,
+            ),
+        ];
+        {
+            let mut storage =
+                PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+            for fact in facts.iter().cloned() {
+                storage.storage().load_fact(fact).unwrap();
+            }
+            storage.storage().restore_tx_counter_from(3);
+            storage.mark_dirty();
+            storage.save().unwrap();
+        }
+
+        let mut legacy = std::fs::read(path).unwrap();
+        let current_header = FileHeader::from_bytes(&legacy[..PAGE_SIZE]).unwrap();
+        let current_extension =
+            HeaderExtension::read_from_page0(current_header.version, &legacy[..PAGE_SIZE])
+                .unwrap()
+                .expect("current fixture must have a v11 extension");
+        assert_eq!(current_extension.base_fact_page_start(), 1);
+        let base_end = current_extension
+            .base_integrity()
+            .covered_page_end()
+            .unwrap();
+        let mut v9_header = current_header;
+        v9_header.version = 9;
+        v9_header.page_count = base_end;
+        v9_header.header_checksum = compute_header_checksum(&v9_header);
+        let v9_page0 = build_header_page(v9_header).unwrap();
+        legacy[..PAGE_SIZE].copy_from_slice(&v9_page0);
+        legacy.truncate(usize::try_from(base_end).unwrap() * PAGE_SIZE);
+        std::fs::write(path, &legacy).unwrap();
+
+        let migrated = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+            .expect("v9 scoped retraction graph must migrate");
+        let mut migrated_facts = migrated.storage().get_all_facts().unwrap();
+        migrated_facts.sort_by_key(|fact| fact.tx_count);
+        assert_eq!(migrated_facts.len(), 3);
+        assert_eq!(
+            migrated_facts
+                .iter()
+                .map(|fact| (fact.tx_count, fact.valid_from, fact.valid_to, fact.asserted))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 100, 200, true),
+                (2, 300, 400, true),
+                (3, 100, 200, false),
+            ]
+        );
+        assert!(migrated_facts.iter().all(|fact| {
+            fact.entity == entity && fact.attribute == ":legacy/window" && fact.value == value
+        }));
+        let backend = migrated.into_backend().unwrap();
+        assert_eq!(
+            FileHeader::from_bytes(&backend.read_page(0).unwrap())
+                .unwrap()
+                .node_count,
+            3
+        );
+    }
+
+    #[test]
+    fn test_save_writes_current_header_and_tx_watermark() {
         use crate::storage::FORMAT_VERSION;
 
         let backend = MemoryBackend::new();
@@ -2456,63 +3162,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_check_detects_mismatch_and_rebuilds() {
-        use crate::graph::types::Value;
-        use crate::storage::StorageBackend;
-        use crate::storage::backend::FileBackend;
-        use tempfile::NamedTempFile;
-        use uuid::Uuid;
-
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-        let alice = Uuid::new_v4();
-
-        // Write a database with 1 fact
-        {
-            let mut pfs =
-                PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
-            pfs.storage()
-                .transact(
-                    vec![(
-                        alice,
-                        ":name".to_string(),
-                        Value::String("Alice".to_string()),
-                    )],
-                    None,
-                )
-                .unwrap();
-            pfs.dirty = true;
-            pfs.save().unwrap();
-        }
-
-        // Corrupt the index_checksum (bytes 64..68 of page 0), then recompute header_checksum
-        {
-            let mut backend = FileBackend::open(&path).unwrap();
-            let mut page = backend.read_page(0).unwrap();
-            page[64] ^= 0xFF;
-            let new_header_checksum = compute_header_checksum_from_bytes(&page);
-            page[80] = (new_header_checksum & 0xFF) as u8;
-            page[81] = ((new_header_checksum >> 8) & 0xFF) as u8;
-            page[82] = ((new_header_checksum >> 16) & 0xFF) as u8;
-            page[83] = ((new_header_checksum >> 24) & 0xFF) as u8;
-            backend.write_page(0, &page).unwrap();
-            backend.sync().unwrap();
-        }
-
-        // Re-open — new() should detect mismatch, rebuild, and succeed
-        {
-            let pfs = PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
-            // v6: after rebuild, indexes are on disk; verify fact accessibility
-            let alice_facts = pfs.storage().get_facts_by_entity(&alice).unwrap();
-            assert_eq!(
-                alice_facts.len(),
-                1,
-                "After rebuild, fact must be accessible via index"
-            );
-        }
-    }
-
-    #[test]
     fn test_compute_index_checksum_stable() {
         use crate::graph::types::{Fact, VALID_TIME_FOREVER, Value};
         use uuid::Uuid;
@@ -2538,10 +3187,10 @@ mod tests {
                 VALID_TIME_FOREVER,
             ),
         ];
-        let c1 = compute_index_checksum(&facts);
+        let c1 = compute_index_checksum(&facts).unwrap();
         // Reversed order — same checksum (deterministic sort applied inside)
         let facts_reversed = vec![facts[1].clone(), facts[0].clone()];
-        let c2 = compute_index_checksum(&facts_reversed);
+        let c2 = compute_index_checksum(&facts_reversed).unwrap();
         assert_eq!(c1, c2, "Checksum must be order-independent");
     }
 
@@ -2617,7 +3266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_v5_checksum_stored() {
+    fn test_current_save_stores_nonzero_base_checksum() {
         use crate::storage::backend::FileBackend;
         use tempfile::NamedTempFile;
 
@@ -2652,7 +3301,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v4_database_migrates_to_v5_on_open() {
+    fn test_v4_database_migrates_to_current_on_open() {
         use crate::storage::backend::FileBackend;
         use crate::storage::{FACT_PAGE_FORMAT_PACKED, PAGE_SIZE};
         use tempfile::NamedTempFile;
@@ -2683,13 +3332,12 @@ mod tests {
 
             // Write v4 header (fact_page_format byte will be 0)
             let mut header = FileHeader::new();
+            header.version = 4;
             header.page_count = 2;
             header.node_count = 1;
+            header.index_checksum = compute_index_checksum(std::slice::from_ref(&fact)).unwrap();
+            header.fact_page_format = 0;
             let mut hbytes = header.to_bytes();
-            // Force version to 4
-            hbytes[4..8].copy_from_slice(&4u32.to_le_bytes());
-            // Force fact_page_format byte (offset 68) to 0
-            hbytes[68] = 0;
             hbytes.resize(PAGE_SIZE, 0);
             backend.write_page(0, &hbytes).unwrap();
             backend.sync().unwrap();
@@ -2720,7 +3368,145 @@ mod tests {
     }
 
     #[test]
-    fn test_v5_load_fast_path_indexes_loaded() {
+    fn indexed_v4_migrates_by_fact_boundary_without_touching_legacy_pages() {
+        use crate::storage::btree::write_all_indexes;
+        use crate::storage::index::FactRef;
+        use std::collections::BTreeMap;
+
+        let entity = Uuid::from_u128(0x44);
+        let fact = Fact::with_valid_time(
+            entity,
+            ":legacy/name".to_string(),
+            Value::String("indexed v4".to_string()),
+            7,
+            1,
+            7,
+            VALID_TIME_FOREVER,
+        );
+        let facts = vec![fact.clone(), fact.clone()];
+        let fact_refs = vec![
+            FactRef {
+                page_id: 1,
+                slot_index: 0,
+            },
+            FactRef {
+                page_id: 2,
+                slot_index: 0,
+            },
+        ];
+        let mut backend = MemoryBackend::new();
+        backend
+            .write_page(0, &build_header_page(FileHeader::new()).unwrap())
+            .unwrap();
+        let encoded_fact = postcard::to_allocvec(&fact).unwrap();
+        let mut fact_page = vec![0u8; PAGE_SIZE];
+        fact_page[..encoded_fact.len()].copy_from_slice(&encoded_fact);
+        backend.write_page(1, &fact_page).unwrap();
+        backend.write_page(2, &fact_page).unwrap();
+
+        let (eavt, aevt, avet, vaet) = build_sorted_index_entries(&facts, &fact_refs);
+        let roots = write_all_indexes(
+            &eavt.into_iter().collect::<BTreeMap<_, _>>(),
+            &aevt.into_iter().collect::<BTreeMap<_, _>>(),
+            &avet.into_iter().collect::<BTreeMap<_, _>>(),
+            &vaet.into_iter().collect::<BTreeMap<_, _>>(),
+            &mut backend,
+            3,
+        )
+        .unwrap();
+        let legacy_page_count = backend.page_count().unwrap();
+        let mut header = FileHeader::new();
+        header.version = 4;
+        header.page_count = legacy_page_count;
+        header.node_count = 2;
+        header.last_checkpointed_tx_count = 1;
+        header.eavt_root_page = roots.0;
+        header.aevt_root_page = roots.1;
+        header.avet_root_page = roots.2;
+        header.vaet_root_page = roots.3;
+        header.index_checksum = compute_index_checksum(&facts).unwrap();
+        header.fact_page_format = 0;
+        let page0 = build_header_page(header).unwrap();
+        backend.write_page(0, &page0).unwrap();
+        let legacy_pages: Vec<Vec<u8>> = (1..legacy_page_count)
+            .map(|page_id| backend.read_page(page_id).unwrap())
+            .collect();
+
+        let migrated = PersistentFactStorage::new(backend, 256)
+            .expect("indexed v4 graph must migrate through its fact boundary");
+        assert_eq!(
+            migrated
+                .storage()
+                .get_facts_by_entity(&entity)
+                .unwrap()
+                .len(),
+            2,
+            "duplicate legacy ledger rows must remain distinct after migration"
+        );
+        let backend = migrated.into_backend().unwrap();
+        let current_page0 = backend.read_page(0).unwrap();
+        let current_header = FileHeader::from_bytes(&current_page0).unwrap();
+        let extension = HeaderExtension::read_from_page0(current_header.version, &current_page0)
+            .unwrap()
+            .expect("migrated v11 header must contain its extension");
+        assert_eq!(current_header.version, crate::storage::FORMAT_VERSION);
+        assert_eq!(current_header.node_count, 2);
+        assert_eq!(
+            extension.base_fact_page_start(),
+            legacy_page_count,
+            "legacy migration must append the candidate after the old authority"
+        );
+        for (offset, expected) in legacy_pages.iter().enumerate() {
+            let page_id = u64::try_from(offset).unwrap() + 1;
+            assert_eq!(
+                backend.read_page(page_id).unwrap(),
+                *expected,
+                "legacy page must remain byte-exact until page-0 publication"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_cow_rejects_incomplete_huge_published_prefix_before_sparse_write() {
+        let fact = Fact::with_valid_time(
+            Uuid::from_u128(0x4400),
+            ":legacy/name".to_string(),
+            Value::String("bounded prefix".to_string()),
+            7,
+            1,
+            7,
+            VALID_TIME_FOREVER,
+        );
+        let mut fact_page = vec![0u8; PAGE_SIZE];
+        let encoded = postcard::to_allocvec(&fact).unwrap();
+        fact_page[..encoded.len()].copy_from_slice(&encoded);
+        let mut header = FileHeader::new();
+        header.version = 4;
+        header.page_count = 3_604_123_350;
+        header.node_count = 1;
+        header.eavt_root_page = 2;
+        header.index_checksum = compute_index_checksum(std::slice::from_ref(&fact)).unwrap();
+        header.fact_page_format = 0;
+        let page0 = build_header_page(header).unwrap();
+        let mut backend = MemoryBackend::new();
+        backend.write_page(0, &page0).unwrap();
+        backend.write_page(1, &fact_page).unwrap();
+        let inspection = backend.clone();
+
+        let started = Instant::now();
+        let result = PersistentFactStorage::new(backend, 256);
+        assert!(
+            result.is_err(),
+            "incomplete legacy prefix must not choose its claimed end as a COW write offset"
+        );
+        assert!(started.elapsed().as_secs() < 2);
+        assert_eq!(inspection.page_count().unwrap(), 2);
+        assert_eq!(inspection.read_page(0).unwrap(), page0);
+        assert_eq!(inspection.read_page(1).unwrap(), fact_page);
+    }
+
+    #[test]
+    fn test_current_format_reopen_wires_index_readers() {
         use crate::storage::backend::FileBackend;
         use tempfile::NamedTempFile;
 
@@ -2728,7 +3514,7 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_string();
         let alice = Uuid::new_v4();
 
-        // Save in v5 format
+        // Save in the current format.
         {
             let mut pfs =
                 PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
@@ -2794,7 +3580,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_writes_v10_empty_header_extension() {
+    fn test_save_writes_v11_empty_manifest_slots() {
         use crate::storage::header_extension::{
             HeaderManifestSlotSelection, select_header_manifest_slot_from_page0,
         };
@@ -2819,7 +3605,7 @@ mod tests {
         let header_page = backend.read_page(0).unwrap();
         let header = crate::storage::FileHeader::from_bytes(&header_page).unwrap();
         let selection = select_header_manifest_slot_from_page0(header.version, &header_page)
-            .expect("v10 empty extension should decode");
+            .expect("v11 empty manifest slots should decode");
 
         assert_eq!(header.version, crate::storage::FORMAT_VERSION);
         assert!(matches!(
@@ -2829,7 +3615,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reopen_reads_v10_empty_extension_as_no_delta_manifest() {
+    fn test_reopen_reads_v11_empty_manifest_slots_as_no_delta_manifest() {
         use crate::storage::backend::FileBackend;
         use crate::storage::header_extension::HeaderManifestSlotSelection;
         use tempfile::NamedTempFile;
@@ -2863,14 +3649,689 @@ mod tests {
     }
 
     #[test]
-    fn test_reopen_loads_selected_delta_manifest_from_v10_slot() {
-        use crate::storage::backend::FileBackend;
-        use crate::storage::delta_manifest::{
-            DeltaManifest, PersistedManifestSelection, write_manifest_pages,
-        };
+    fn v11_fact_page_corruption_fails_on_first_selective_read() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let entity = write_single_fact_v11(path);
+        let (_, extension) = read_header_and_extension(path);
+        let fact_page = extension.base_fact_page_start();
+
+        // Flip padding so the packed fact remains decodable. Integrity, not
+        // deserialization luck, must reject the page when it is first touched.
+        flip_page_byte(path, fact_page, PAGE_SIZE - 1);
+
+        let reopened = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+            .expect("v11 open must stay bounded and defer base-page reads");
+        let error = reopened.storage().get_facts_by_entity(&entity).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Base page integrity checksum mismatch"),
+            "selective fact read must fail at the verified page boundary"
+        );
+    }
+
+    #[test]
+    fn v11_index_root_corruption_fails_on_first_selective_read() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let entity = write_single_fact_v11(path);
+        let (header, _) = read_header_and_extension(path);
+
+        flip_page_byte(path, header.eavt_root_page, PAGE_SIZE - 1);
+
+        let reopened = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+            .expect("v11 open must not scan the base index");
+        let error = reopened.storage().get_facts_by_entity(&entity).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Base page integrity checksum mismatch"),
+            "selective index read must fail at the verified page boundary"
+        );
+    }
+
+    #[test]
+    fn v11_catalog_payload_corruption_rejects_open_without_rewrite() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        let (_, extension) = read_header_and_extension(path);
+        flip_page_byte(path, extension.base_integrity().catalog_page_start(), 0);
+        let corrupted = std::fs::read(path).unwrap();
+
+        let result = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256);
+        assert!(result.is_err(), "corrupt catalog must reject open");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            corrupted,
+            "rejected catalog must not rewrite its source"
+        );
+    }
+
+    #[test]
+    fn v11_descriptor_corruption_rejects_open_without_rewrite() {
         use crate::storage::header_extension::{
-            HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
-            build_header_page_with_extension,
+            HEADER_EXTENSION_OFFSET, LEGACY_HEADER_EXTENSION_LEN,
+        };
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        let mut bytes = std::fs::read(path).unwrap();
+        let descriptor_offset = HEADER_EXTENSION_OFFSET + LEGACY_HEADER_EXTENSION_LEN;
+        bytes[descriptor_offset] ^= 0x01;
+        std::fs::write(path, &bytes).unwrap();
+
+        let result = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256);
+        assert!(result.is_err(), "corrupt descriptor must reject open");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            bytes,
+            "rejected descriptor must not rewrite its source"
+        );
+    }
+
+    #[test]
+    fn v11_missing_catalog_page_rejects_open_without_rewrite() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        let (_, extension) = read_header_and_extension(path);
+        let truncate_at = extension.base_integrity().catalog_page_start() * PAGE_SIZE as u64;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(truncate_at)
+            .unwrap();
+        let truncated = std::fs::read(path).unwrap();
+
+        let result = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256);
+        assert!(result.is_err(), "missing catalog page must reject open");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            truncated,
+            "rejected truncated graph must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn v11_catalog_length_must_match_covered_page_count_before_read() {
+        let descriptor = BasePageIntegrityDescriptor::new(1, 1, 1, 2, 1, 48, 0)
+            .expect("structurally canonical descriptor should build");
+        let backend = MemoryBackend::new();
+        let error = read_base_integrity_catalog(&backend, descriptor).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("length does not match its covered page count"),
+            "coverage must bound catalog allocation before any page read"
+        );
+    }
+
+    #[test]
+    fn oversized_v11_catalog_rejects_before_backend_read_or_allocation() {
+        struct NoReadBackend {
+            reads: Arc<std::sync::atomic::AtomicU64>,
+        }
+
+        impl StorageBackend for NoReadBackend {
+            fn write_page(&mut self, _page_id: u64, _data: &[u8]) -> Result<()> {
+                anyhow::bail!("unexpected write")
+            }
+
+            fn read_page(&self, _page_id: u64) -> Result<Vec<u8>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("unexpected read")
+            }
+
+            fn sync(&mut self) -> Result<()> {
+                Ok(())
+            }
+
+            fn page_count(&self) -> Result<u64> {
+                Ok(0)
+            }
+
+            fn close(&mut self) -> Result<()> {
+                Ok(())
+            }
+
+            fn backend_name(&self) -> &'static str {
+                "no-read"
+            }
+
+            fn is_new(&self) -> bool {
+                false
+            }
+        }
+
+        let covered = crate::storage::page_integrity::MAX_BASE_INTEGRITY_COVERED_PAGES + 1;
+        let catalog_len = 40u64 + covered * 4;
+        let catalog_pages = catalog_len.div_ceil(PAGE_SIZE as u64);
+        let descriptor = BasePageIntegrityDescriptor::new(
+            1,
+            1,
+            covered,
+            1 + covered,
+            catalog_pages,
+            catalog_len,
+            0,
+        )
+        .expect("descriptor layout itself should be representable");
+        let reads = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let backend = NoReadBackend {
+            reads: reads.clone(),
+        };
+
+        let error = read_base_integrity_catalog(&backend, descriptor).unwrap_err();
+        assert!(error.to_string().contains("supported"));
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "unsupported catalog must reject before any backend read"
+        );
+    }
+
+    #[test]
+    fn noncanonical_empty_v11_header_rejects_without_sparse_write() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let mut header = FileHeader::new();
+        header.page_count = 100;
+        header.header_checksum = compute_header_checksum(&header);
+        let extension = HeaderExtension::empty()
+            .with_base_fact_page_start(100)
+            .unwrap();
+        let page0 = build_header_page_with_extension(header, extension).unwrap();
+        std::fs::write(path, &page0).unwrap();
+        let before = std::fs::read(path).unwrap();
+
+        let result = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256);
+        assert!(
+            result.is_err(),
+            "empty v11 authority must be the canonical one-page shape"
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            before,
+            "rejected empty header must not create a sparse future-write target"
+        );
+    }
+
+    #[test]
+    fn protected_v11_base_requires_a_declared_fact_page() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        let mut bytes = std::fs::read(path).unwrap();
+        let mut header = FileHeader::from_bytes(&bytes[..PAGE_SIZE]).unwrap();
+        header.fact_page_count = 0;
+        header.header_checksum = compute_header_checksum(&header);
+        bytes[..84].copy_from_slice(&header.to_bytes());
+        std::fs::write(path, &bytes).unwrap();
+
+        let result = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256);
+        assert!(
+            result.is_err(),
+            "non-empty integrity descriptor must protect a declared fact range"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn v10_base_migrates_once_to_v11_with_stable_catalog() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let entity = write_single_fact_v11(path);
+        downgrade_current_base_to_v10(path);
+        let v10 = std::fs::read(path).unwrap();
+        let v10_header = FileHeader::from_bytes(&v10[..PAGE_SIZE]).unwrap();
+        assert_eq!(v10_header.version, 10);
+
+        {
+            let migrated = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+                .expect("complete v10 base must migrate");
+            assert_eq!(
+                migrated
+                    .storage()
+                    .get_facts_by_entity(&entity)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        let first_migration = std::fs::read(path).unwrap();
+        let (header, extension) = read_header_and_extension(path);
+        let integrity = extension.base_integrity();
+        assert_eq!(header.version, crate::storage::FORMAT_VERSION);
+        assert_eq!(integrity.base_generation(), 1);
+        assert_eq!(integrity.covered_page_start(), 1);
+        assert_eq!(integrity.covered_page_count(), v10_header.page_count - 1);
+        assert!(first_migration.len() > v10.len());
+
+        {
+            let reopened = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+                .expect("migrated v11 graph must reopen");
+            assert_eq!(
+                reopened
+                    .storage()
+                    .get_facts_by_entity(&entity)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            first_migration,
+            "second v11 open must not append or rewrite the catalog"
+        );
+    }
+
+    #[test]
+    fn v10_catalog_sync_failure_keeps_page0_on_v10() {
+        let mut storage = PersistentFactStorage::new(MemoryBackend::new(), 256).unwrap();
+        storage
+            .storage()
+            .transact(
+                vec![(
+                    Uuid::new_v4(),
+                    ":integrity/name".to_string(),
+                    Value::String("sync fault".to_string()),
+                )],
+                None,
+            )
+            .unwrap();
+        storage.mark_dirty();
+        storage.save().unwrap();
+
+        let mut backend = storage.into_backend().unwrap();
+        let current_page0 = backend.read_page(0).unwrap();
+        let mut header = FileHeader::from_bytes(&current_page0).unwrap();
+        let extension = HeaderExtension::read_from_page0(header.version, &current_page0)
+            .unwrap()
+            .expect("current memory fixture must contain a v11 extension");
+        let base_end = extension.base_integrity().covered_page_end().unwrap();
+        header.version = 10;
+        header.page_count = base_end;
+        header.header_checksum = compute_header_checksum(&header);
+        let v10_extension = HeaderExtension::empty()
+            .with_base_fact_page_start(extension.base_fact_page_start())
+            .unwrap();
+        let v10_page0 = build_header_page_with_extension(header, v10_extension).unwrap();
+        backend.write_page(0, &v10_page0).unwrap();
+
+        let inspection = backend.clone();
+        let (faulting, config) =
+            crate::storage::backend::fault_inject::FaultInjectingBackend::with_config(backend);
+        config.lock().unwrap().fail_sync_after = Some(0);
+
+        let result = PersistentFactStorage::new(faulting, 256);
+        assert!(
+            result.is_err(),
+            "catalog sync failure must abort v10 migration"
+        );
+        assert_eq!(
+            inspection.read_page(0).unwrap(),
+            v10_page0,
+            "catalog sync failure must not publish the v11 page-0 descriptor"
+        );
+        assert_eq!(
+            FileHeader::from_bytes(&inspection.read_page(0).unwrap())
+                .unwrap()
+                .version,
+            10,
+            "v10 page 0 remains the only published authority after the failed migration"
+        );
+    }
+
+    #[test]
+    fn corrupt_v10_base_refuses_migration_without_rewrite() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        downgrade_current_base_to_v10(path);
+        flip_page_byte(path, 1, PAGE_SIZE - 1);
+        let corrupted_v10 = std::fs::read(path).unwrap();
+
+        let result = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256);
+        assert!(result.is_err(), "corrupt v10 base must not be migrated");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            corrupted_v10,
+            "failed v10 migration must leave page 0 and all bytes unchanged"
+        );
+        assert_eq!(
+            FileHeader::from_bytes(&corrupted_v10[..PAGE_SIZE])
+                .unwrap()
+                .version,
+            10
+        );
+    }
+
+    #[test]
+    fn v10_late_cow_base_migrates_with_exact_coverage_and_preserved_prefix() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let entity = write_single_fact_v11(path);
+        {
+            let mut storage =
+                PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+            storage
+                .storage()
+                .transact(
+                    vec![(entity, ":integrity/age".to_string(), Value::Integer(7))],
+                    None,
+                )
+                .unwrap();
+            storage.mark_dirty();
+            assert_eq!(storage.save().unwrap(), CheckpointOutcome::DeltaSegment);
+            let candidate = storage
+                .write_recompact_candidate_from_visible_facts()
+                .expect("late COW candidate must build");
+            storage
+                .publish_recompact_candidate(candidate)
+                .expect("late COW candidate must publish");
+        }
+        let (_, current_extension) = read_header_and_extension(path);
+        assert!(current_extension.base_fact_page_start() > 1);
+        assert_eq!(
+            current_extension.base_integrity().base_generation(),
+            2,
+            "COW recompact must publish the next base generation"
+        );
+
+        downgrade_current_base_to_v10(path);
+        let v10 = std::fs::read(path).unwrap();
+        let v10_header = FileHeader::from_bytes(&v10[..PAGE_SIZE]).unwrap();
+        let v10_extension = HeaderExtension::read_from_page0(10, &v10[..PAGE_SIZE])
+            .unwrap()
+            .expect("v10 COW extension must decode");
+        let base_start = v10_extension.base_fact_page_start();
+        assert!(base_start > 1);
+
+        {
+            let migrated = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+                .expect("late COW v10 base must migrate");
+            assert_eq!(
+                migrated
+                    .storage()
+                    .get_facts_by_entity(&entity)
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+        let migrated = std::fs::read(path).unwrap();
+        let (_, migrated_extension) = read_header_and_extension(path);
+        let descriptor = migrated_extension.base_integrity();
+        assert_eq!(descriptor.covered_page_start(), base_start);
+        assert_eq!(
+            descriptor.covered_page_count(),
+            v10_header.page_count - base_start
+        );
+        assert_eq!(
+            &migrated[PAGE_SIZE..v10.len()],
+            &v10[PAGE_SIZE..],
+            "late COW migration must preserve every pre-existing non-header byte"
+        );
+    }
+
+    #[test]
+    fn selected_multi_delta_v10_migration_preserves_lineage_bytes_and_slots() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let v10 = crate::gate_e_test_support::NATIVE_FIXTURE;
+        std::fs::write(path, v10).unwrap();
+        let v10_header = FileHeader::from_bytes(&v10[..PAGE_SIZE]).unwrap();
+        let v10_extension = HeaderExtension::read_from_page0(10, &v10[..PAGE_SIZE])
+            .unwrap()
+            .expect("frozen v10 extension must decode");
+        assert_eq!(v10_header.version, 10);
+        assert_eq!(
+            usize::try_from(v10_header.page_count).unwrap() * PAGE_SIZE,
+            v10.len(),
+            "frozen migration fixture must be a complete published prefix"
+        );
+
+        {
+            let migrated = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+                .expect("selected multi-delta v10 graph must migrate");
+            assert_eq!(migrated.storage().get_all_facts().unwrap().len(), 13);
+        }
+        let first_migration = std::fs::read(path).unwrap();
+        let (header, extension) = read_header_and_extension(path);
+        assert_eq!(header.version, crate::storage::FORMAT_VERSION);
+        assert_eq!(extension.primary(), v10_extension.primary());
+        assert_eq!(extension.secondary(), v10_extension.secondary());
+        assert_eq!(
+            &first_migration[PAGE_SIZE..v10.len()],
+            &v10[PAGE_SIZE..],
+            "migration must append the catalog without rewriting base/delta/manifest bytes"
+        );
+
+        drop(
+            PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+                .expect("migrated multi-delta graph must reopen"),
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            first_migration,
+            "second open must not rewrite or grow the migrated lineage"
+        );
+    }
+
+    #[test]
+    fn v11_delta_checkpoint_preserves_base_catalog_identity_and_bytes() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let entity = write_single_fact_v11(path);
+        let (before_header, before_extension) = read_header_and_extension(path);
+        let before_descriptor = before_extension.base_integrity();
+        let before_bytes = std::fs::read(path).unwrap();
+        let catalog_start =
+            usize::try_from(before_descriptor.catalog_page_start()).unwrap() * PAGE_SIZE;
+        let catalog_end =
+            usize::try_from(before_descriptor.catalog_page_end().unwrap()).unwrap() * PAGE_SIZE;
+        let before_catalog = before_bytes[catalog_start..catalog_end].to_vec();
+
+        {
+            let mut storage =
+                PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+            storage
+                .storage()
+                .transact(
+                    vec![(entity, ":integrity/age".to_string(), Value::Integer(7))],
+                    None,
+                )
+                .unwrap();
+            storage.mark_dirty();
+            assert_eq!(storage.save().unwrap(), CheckpointOutcome::DeltaSegment);
+        }
+
+        let (after_header, after_extension) = read_header_and_extension(path);
+        let after_bytes = std::fs::read(path).unwrap();
+        assert!(after_header.page_count > before_header.page_count);
+        assert_eq!(after_extension.base_integrity(), before_descriptor);
+        assert_eq!(
+            &after_bytes[catalog_start..catalog_end],
+            before_catalog.as_slice(),
+            "delta publish must preserve the selected base catalog byte-exact"
+        );
+    }
+
+    #[test]
+    fn selected_delta_does_not_mask_corrupt_v11_base_page() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let entity = write_single_fact_v11(path);
+        {
+            let mut storage =
+                PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+            storage
+                .storage()
+                .transact(
+                    vec![(entity, ":integrity/age".to_string(), Value::Integer(7))],
+                    None,
+                )
+                .unwrap();
+            storage.mark_dirty();
+            assert_eq!(storage.save().unwrap(), CheckpointOutcome::DeltaSegment);
+        }
+        let (_, extension) = read_header_and_extension(path);
+        flip_page_byte(path, extension.base_fact_page_start(), PAGE_SIZE - 1);
+
+        let reopened = PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256)
+            .expect("selected delta metadata must open without scanning its base");
+        let error = reopened.storage().get_facts_by_entity(&entity).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Base page integrity checksum mismatch"),
+            "selected delta must not fall back around corrupt base data"
+        );
+    }
+
+    #[test]
+    fn full_save_refuses_to_bless_corrupt_v11_base() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        let (_, extension) = read_header_and_extension(path);
+        let mut storage =
+            PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+        flip_page_byte(path, extension.base_fact_page_start(), PAGE_SIZE - 1);
+        let corrupted_page0 = std::fs::read(path).unwrap()[..PAGE_SIZE].to_vec();
+
+        storage.mark_dirty();
+        let result = storage.save();
+        assert!(result.is_err(), "full save must verify the old generation");
+        assert_eq!(
+            &std::fs::read(path).unwrap()[..PAGE_SIZE],
+            corrupted_page0.as_slice(),
+            "failed full save must not publish a new generation"
+        );
+        storage.dirty = false;
+    }
+
+    #[test]
+    fn successful_full_save_increments_base_generation() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        let (_, before_extension) = read_header_and_extension(path);
+        assert_eq!(before_extension.base_integrity().base_generation(), 1);
+
+        {
+            let mut storage =
+                PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+            storage.mark_dirty();
+            assert_eq!(storage.save().unwrap(), CheckpointOutcome::FullRebuild);
+        }
+        let (_, after_extension) = read_header_and_extension(path);
+        assert_eq!(
+            after_extension.base_integrity().base_generation(),
+            2,
+            "full save must bind republished pages to the next generation"
+        );
+    }
+
+    #[test]
+    fn native_backup_refuses_corrupt_v11_base() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let path = source.path();
+        write_single_fact_v11(path);
+        let (_, extension) = read_header_and_extension(path);
+        let mut storage =
+            PersistentFactStorage::new(FileBackend::open(path).unwrap(), 256).unwrap();
+        flip_page_byte(path, extension.base_fact_page_start(), PAGE_SIZE - 1);
+        let mut destination = tempfile::tempfile().unwrap();
+
+        assert!(
+            storage.copy_published_image_to(&mut destination).is_err(),
+            "backup must not copy a base that fails its generation catalog"
+        );
+    }
+
+    #[test]
+    fn v11_open_reads_catalog_metadata_but_no_base_pages() {
+        struct PageIdCountingBackend {
+            inner: FileBackend,
+            reads: Arc<Mutex<Vec<u64>>>,
+        }
+
+        impl StorageBackend for PageIdCountingBackend {
+            fn write_page(&mut self, page_id: u64, data: &[u8]) -> Result<()> {
+                self.inner.write_page(page_id, data)
+            }
+
+            fn read_page(&self, page_id: u64) -> Result<Vec<u8>> {
+                self.reads.lock().unwrap().push(page_id);
+                self.inner.read_page(page_id)
+            }
+
+            fn sync(&mut self) -> Result<()> {
+                self.inner.sync()
+            }
+
+            fn page_count(&self) -> Result<u64> {
+                self.inner.page_count()
+            }
+
+            fn close(&mut self) -> Result<()> {
+                self.inner.close()
+            }
+
+            fn backend_name(&self) -> &'static str {
+                "page-id-counting-file"
+            }
+
+            fn is_new(&self) -> bool {
+                self.inner.is_new()
+            }
+        }
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        write_single_fact_v11(path);
+        let (_, extension) = read_header_and_extension(path);
+        let descriptor = extension.base_integrity();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        {
+            let backend = PageIdCountingBackend {
+                inner: FileBackend::open(path).unwrap(),
+                reads: reads.clone(),
+            };
+            let storage = PersistentFactStorage::new(backend, 256).unwrap();
+            drop(storage);
+        }
+        let read_ids = reads.lock().unwrap();
+        assert!(
+            read_ids.iter().any(|page_id| {
+                *page_id >= descriptor.catalog_page_start()
+                    && *page_id < descriptor.catalog_page_end().unwrap()
+            }),
+            "open must load and verify catalog metadata"
+        );
+        assert!(
+            read_ids.iter().all(|page_id| {
+                *page_id < descriptor.covered_page_start()
+                    || *page_id >= descriptor.covered_page_end().unwrap()
+            }),
+            "open must not scan fact or index pages"
+        );
+    }
+
+    #[test]
+    fn empty_v10_manifest_canonicalizes_to_empty_v11() {
+        use crate::storage::backend::FileBackend;
+        use crate::storage::delta_manifest::{DeltaManifest, write_manifest_pages};
+        use crate::storage::header_extension::{
+            HeaderExtension, HeaderManifestSlot, HeaderManifestSlotSelection,
+            build_header_page_with_extension, select_header_manifest_slot_from_page0,
         };
         use tempfile::NamedTempFile;
 
@@ -2880,6 +4341,7 @@ mod tests {
         {
             let mut backend = FileBackend::open(&path).unwrap();
             let mut header = FileHeader::new();
+            header.version = 10;
             let manifest = DeltaManifest::from_parts(
                 11,
                 DeltaBaseIdentity::from_header(&header),
@@ -2901,20 +4363,29 @@ mod tests {
             backend.sync().unwrap();
         }
 
-        let reopened = PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap();
+        drop(PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap());
+        let canonical = std::fs::read(&path).unwrap();
+        let header = FileHeader::from_bytes(&canonical[..PAGE_SIZE]).unwrap();
+        assert_eq!(header.version, crate::storage::FORMAT_VERSION);
+        assert_eq!(header.page_count, 1);
         assert!(matches!(
-            reopened.delta_manifest_selection(),
-            PersistedManifestSelection::Use {
-                slot: HeaderManifestSlotName::Primary,
-                manifest
-            } if manifest.generation() == 11
+            select_header_manifest_slot_from_page0(header.version, &canonical[..PAGE_SIZE])
+                .unwrap(),
+            HeaderManifestSlotSelection::NoDeltaManifest
         ));
+        drop(PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256).unwrap());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            canonical,
+            "canonical empty v11 reopen must not rewrite the source"
+        );
     }
 
     #[test]
     fn test_v10_header_without_extension_rejected_on_load() {
         let mut backend = MemoryBackend::new();
         let mut header = FileHeader::new();
+        header.version = 10;
         header.page_count = 2;
         header.header_checksum = compute_header_checksum(&header);
 
@@ -2939,7 +4410,8 @@ mod tests {
             HeaderExtension, HeaderManifestSlot, build_header_page_with_extension,
         };
 
-        let header = FileHeader::new();
+        let mut header = FileHeader::new();
+        header.version = 10;
         let manifest = DeltaManifest::from_parts(
             12,
             DeltaBaseIdentity::from_header(&header),
@@ -2952,7 +4424,6 @@ mod tests {
         let descriptor =
             HeaderManifestSlot::new(12, 99, 1, encoded.len() as u64, crc32fast::hash(&encoded))
                 .expect("descriptor should build");
-        let mut header = header;
         header.page_count = 2;
         header.header_checksum = compute_header_checksum(&header);
         let page0 = build_header_page_with_extension(
@@ -2981,7 +4452,8 @@ mod tests {
             build_header_page_with_extension,
         };
 
-        let header = FileHeader::new();
+        let mut header = FileHeader::new();
+        header.version = 10;
         let manifest = DeltaManifest::from_parts(
             13,
             DeltaBaseIdentity::from_header(&header),
@@ -2997,7 +4469,6 @@ mod tests {
         let secondary =
             HeaderManifestSlot::new(12, 2, 1, encoded.len() as u64, crc32fast::hash(&encoded))
                 .expect("secondary descriptor should build");
-        let mut header = header;
         header.page_count = 3;
         header.header_checksum = compute_header_checksum(&header);
         let mut page0 =
@@ -3089,9 +4560,9 @@ mod tests {
         );
     }
 
-    fn fact_projection(
-        storage: &FactStorage,
-    ) -> Result<Vec<(Uuid, String, Vec<u8>, i64, i64, u64, u64, bool)>> {
+    type FactProjection = (Uuid, String, Vec<u8>, i64, i64, u64, u64, bool);
+
+    fn fact_projection(storage: &FactStorage) -> Result<Vec<FactProjection>> {
         let mut facts: Vec<_> = storage
             .get_all_facts()?
             .into_iter()
@@ -3777,6 +5248,8 @@ mod tests {
         // triggers migration without relying on the old silent wrong-type skip.
         let mut empty_fact_page = vec![0u8; PAGE_SIZE];
         empty_fact_page[0] = crate::storage::packed_pages::PAGE_TYPE_PACKED;
+        page[64..68].copy_from_slice(&crc32fast::hash(&empty_fact_page).to_le_bytes());
+        backend.write_page(0, &page).unwrap();
         backend.write_page(1, &empty_fact_page).unwrap();
 
         let s = PersistentFactStorage::new(backend, 256).unwrap();
@@ -3793,6 +5266,141 @@ mod tests {
         assert_eq!(
             header.fact_page_count, 1,
             "fact_page_count must reflect page layout"
+        );
+    }
+
+    #[test]
+    fn indexed_nonempty_v5_migrates_to_cow_v11() {
+        use crate::storage::btree::write_all_indexes;
+        use std::collections::BTreeMap;
+
+        let entity = Uuid::from_u128(0x55);
+        let fact = Fact::with_valid_time(
+            entity,
+            ":legacy/name".to_string(),
+            Value::String("indexed v5".to_string()),
+            9,
+            1,
+            9,
+            VALID_TIME_FOREVER,
+        );
+        let (fact_pages, fact_refs) = pack_facts(std::slice::from_ref(&fact), 1).unwrap();
+        let mut backend = MemoryBackend::new();
+        backend
+            .write_page(0, &build_header_page(FileHeader::new()).unwrap())
+            .unwrap();
+        backend.write_page(1, &fact_pages[0]).unwrap();
+        let (eavt, aevt, avet, vaet) =
+            build_sorted_index_entries(std::slice::from_ref(&fact), &fact_refs);
+        let roots = write_all_indexes(
+            &eavt.into_iter().collect::<BTreeMap<_, _>>(),
+            &aevt.into_iter().collect::<BTreeMap<_, _>>(),
+            &avet.into_iter().collect::<BTreeMap<_, _>>(),
+            &vaet.into_iter().collect::<BTreeMap<_, _>>(),
+            &mut backend,
+            2,
+        )
+        .unwrap();
+        let legacy_page_count = backend.page_count().unwrap();
+        let mut header = FileHeader::new();
+        header.version = 5;
+        header.page_count = legacy_page_count;
+        header.node_count = 1;
+        header.last_checkpointed_tx_count = 1;
+        header.eavt_root_page = roots.0;
+        header.aevt_root_page = roots.1;
+        header.avet_root_page = roots.2;
+        header.vaet_root_page = roots.3;
+        header.index_checksum = crc32fast::hash(&fact_pages[0]);
+        header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
+        backend
+            .write_page(0, &build_header_page(header).unwrap())
+            .unwrap();
+
+        let migrated = PersistentFactStorage::new(backend, 256)
+            .expect("indexed non-empty v5 graph must migrate");
+        assert_eq!(
+            migrated
+                .storage()
+                .get_facts_by_entity(&entity)
+                .unwrap()
+                .len(),
+            1
+        );
+        let backend = migrated.into_backend().unwrap();
+        let page0 = backend.read_page(0).unwrap();
+        let current_header = FileHeader::from_bytes(&page0).unwrap();
+        let extension = HeaderExtension::read_from_page0(current_header.version, &page0)
+            .unwrap()
+            .expect("migrated v11 header must contain its extension");
+        assert_eq!(current_header.version, crate::storage::FORMAT_VERSION);
+        assert_eq!(current_header.node_count, 1);
+        assert_eq!(extension.base_fact_page_start(), legacy_page_count);
+    }
+
+    #[test]
+    fn nonempty_v5_with_root_on_page_one_rejects_without_publishing() {
+        let entity = Uuid::from_u128(0x551);
+        let fact = Fact::with_valid_time(
+            entity,
+            ":legacy/name".to_string(),
+            Value::String("must survive".to_string()),
+            9,
+            1,
+            9,
+            VALID_TIME_FOREVER,
+        );
+        let (fact_pages, _) = pack_facts(&[fact], 1).unwrap();
+        let mut backend = MemoryBackend::new();
+        let mut header = FileHeader::new();
+        header.version = 5;
+        header.page_count = 2;
+        header.node_count = 1;
+        header.eavt_root_page = 1;
+        header.index_checksum = crc32fast::hash(&fact_pages[0]);
+        header.fact_page_format = FACT_PAGE_FORMAT_PACKED;
+        let page0 = build_header_page(header).unwrap();
+        backend.write_page(0, &page0).unwrap();
+        backend.write_page(1, &fact_pages[0]).unwrap();
+        let inspection = backend.clone();
+
+        let result = PersistentFactStorage::new(backend, 256);
+        assert!(
+            result.is_err(),
+            "a corrupt v5 root must not shorten the fact range to zero"
+        );
+        assert_eq!(
+            inspection.read_page(0).unwrap(),
+            page0,
+            "failed v5 migration must keep v5 page 0 authoritative"
+        );
+        assert_eq!(inspection.read_page(1).unwrap(), fact_pages[0]);
+    }
+
+    #[test]
+    fn corrupt_v5_packed_base_rejects_migration_without_publishing() {
+        let mut backend = MemoryBackend::new();
+        let mut page0 = vec![0u8; PAGE_SIZE];
+        page0[0..4].copy_from_slice(b"MGRF");
+        page0[4..8].copy_from_slice(&5u32.to_le_bytes());
+        page0[8..16].copy_from_slice(&2u64.to_le_bytes());
+        page0[68] = FACT_PAGE_FORMAT_PACKED;
+        let mut fact_page = vec![0u8; PAGE_SIZE];
+        fact_page[0] = crate::storage::packed_pages::PAGE_TYPE_PACKED;
+        page0[64..68].copy_from_slice(&crc32fast::hash(&fact_page).to_le_bytes());
+        fact_page[PAGE_SIZE - 1] ^= 0x01;
+        backend.write_page(0, &page0).unwrap();
+        backend.write_page(1, &fact_page).unwrap();
+        let inspection = backend.clone();
+
+        let result = PersistentFactStorage::new(backend, 256);
+        assert!(result.is_err(), "corrupt v5 base must reject migration");
+        assert_eq!(
+            FileHeader::from_bytes(&inspection.read_page(0).unwrap())
+                .unwrap()
+                .version,
+            5,
+            "failed v5 migration must leave page 0 on v5"
         );
     }
 
@@ -3828,8 +5436,8 @@ mod tests {
     /// compute_page_checksum looped over 3.6 billion zero-filled sparse pages
     /// (each read_exact returns zeros, no error), hanging the process.
     ///
-    /// After the fix, next_free = 1 + validated_num_fact_pages (= 1 here),
-    /// so migration completes in constant time and produces a sane current header.
+    /// The malformed file must now fail closed in constant time without
+    /// rewriting page 0 or manufacturing an empty current-format database.
     #[test]
     fn test_v5_migration_large_page_count_does_not_hang() {
         use crate::storage::backend::FileBackend;
@@ -3847,23 +5455,22 @@ mod tests {
         page[68] = 0x20; // fact_page_format
         std::fs::write(&path, &page).unwrap();
 
-        // Must complete without hanging; next_free must be computed from actual
-        // fact pages (= 1 + 0 = 1), not from the crafted header.page_count.
-        let s = PersistentFactStorage::new(FileBackend::open(&path).unwrap(), 256)
-            .expect("migration must complete");
-        let b = s.into_backend().unwrap();
-        let header_bytes = b.read_page(0).unwrap();
-        let header = crate::storage::FileHeader::from_bytes(&header_bytes).unwrap();
-        assert_eq!(
-            header.version,
-            crate::storage::FORMAT_VERSION,
-            "migration must upgrade to current format"
-        );
-        // Resulting page_count must be small (0 fact pages + 4 index pages + header),
-        // NOT the crafted 3.6-billion-page value.
+        let before = std::fs::read(&path).unwrap();
+        let started = Instant::now();
+        let result = FileBackend::open(&path)
+            .and_then(|backend| PersistentFactStorage::new(backend, 256).map(|_| ()));
         assert!(
-            header.page_count < 100,
-            "page_count must be sane after migration"
+            result.is_err(),
+            "missing v5 fact pages must fail instead of publishing data loss"
+        );
+        assert!(
+            started.elapsed().as_secs() < 2,
+            "crafted page count must fail without a multi-billion-page scan"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "failed migration must leave the v5 image byte-exact"
         );
     }
 
