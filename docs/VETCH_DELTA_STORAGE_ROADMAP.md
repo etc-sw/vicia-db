@@ -128,7 +128,7 @@ The next step is therefore not another checkpoint algorithm change and not a new
 public receipt API. A5-4 supplied the browser caller evidence and page-record
 reclaim that Q3-B left outside native core. The remaining browser storage
 blocker is the measured 1M full-load open/memory shape; native work proceeds
-separately through A9 linearized backup. Deeper browser work must target
+separately through the now-landed A9 linearized backup. Deeper browser work must target
 bounded/page-on-demand open rather than another delta algorithm.
 
 ## Evidence Trail

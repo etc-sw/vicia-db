@@ -88,6 +88,7 @@ impl Session {
                 "status" => self.op_status(id, &mut writer)?,
                 "checkpoint" => self.op_checkpoint(id, &mut writer)?,
                 "maintenance" => self.op_maintenance(id, &mut writer)?,
+                "backup" => self.op_backup(obj, id, &mut writer)?,
                 "export_since" => self.op_export_since(obj, id, &mut writer)?,
                 "ping" => write_ok(&mut writer, id, json!({"type": "pong"}))?,
                 "shutdown" => {
@@ -243,6 +244,48 @@ impl Session {
                 )
             }
             Err(e) => write_error(writer, id, "storage", &e.to_string()),
+        }
+    }
+
+    fn op_backup(
+        &mut self,
+        obj: &serde_json::Map<String, JVal>,
+        id: JVal,
+        writer: &mut impl Write,
+    ) -> anyhow::Result<()> {
+        let Some(destination) = obj.get("destination").and_then(JVal::as_str) else {
+            return write_error(
+                writer,
+                id,
+                "protocol",
+                "backup requires non-empty string field \"destination\"",
+            );
+        };
+        if destination.is_empty() {
+            return write_error(
+                writer,
+                id,
+                "protocol",
+                "backup requires non-empty string field \"destination\"",
+            );
+        }
+
+        match self.db.backup_to(destination) {
+            Ok(outcome) => {
+                self.record_checkpoint("published");
+                write_ok(
+                    writer,
+                    id,
+                    json!({
+                        "type": "backup",
+                        "destination": destination,
+                        "tx_count": outcome.tx_count,
+                        "bytes": outcome.bytes,
+                        "durability": "published",
+                    }),
+                )
+            }
+            Err(error) => write_error(writer, id, "storage", &error.to_string()),
         }
     }
 

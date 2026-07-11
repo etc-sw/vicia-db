@@ -2,7 +2,7 @@
 
 Per-backend durability semantics (gap G13) and the browser caller rules from
 slice A5 of `docs/APP_ADOPTION_GAP_PLAN.md`. This is the authority for what
-`execute` / `checkpoint` / `importGraph` / `runIdleMaintenance` guarantee **at the moment they
+`execute` / `checkpoint` / `backup_to` / `importGraph` / `runIdleMaintenance` guarantee **at the moment they
 return**, per backend, and for the rules a browser caller must follow because
 of those semantics. The session-protocol view of the same facts (the
 `durability` field on result frames) is `docs/SESSION_PROTOCOL.md`
@@ -24,6 +24,7 @@ Backends covered:
 | --- | --- | --- |
 | `execute` (write) returns Ok | Facts are in the WAL (**fsynced**) and in memory. Survives kill -9 / power loss via replay. = `applied`. | All dirty pages committed in **one** IndexedDB readwrite transaction. Survives tab close and browser crash; **not** guaranteed against power loss / OS crash (see below). No WAL tier exists. |
 | `checkpoint()` returns Ok | Committed image durable (data synced before the header publish), WAL retired. = `published`. | Same flush as `execute`'s write-through; only needed after bulk operations. |
+| `backup_to()` / session `backup` returns Ok | Source checkpoint complete; a fresh independent destination contains exactly returned `tx_count`, is fsynced, and was atomically published without overwrite while the same write lock remained held. | Not applicable; browser portability uses atomic export/import. |
 | idle maintenance returns Ok | Pending writes are checkpointed first; threshold delta may be copy-on-write recompacted. | Threshold delta was either healthy (`noop`) or rebuilt as a fresh contiguous graph and atomically replaced in IndexedDB. |
 | Handle drop / tab close | Best-effort checkpoint on `Drop` (errors swallowed). Un-checkpointed WAL replays on next open. | Whatever the last committed IndexedDB transaction wrote. Nothing in flight survives partially (single tx). |
 | Crash mid-write | The in-flight entry has a bad CRC32 and is discarded on replay; every *acknowledged* write survives. | The in-flight IndexedDB transaction rolls back whole; reopen shows the previous consistent state. |
@@ -43,6 +44,15 @@ Backends covered:
   `src/storage/persistent_facts.rs`).
 - Verified continuously by the A7 kill -9 harness
   (`docs/BENCHMARKS.md` "A7: Crash Safety Under kill -9").
+- `backup_to()` is stronger than `checkpoint()` followed by caller-side copy:
+  it retains the same write lock through an exact published-prefix copy,
+  destination fsync, no-clobber publish, and Unix parent-directory fsync.
+  The WAL and unpublished physical tail pages are excluded. A failure after
+  source checkpoint may leave that checkpoint durable, but never returns a
+  published backup receipt; existing destination/sidecar paths are untouched.
+  The linearization domain is one daemon-owned `Minigraf` handle and its
+  clones. Independently opening the same source pathname is not a second
+  writer mode; all access must route through the owner.
 
 ### Browser: write-through, no WAL
 

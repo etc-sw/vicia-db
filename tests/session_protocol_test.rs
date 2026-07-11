@@ -298,10 +298,30 @@ fn export_since_missing_field_is_protocol_error_and_session_survives() {
     assert_eq!(responses[2]["result"]["type"], "pong");
 }
 
+#[test]
+fn backup_field_errors_and_in_memory_rejection_keep_session_alive() {
+    let responses = run_session(concat!(
+        "{\"op\":\"backup\"}\n",
+        "{\"op\":\"backup\",\"destination\":7}\n",
+        "{\"op\":\"backup\",\"destination\":\"\"}\n",
+        "{\"op\":\"backup\",\"destination\":\"unused.graph\"}\n",
+        "{\"op\":\"ping\"}\n",
+    ));
+    for response in &responses[..3] {
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["kind"], "protocol");
+    }
+    assert_eq!(responses[3]["ok"], false);
+    assert_eq!(responses[3]["error"]["kind"], "storage");
+    assert_eq!(responses[4]["result"]["type"], "pong");
+}
+
 // ─── Child-process tests: the real binary over a real pipe ──────────────────
 
 mod child_process {
+    use minigraf::Minigraf;
     use serde_json::Value as JVal;
+    use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -424,5 +444,109 @@ mod child_process {
         );
         assert_eq!(status["result"]["pending_facts"], 0);
         reopened.close();
+    }
+
+    #[test]
+    fn live_session_backup_is_published_at_exact_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("live source.graph");
+        let backup_path = dir.path().join("rollback point.graph");
+        let mut session = ChildSession::spawn(&["--file", db_path.to_str().unwrap()]);
+
+        let first = session
+            .round_trip("{\"op\":\"execute\",\"datalog\":\"(transact [[:before :value 1]])\"}");
+        assert_eq!(first["result"]["tx_count"], 1);
+        let request_id = json!({"kind": "rollback", "sequence": 1});
+        let backup_request = json!({
+            "op": "backup",
+            "destination": backup_path,
+            "id": request_id.clone(),
+        });
+        let backup = session.round_trip(&backup_request.to_string());
+        assert_eq!(backup["ok"], true);
+        assert_eq!(backup["id"], request_id);
+        assert_eq!(backup["result"]["type"], "backup");
+        assert_eq!(
+            backup["result"]["destination"],
+            backup_path.to_str().unwrap()
+        );
+        assert_eq!(backup["result"]["tx_count"], 1);
+        assert_eq!(backup["result"]["durability"], "published");
+        assert!(
+            backup["result"]["bytes"].as_u64().unwrap() >= 4096,
+            "backup response must report a complete header page"
+        );
+
+        {
+            let snapshot = Minigraf::open(&backup_path).unwrap();
+            assert_eq!(snapshot.current_tx_count(), 1);
+            assert_eq!(snapshot.export_fact_log().unwrap().len(), 1);
+        }
+
+        let second = session
+            .round_trip("{\"op\":\"execute\",\"datalog\":\"(transact [[:after :value 2]])\"}");
+        assert_eq!(second["result"]["tx_count"], 2);
+        let source_read = session.round_trip(
+            "{\"op\":\"execute\",\"datalog\":\"(query [:find ?v :where [:after :value ?v]])\"}",
+        );
+        assert_eq!(
+            source_read["result"]["results"].as_array().unwrap().len(),
+            1
+        );
+        let status = session.round_trip("{\"op\":\"status\"}");
+        assert_eq!(status["result"]["last_checkpoint_outcome"], "published");
+        assert!(status["result"]["last_checkpoint_unix_ms"].is_u64());
+
+        {
+            let snapshot = Minigraf::open(&backup_path).unwrap();
+            assert_eq!(snapshot.current_tx_count(), 1);
+            assert_eq!(snapshot.export_fact_log().unwrap().len(), 1);
+        }
+        session.close();
+    }
+
+    #[test]
+    fn backup_storage_errors_preserve_targets_and_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("source.graph");
+        let mut session = ChildSession::spawn(&["--file", db_path.to_str().unwrap()]);
+        let write = session
+            .round_trip("{\"op\":\"execute\",\"datalog\":\"(transact [[:safe :value 1]])\"}");
+        assert_eq!(write["ok"], true);
+
+        let existing = dir.path().join("existing.graph");
+        std::fs::write(&existing, b"sentinel").unwrap();
+        let existing_response =
+            session.round_trip(&json!({"op": "backup", "destination": existing}).to_string());
+        assert_eq!(existing_response["error"]["kind"], "storage");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"sentinel");
+
+        let stale_target = dir.path().join("stale.graph");
+        let mut stale_wal_name = stale_target.file_name().unwrap().to_os_string();
+        stale_wal_name.push(".wal");
+        let stale_wal = stale_target.with_file_name(stale_wal_name);
+        std::fs::write(&stale_wal, b"unrelated").unwrap();
+        let stale_response =
+            session.round_trip(&json!({"op": "backup", "destination": stale_target}).to_string());
+        assert_eq!(stale_response["error"]["kind"], "storage");
+        assert!(!stale_target.exists());
+        assert_eq!(std::fs::read(&stale_wal).unwrap(), b"unrelated");
+
+        let missing = dir.path().join("missing-parent").join("backup.graph");
+        let missing_response =
+            session.round_trip(&json!({"op": "backup", "destination": missing}).to_string());
+        assert_eq!(missing_response["error"]["kind"], "storage");
+        assert!(!missing.exists());
+
+        let source_response =
+            session.round_trip(&json!({"op": "backup", "destination": db_path}).to_string());
+        assert_eq!(source_response["error"]["kind"], "storage");
+        let read = session.round_trip(
+            "{\"op\":\"execute\",\"datalog\":\"(query [:find ?v :where [:safe :value ?v]])\"}",
+        );
+        assert_eq!(read["result"]["results"].as_array().unwrap().len(), 1);
+        let pong = session.round_trip("{\"op\":\"ping\"}");
+        assert_eq!(pong["result"]["type"], "pong");
+        session.close();
     }
 }

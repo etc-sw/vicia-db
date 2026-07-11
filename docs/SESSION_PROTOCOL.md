@@ -39,6 +39,7 @@ line-based transport.
 | `status` | — | Cheap telemetry snapshot; see Status fields. |
 | `checkpoint` | — | Foreground checkpoint (WAL → durable image). |
 | `maintenance` | — | `run_idle_maintenance()`; call in idle windows per `docs/MAINTENANCE_API_CONTRACT.md`. |
+| `backup` | `destination`: non-empty string | Linearized live-writer backup to a fresh path (A9); never overwrites. |
 | `export_since` | `since_tx_count`: uint | Incremental fact-log tail (A2); see export_since below. |
 | `ping` | — | Liveness. |
 | `shutdown` | — | Responds, then exits the loop. Equivalent to stdin EOF. |
@@ -55,10 +56,40 @@ Success: `{"ok": true, "result": {...}, "id"?}`. Result bodies by type:
 - `{"type": "status", ...}` — see Status fields
 - `{"type": "checkpoint", "durability": "published"}`
 - `{"type": "maintenance", "checkpoint": "noop"|"published", "delta": "noop"|"recompacted", "advice": "none"|"reduce_checkpoint_cadence"}`
+- `{"type": "backup", "destination": <echo>, "tx_count": <n>, "bytes": <n>, "durability": "published"}`
 - `{"type": "fact_log", ...}` — see export_since below
 - `{"type": "pong"}`, `{"type": "shutdown"}`
 
 Error: `{"ok": false, "error": {"kind": "...", "message": "..."}, "id"?}`.
+
+## backup (A9)
+
+Request:
+
+```json
+{"op":"backup","destination":"/rollback/before-experiment.graph","id":7}
+```
+
+The destination string is echoed exactly in the success receipt. It must name
+a fresh file in an existing directory; the graph, its appended `.wal`, and its
+`.graph.lock` sidecar must all be absent. Vicia never overwrites a rollback
+point. Source graph/WAL/lock aliases are rejected, with conservative case
+folding on Windows and Apple platforms. The caller owns this destination namespace until
+the response.
+
+The operation holds the source writer lock across checkpoint, exact published-
+page copy, candidate fsync, and atomic publish. `tx_count` is the source
+watermark contained in the backup, not a later status sample. `bytes` is the
+fsynced checkpointed prefix. The source remains open and can accept later
+writes after the response; those writes are absent from this backup.
+This assumes the documented one-owner model: the session's handle and its
+clones are the only writers for the source pathname.
+
+Schema errors are `protocol`; target conflicts and checkpoint/copy/sync errors
+are `storage`. A failure after checkpoint can leave the source newly
+checkpointed. A late directory-sync failure can also leave a complete but
+unacknowledged destination; inspect or remove that fresh path before retrying,
+never assume an error authorizes overwrite.
 
 ## forget (A8)
 
@@ -150,7 +181,7 @@ transition.
 | --- | --- |
 | `applied` | In memory and WAL-fsynced — survives kill -9 via replay. The level harrekki treats as "remembered". |
 | `maintenance_pending` | `applied`, and delta-growth thresholds currently advise maintenance — schedule a `maintenance` call. |
-| `published` | In the checkpointed durable image (checkpoint/maintenance responses). |
+| `published` | In the checkpointed durable image (checkpoint/maintenance) or in a fsynced, atomically published independent backup. |
 | rejected | Not a field: rejection is the error frame (`parse`/`execution`) — nothing was applied. |
 
 Per-backend semantics behind these values — what `execute`/`checkpoint`
@@ -164,7 +195,7 @@ are in `docs/DURABILITY_AND_CALLER_RULES.md`.
 | `protocol` | Malformed frame, missing/unknown op or field | continues |
 | `parse` | `datalog` text failed to parse | continues |
 | `execution` | Command parsed but failed to execute | continues |
-| `storage` | Checkpoint/maintenance/status I-O failure | continues; caller should treat repeated `storage` errors as child-restart grounds |
+| `storage` | Checkpoint/maintenance/backup/status I-O or target conflict | continues; correct a backup path conflict first, and treat repeated backend errors as child-restart grounds |
 
 Transport failure (broken pipe) exits the process; the daemon's restart +
 WAL replay is the recovery path either way.
@@ -188,7 +219,7 @@ WAL replay is the recovery path either way.
 - `wal_bytes`, `delta_segments`, `delta_pages` — `null` for in-memory
   databases.
 - `last_checkpoint_unix_ms` / `last_checkpoint_outcome` — the last
-  checkpoint **this session** performed via `checkpoint` or `maintenance`
+  checkpoint **this session** performed via `checkpoint`, `maintenance`, or `backup`
   ops (`null` before the first one). Auto-checkpoints triggered by the WAL
   threshold inside `execute` are not currently reported here.
 
@@ -196,7 +227,8 @@ WAL replay is the recovery path either way.
 
 - stdin EOF or `shutdown` op → finish in-flight work, exit 0. **No implicit
   checkpoint** — WAL replay on next open is the durability contract; send
-  `checkpoint` (or `maintenance`) first if you want a checkpointed file.
+  `checkpoint` (or `maintenance`) first if you want the source checkpointed;
+  use `backup` for an independent live-writer rollback point.
 - SIGKILL at any point: acknowledged (`applied`) writes survive via WAL
   replay. Verified continuously by the A7 harness (planned).
 - One process per `.graph` file (advisory lock). All other access goes

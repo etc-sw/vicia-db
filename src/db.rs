@@ -5,6 +5,7 @@
 //! - `Minigraf::execute()` for implicit (self-contained) transactions
 //! - `Minigraf::begin_write()` / `WriteTransaction` for explicit transactions
 //! - `Minigraf::checkpoint()` for manual WAL compaction
+//! - `Minigraf::backup_to()` for linearized live-writer snapshots
 //! - `Minigraf::export_fact_log()` for deterministic append-only audit export
 
 use crate::graph::types::{Fact, FactRecord, TxId, VALID_TIME_FOREVER};
@@ -39,11 +40,33 @@ use crate::storage::persistent_facts::CheckpointOutcome;
 use crate::storage::persistent_facts::PersistentFactStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::wal::WalWriter;
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
 use anyhow::{Result, bail};
 use std::any::Any;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+
+#[cfg(not(target_arch = "wasm32"))]
+struct BackupTempFile {
+    path: PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct BackupTarget {
+    destination: PathBuf,
+    parent: PathBuf,
+    wal_path: PathBuf,
+    lock_path: PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for BackupTempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 // ─── Thread-local reentrant-write detection ─────────────────────────────────
 
@@ -158,6 +181,16 @@ impl MaintenanceOutcome {
             advice,
         }
     }
+}
+
+/// Result of a successful [`Minigraf::backup_to`] call.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackupOutcome {
+    /// Exact source transaction watermark contained in the backup.
+    pub tx_count: u64,
+    /// Number of checkpointed `.graph` bytes copied and fsynced.
+    pub bytes: u64,
 }
 
 /// Crate-internal status numbers for the A6 session `status` op.
@@ -787,6 +820,267 @@ impl Minigraf {
             anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
         })?;
         Self::do_checkpoint(&self.inner.fact_storage, &mut ctx).map(|_| ())
+    }
+
+    /// Create a linearized, checkpointed copy of a live file-backed database.
+    ///
+    /// The same write lock spans the source checkpoint, exact published-page
+    /// copy, destination fsync, and atomic no-overwrite publish. A write that
+    /// starts before this call may be included; a write that completes after
+    /// the returned `tx_count` is not. The destination never includes a WAL
+    /// sidecar and can be opened as an independent `.graph` file immediately
+    /// after this method returns.
+    ///
+    /// Linearization covers this open handle and its [`Clone`]s, which share
+    /// one writer mutex. Independently opening the same source pathname in the
+    /// same process is outside the single-writer contract; route all access
+    /// through the daemon-owned handle instead.
+    ///
+    /// The destination, its `.wal`, and its `.graph.lock` sidecar must not
+    /// already exist. This method never overwrites a prior backup. Use a fresh
+    /// sibling filename for each rollback point. Windows and Apple source
+    /// aliases are compared with conservative case folding.
+    ///
+    /// If the final parent-directory fsync fails after the no-clobber publish,
+    /// this method returns an error but may leave a complete, unacknowledged
+    /// destination. Inspect or remove that fresh path before retrying.
+    ///
+    /// In-memory databases cannot be backed up with this file API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a `WriteTransaction` is active on this thread, the
+    /// database is in memory, the target conflicts with the source or an
+    /// existing destination/sidecar, or checkpoint/copy/sync/publish fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<BackupOutcome> {
+        self.backup_to_with_hook(destination.as_ref(), || {})
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn backup_to_with_hook(
+        &self,
+        destination: &Path,
+        before_publish: impl FnOnce(),
+    ) -> Result<BackupOutcome> {
+        if is_write_tx_active() {
+            bail!(
+                "a WriteTransaction is already in progress on this thread; commit or roll it back before creating a backup"
+            );
+        }
+
+        let mut ctx = self.inner.write_lock.lock().map_err(|_| {
+            anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
+        })?;
+        let source_path = match &*ctx {
+            WriteContext::Memory => bail!("backup_to requires a file-backed database"),
+            WriteContext::File { db_path, .. } => db_path.clone(),
+        };
+        let target = Self::validate_backup_target(&source_path, destination)?;
+
+        Self::do_checkpoint(&self.inner.fact_storage, &mut ctx)?;
+        let (tx_count, bytes) = match &mut *ctx {
+            WriteContext::Memory => unreachable!("file-backed context checked above"),
+            WriteContext::File { pfs, .. } => {
+                let tx_count = pfs.last_checkpointed_tx_count();
+                let bytes = Self::copy_backup_candidate(pfs, &target, before_publish)?;
+                (tx_count, bytes)
+            }
+        };
+        // Keep the guard observably live through the atomic publish above.
+        drop(ctx);
+
+        Ok(BackupOutcome { tx_count, bytes })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_backup_target(source: &Path, destination: &Path) -> Result<BackupTarget> {
+        if destination.as_os_str().is_empty() {
+            bail!("backup destination must not be empty");
+        }
+        let file_name = destination
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("backup destination must name a file"))?;
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent = parent.canonicalize().with_context(|| {
+            format!(
+                "backup destination parent does not exist or is inaccessible: {}",
+                parent.display()
+            )
+        })?;
+        if !parent.is_dir() {
+            bail!(
+                "backup destination parent is not a directory: {}",
+                parent.display()
+            );
+        }
+
+        let destination = parent.join(file_name);
+        let lexical_source = Self::resolve_lexical_source_path(source)?;
+        let canonical_source = source
+            .canonicalize()
+            .context("failed to resolve source database path for backup")?;
+        let conflicts = [
+            lexical_source.clone(),
+            Self::wal_path_for(&lexical_source),
+            FileBackend::lock_path_for(&lexical_source),
+            canonical_source.clone(),
+            Self::wal_path_for(&canonical_source),
+            FileBackend::lock_path_for(&canonical_source),
+        ];
+        if conflicts.iter().any(|path| {
+            Self::backup_paths_share_namespace(
+                path,
+                &destination,
+                cfg!(any(windows, target_vendor = "apple")),
+            )
+        }) {
+            bail!(
+                "backup destination conflicts with the source database or one of its sidecars: {}",
+                destination.display()
+            );
+        }
+
+        let target = BackupTarget {
+            wal_path: Self::wal_path_for(&destination),
+            lock_path: FileBackend::lock_path_for(&destination),
+            destination,
+            parent,
+        };
+        Self::ensure_backup_target_unoccupied(&target)?;
+        Ok(target)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_lexical_source_path(source: &Path) -> Result<PathBuf> {
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("source database path must name a file"))?;
+        let parent = source
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent = parent
+            .canonicalize()
+            .context("failed to resolve lexical source database parent")?;
+        Ok(parent.join(file_name))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn backup_paths_share_namespace(left: &Path, right: &Path, case_insensitive: bool) -> bool {
+        if left == right {
+            return true;
+        }
+        case_insensitive
+            && left
+                .to_string_lossy()
+                .to_lowercase()
+                .eq(&right.to_string_lossy().to_lowercase())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ensure_backup_target_unoccupied(target: &BackupTarget) -> Result<()> {
+        for path in [&target.destination, &target.wal_path, &target.lock_path] {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => bail!(
+                    "backup destination or sidecar already exists; refusing to overwrite: {}",
+                    path.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to inspect backup target {}", path.display())
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn copy_backup_candidate(
+        pfs: &mut PersistentFactStorage<FileBackend>,
+        target: &BackupTarget,
+        before_publish: impl FnOnce(),
+    ) -> Result<u64> {
+        let (temp_path, mut temp_file) = Self::create_backup_temp(target)?;
+        let _cleanup = BackupTempFile {
+            path: temp_path.clone(),
+        };
+
+        let bytes = pfs.copy_published_image_to(&mut temp_file)?;
+        temp_file
+            .sync_all()
+            .with_context(|| format!("failed to fsync backup candidate {}", temp_path.display()))?;
+        drop(temp_file);
+
+        before_publish();
+        // Repeat all occupancy checks after the potentially long copy. The
+        // hard link below is the final atomic no-clobber check for the graph
+        // path itself.
+        Self::ensure_backup_target_unoccupied(target)?;
+        std::fs::hard_link(&temp_path, &target.destination).with_context(|| {
+            format!(
+                "failed to atomically publish backup at {}; destination must be absent and the filesystem must support hard links",
+                target.destination.display()
+            )
+        })?;
+
+        let _ = std::fs::remove_file(&temp_path);
+        Self::sync_backup_parent(&target.parent)?;
+        Ok(bytes)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_backup_temp(target: &BackupTarget) -> Result<(PathBuf, std::fs::File)> {
+        static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let file_name = target
+            .destination
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("backup destination must name a file"))?;
+
+        for _ in 0..64 {
+            let nonce = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut temp_name = std::ffi::OsString::from(".");
+            temp_name.push(file_name);
+            temp_name.push(format!(".vicia-backup-{}-{nonce}.tmp", std::process::id()));
+            let path = target.parent.join(temp_name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((path, file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to create backup candidate in {}",
+                            target.parent.display()
+                        )
+                    });
+                }
+            }
+        }
+        bail!(
+            "failed to allocate a unique backup candidate in {}",
+            target.parent.display()
+        )
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    fn sync_backup_parent(parent: &Path) -> Result<()> {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("failed to fsync backup directory {}", parent.display()))
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(unix)))]
+    fn sync_backup_parent(_parent: &Path) -> Result<()> {
+        Ok(())
     }
 
     /// Run idle/background maintenance for a file-backed database.
@@ -2227,6 +2521,296 @@ mod tests {
             result.is_err(),
             "maintenance must not deadlock behind same-thread write transaction"
         );
+    }
+
+    #[test]
+    fn test_backup_preserves_pending_full_history_and_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.graph");
+        let backup_path = dir.path().join("backup.graph");
+        let source = "00000000-0000-0000-0000-0000000000a1";
+        let target = "00000000-0000-0000-0000-0000000000b2";
+        let db = Minigraf::open_with_options(
+            &source_path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.execute(&format!(
+            r#"(transact {{:valid-from "2026-01-01"}} [[#uuid "{source}" :edge/to #uuid "{target}"] [#uuid "{target}" :name "target"]])"#
+        ))
+        .unwrap();
+        db.execute(&format!(
+            r#"(retract {{:valid-from "2026-01-01"}} [[#uuid "{source}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        let expected = db.export_fact_log().unwrap();
+        assert!(
+            Minigraf::wal_path_for(&source_path).exists(),
+            "fixture must exercise pending WAL checkpointing"
+        );
+
+        let outcome = db.backup_to(&backup_path).unwrap();
+
+        assert_eq!(outcome.tx_count, 2);
+        assert_eq!(
+            outcome.bytes,
+            std::fs::metadata(&backup_path).unwrap().len()
+        );
+        assert_eq!(outcome.bytes % crate::storage::PAGE_SIZE as u64, 0);
+        assert!(
+            !Minigraf::wal_path_for(&source_path).exists(),
+            "backup must retire the source WAL after checkpoint publish"
+        );
+        assert!(
+            !Minigraf::wal_path_for(&backup_path).exists(),
+            "backup is an independent checkpointed graph without a WAL"
+        );
+
+        let backup = Minigraf::open(&backup_path).unwrap();
+        assert_eq!(backup.current_tx_count(), outcome.tx_count);
+        assert!(
+            backup.export_fact_log().unwrap() == expected,
+            "backup must preserve exact full-history fact identity"
+        );
+    }
+
+    #[test]
+    fn test_backup_rejects_unsafe_targets_without_overwrite_or_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.graph");
+        let db = Minigraf::open(&source_path).unwrap();
+        db.execute(r#"(transact [[:safe :value "source"]])"#)
+            .unwrap();
+        db.checkpoint().unwrap();
+
+        let memory = Minigraf::in_memory().unwrap();
+        assert!(
+            memory.backup_to(dir.path().join("memory.graph")).is_err(),
+            "in-memory backup must be explicit error"
+        );
+
+        let existing = dir.path().join("existing.graph");
+        std::fs::write(&existing, b"sentinel").unwrap();
+        assert!(db.backup_to(&existing).is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"sentinel");
+
+        let stale_wal_target = dir.path().join("stale-wal.graph");
+        let stale_wal = Minigraf::wal_path_for(&stale_wal_target);
+        std::fs::write(&stale_wal, b"unrelated-wal").unwrap();
+        assert!(db.backup_to(&stale_wal_target).is_err());
+        assert!(!stale_wal_target.exists());
+        assert_eq!(std::fs::read(&stale_wal).unwrap(), b"unrelated-wal");
+
+        let stale_lock_target = dir.path().join("stale-lock.graph");
+        let stale_lock = FileBackend::lock_path_for(&stale_lock_target);
+        std::fs::write(&stale_lock, b"occupied").unwrap();
+        assert!(db.backup_to(&stale_lock_target).is_err());
+        assert!(!stale_lock_target.exists());
+        assert_eq!(std::fs::read(&stale_lock).unwrap(), b"occupied");
+
+        let source_wal = Minigraf::wal_path_for(&source_path);
+        assert!(
+            !source_wal.exists(),
+            "fixture needs absent source WAL for alias check"
+        );
+        assert!(
+            db.backup_to(&source_wal).is_err(),
+            "source WAL pathname must never become a backup"
+        );
+        assert!(
+            Minigraf::backup_paths_share_namespace(
+                Path::new("C:/memory/DB.graph.wal"),
+                Path::new("c:/MEMORY/db.GRAPH.WAL"),
+                true,
+            ),
+            "Windows/Apple target validation must conservatively reject case-folded aliases"
+        );
+        assert!(
+            !Minigraf::backup_paths_share_namespace(
+                Path::new("/memory/DB.graph.wal"),
+                Path::new("/memory/db.graph.wal"),
+                false,
+            ),
+            "case-sensitive targets keep distinct path semantics"
+        );
+
+        let tx = db.begin_write().unwrap();
+        assert!(
+            db.backup_to(dir.path().join("during-tx.graph")).is_err(),
+            "same-thread transaction must reject instead of deadlock"
+        );
+        tx.rollback();
+    }
+
+    #[test]
+    fn test_backup_write_lock_spans_copy_and_atomic_publish() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("linear-source.graph");
+        let backup_path = dir.path().join("linear-backup.graph");
+        let db = Minigraf::open_with_options(
+            &source_path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.execute(r#"(transact [[:before :value 1]])"#).unwrap();
+
+        let writer_db = db.clone();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            attempt_tx.send(()).unwrap();
+            let result = writer_db.execute(r#"(transact [[:after :value 2]])"#);
+            done_tx.send(result.is_ok()).unwrap();
+        });
+
+        let outcome = db
+            .backup_to_with_hook(&backup_path, || {
+                assert!(
+                    matches!(
+                        db.inner.write_lock.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ),
+                    "backup must still own the writer lock immediately before publish"
+                );
+                start_tx.send(()).unwrap();
+                attempt_rx.recv().unwrap();
+                assert!(
+                    done_rx
+                        .recv_timeout(std::time::Duration::from_millis(100))
+                        .is_err(),
+                    "writer must remain blocked after copy and before backup publish"
+                );
+            })
+            .unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            "writer must complete after backup releases the lock"
+        );
+        writer.join().unwrap();
+
+        assert_eq!(outcome.tx_count, 1);
+        assert_eq!(db.current_tx_count(), 2);
+        let backup = Minigraf::open(&backup_path).unwrap();
+        assert_eq!(backup.current_tx_count(), 1);
+        let backup_log = backup.export_fact_log().unwrap();
+        assert_eq!(backup_log.len(), 1);
+        assert_eq!(backup_log[0].attribute, ":value");
+        assert!(
+            backup_log[0].value == Value::Integer(1),
+            "backup must contain only the pre-linearization value"
+        );
+        assert_eq!(db.export_fact_log().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_backup_publish_conflict_cleans_candidate_and_preserves_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("conflict-source.graph");
+        let backup_path = dir.path().join("conflict-backup.graph");
+        let db = Minigraf::open(&source_path).unwrap();
+        db.execute(r#"(transact [[:safe :value 1]])"#).unwrap();
+
+        let result = db.backup_to_with_hook(&backup_path, || {
+            std::fs::write(&backup_path, b"racer").unwrap();
+        });
+
+        assert!(
+            result.is_err(),
+            "publish race must reject without overwrite"
+        );
+        assert_eq!(std::fs::read(&backup_path).unwrap(), b"racer");
+        assert_eq!(db.export_fact_log().unwrap().len(), 1);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".vicia-backup-")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed backup must clean temp candidate"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_backup_rejects_symlink_source_wal_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_path = dir.path().join("real.graph");
+        let link_path = dir.path().join("link.graph");
+        {
+            let seed = Minigraf::open(&real_path).unwrap();
+            seed.execute(r#"(transact [[:seed :value 1]])"#).unwrap();
+            seed.checkpoint().unwrap();
+        }
+        std::os::unix::fs::symlink(&real_path, &link_path).unwrap();
+        let db = Minigraf::open(&link_path).unwrap();
+        let lexical_wal = Minigraf::wal_path_for(&link_path);
+        assert!(!lexical_wal.exists());
+
+        assert!(
+            db.backup_to(&lexical_wal).is_err(),
+            "backup must reject the WAL path actually used by a symlink-opened handle"
+        );
+        assert!(!lexical_wal.exists());
+        db.execute(r#"(transact [[:after :value 2]])"#).unwrap();
+        assert!(
+            lexical_wal.exists(),
+            "later source writes must still own their WAL path"
+        );
+    }
+
+    #[test]
+    fn test_backup_receipt_uses_published_watermark_after_failed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("hole-source.graph");
+        let backup_path = dir.path().join("hole-backup.graph");
+        let db = Minigraf::open_with_options(
+            &source_path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let oversized = "x".repeat(crate::storage::packed_pages::MAX_FACT_BYTES + 1);
+        let failed = db.execute(&format!(
+            r#"(transact [[:too-large :value "{oversized}"]])"#
+        ));
+        assert!(
+            failed.is_err(),
+            "oversized write must fail before WAL apply"
+        );
+        assert_eq!(
+            db.current_tx_count(),
+            1,
+            "failed WAL validation currently leaves a counter hole"
+        );
+
+        let outcome = db.backup_to(&backup_path).unwrap();
+        assert_eq!(
+            outcome.tx_count, 0,
+            "receipt must describe the published header, not the in-memory counter hole"
+        );
+        let backup = Minigraf::open(&backup_path).unwrap();
+        assert_eq!(backup.current_tx_count(), outcome.tx_count);
+        assert_eq!(backup.export_fact_log().unwrap().len(), 0);
     }
 
     // ── file-backed: open_with_options custom threshold ───────────────────────

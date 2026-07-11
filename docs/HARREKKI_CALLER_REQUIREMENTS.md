@@ -120,10 +120,14 @@ them cheaply, that becomes a follow-up requirement.
 
 ### 7. Online snapshot / backup
 
-A consistent copy of the `.graph` file while the writer is live (a
-checkpoint-then-copy contract is sufficient). Used for rollback points
-before risky experiments and for backup of the resident's memory. Losing
-the ledger is losing the being.
+A consistent copy of the `.graph` file while the writer is live. A9 provides
+`Minigraf::backup_to()` and the session `backup` op: one write lock spans source
+checkpoint through destination fsync and atomic publish, and the receipt names
+the exact included `tx_count`. Callers must use this operation rather than
+calling `checkpoint()` and copying afterward, because the writer can advance
+page 0/EOF once `checkpoint()` releases its lock. Destinations are fresh,
+single-file rollback points; existing graph/WAL/lock paths are never
+overwritten. Losing the ledger is losing the being.
 
 ### 8. Cross-process read policy (decision, not feature)
 

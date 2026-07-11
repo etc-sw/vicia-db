@@ -29,7 +29,7 @@ impl FileLock {
     /// or a contentless artifact from a pre-fix crash — it is automatically
     /// removed and acquisition retried.
     fn acquire(db_path: &Path) -> Result<Self> {
-        let lock_path = db_path.with_extension("graph.lock");
+        let lock_path = FileBackend::lock_path_for(db_path);
         let our_pid = std::process::id();
         // Bounded retries: each retry follows a stale-lock removal, and a
         // contended lock bails out — this cannot spin.
@@ -153,6 +153,11 @@ pub struct FileBackend {
 }
 
 impl FileBackend {
+    /// Compute the advisory lock sidecar path for a database path.
+    pub(crate) fn lock_path_for(db_path: &Path) -> PathBuf {
+        db_path.with_extension("graph.lock")
+    }
+
     /// Open or create a .graph file at the given path.
     ///
     /// If the file doesn't exist, creates it with an initial header.
@@ -238,6 +243,32 @@ impl FileBackend {
     #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Copy exactly the page range published by page 0 into `destination`.
+    ///
+    /// The caller owns serialization against writers. Reading the header from
+    /// the open file descriptor avoids path/cwd aliasing and excludes any
+    /// unpublished tail pages left by an interrupted copy-on-write candidate.
+    pub(crate) fn copy_published_image_to(&mut self, destination: &mut File) -> Result<u64> {
+        self.file.sync_all()?;
+        let published = Self::read_header(&mut self.file)?;
+        let byte_len = published
+            .page_count
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("published database byte length overflow"))?;
+
+        self.file.seek(SeekFrom::Start(0))?;
+        let copied = std::io::copy(&mut (&mut self.file).take(byte_len), destination)?;
+        if copied != byte_len {
+            anyhow::bail!(
+                "Published database image is truncated: expected {} bytes, copied {}",
+                byte_len,
+                copied
+            );
+        }
+        destination.set_permissions(self.file.metadata()?.permissions())?;
+        Ok(copied)
     }
 }
 

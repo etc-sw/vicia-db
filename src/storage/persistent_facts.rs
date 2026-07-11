@@ -5,6 +5,8 @@ use crate::graph::FactStorage;
 /// low-level page-based storage backends.
 use crate::graph::types::{Fact, RETRACT_ALL_VALID_FROM, VALID_TIME_FOREVER, Value};
 use crate::storage::FACT_PAGE_FORMAT_PACKED;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::storage::backend::file::FileBackend;
 use crate::storage::btree_v6::{
     MutexStorageBackend, OnDiskIndexReader, btree_entries, build_btree, merge_sorted_vecs,
     stream_all_entries,
@@ -30,6 +32,8 @@ use crate::storage::{
 use anyhow::Result;
 use crc32fast::Hasher;
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs::File;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1968,6 +1972,18 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     {
         let mut guard = self.backend.lock().unwrap();
         f(&mut *guard)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PersistentFactStorage<FileBackend> {
+    /// Copy the exact page-0-published image through the already-open backend.
+    pub(crate) fn copy_published_image_to(&mut self, destination: &mut File) -> Result<u64> {
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned during backup"))?;
+        backend.copy_published_image_to(destination)
     }
 }
 

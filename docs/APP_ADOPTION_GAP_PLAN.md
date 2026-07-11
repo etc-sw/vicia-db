@@ -5,7 +5,8 @@ Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 2026-07-11 audit inferences (see Revision Note). A0, A6, A7, A2, and A5
 landed 2026-07-11 (A2's `export_since` frame frozen after harrekki-lane
 ACK; A5 evidence gate and A5-4 browser maintenance passed — see the A5 block),
-and A8 landed; next up is A9. This line
+and A8/A9 landed. Remaining Vicia acceptance work is bounded browser open plus
+the shared native/browser parity and corruption corpus. This line
 sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
 delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 apply unchanged.
@@ -52,7 +53,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G9 | Crash safety is designed (WAL replay) but not demonstrated under a resident workload profile. | `tests/delta_checkpoint_crash_recovery_test.rs` covers targeted recovery, not a randomized kill loop. | **Harrekki P0 #3** — kill -9 harness. Slice A7. |
 | G10 | No cheap status/telemetry surface (fact count, tx_count, WAL size, delta size, last checkpoint outcome) outside the Rust API. | `current_tx_count()` and `MaintenanceOutcome` exist; not reachable externally. | **Harrekki P0 #4**. Folded into A6 (status frames). |
 | G11 | No bulk valid-time closure primitive; closing many facts requires per-fact round-trips. | `retract_batch` exists but no query-result-set atomic closure command. | **Harrekki P1 #6**. Slice A8. |
-| G12 | No online snapshot/backup contract while the writer is live. | No documented checkpoint-then-copy guarantee. | **Harrekki P1 #7**. Slice A9. |
+| G12 | A caller needs an openable rollback point while the writer remains live. | `Minigraf::backup_to()` and the session `backup` op now hold one write lock across checkpoint, published-prefix copy, fsync, and atomic no-clobber publish. | **Harrekki P1 #7 — CLOSED by A9.** External `checkpoint(); copy` is explicitly not the contract. |
 | G13 | Durability states were not classified for the caller: applied-and-visible vs durably published vs rejected vs maintenance-pending. | Native session frames and BrowserDb write results now expose ordered transaction/durability fields; the backend-specific contract and failure states live in `docs/DURABILITY_AND_CALLER_RULES.md`. | **Vetch P0** (explicit durability receipts) — CLOSED by A5-3/A5-4/A6. Session frames and browser writes both report durability, while browser writes additionally report maintenance pressure/advice. |
 
 ## Slice Plan
@@ -316,16 +317,30 @@ stable committed valid-time view.
   state and are reinitialized before the next write; unit coverage pins
   0-, 7-, and 31-byte cases.
 
-### A9 — Online snapshot/backup contract (harrekki P1 #7)
+### A9 — Online snapshot/backup contract (DONE 2026-07-11)
 
-Checkpoint-then-copy contract while the writer is live: document (and
-guarantee with a test) that after `checkpoint()` returns, copying the
-`.graph` file yields a consistent openable snapshot even while the writer
-continues. Losing the ledger is losing the being; this is the rollback and
-backup story for both callers.
+`Minigraf::backup_to(destination)` is the linearization boundary. It validates
+that the target graph and its WAL/lock sidecars are unoccupied, then holds the
+source write lock across checkpoint, exact page-0-published prefix copy,
+candidate fsync, and atomic no-overwrite publish. It copies neither the WAL nor
+unpublished copy-on-write tail pages. The returned `BackupOutcome { tx_count,
+bytes }` names the exact source watermark and checkpointed byte count in the
+independent backup.
 
-- Gate: concurrent copy-under-write test opens the copy successfully with
-  all checkpointed transactions present.
+The A6 session exposes the same operation as `{"op":"backup",
+"destination":"..."}` with a `published` durability receipt. Existing targets
+are never overwritten; stale destination WAL/lock sidecars, source aliases,
+conservatively case-folded Windows/Apple aliases, in-memory databases, and
+missing parents reject without corrupting source or target. A source checkpoint
+may already have succeeded if a later copy/fsync/publish step fails.
+
+Gate: PASSED. A deterministic clone-writer test blocks a post-copy writer until
+atomic publish, then proves the backup contains exactly returned `tx_count = 1`
+while the source continues to `tx_count = 2`. Full-history Ref/scoped-retraction
+identity, pending-WAL checkpointing, publish-conflict cleanup, and live child-
+session ordering are separately covered. Public `checkpoint(); fs::copy()` is
+rejected as a guarantee because the next writer can mutate page 0/EOF after the
+checkpoint lock is released.
 
 ## Candidates (demoted — promote only on measured evidence)
 

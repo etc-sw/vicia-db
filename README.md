@@ -116,6 +116,11 @@ tx.commit()?;
 // It checkpoints pending writes, then runs private delta maintenance if needed.
 let _maintenance = db.run_idle_maintenance()?;
 
+// Create an independent rollback point while the live writer remains open.
+// The receipt names the exact transaction watermark contained in the backup.
+let backup = db.backup_to("myapp-before-experiment.graph")?;
+assert!(backup.tx_count >= 1);
+
 // Time travel — query as of past transaction counter
 db.execute("(query [:find ?age :as-of 1 :where [:alice :person/age ?age]])")?;
 
@@ -141,7 +146,7 @@ let r2 = pq.execute(&[("tx", BindValue::TxCount(2)), ("entity", BindValue::Entit
 
 ```bash
 cargo run          # interactive Datalog REPL
-cargo test         # run 1119 passing tests
+cargo test         # run 1198 passing tests (12 additional gates are ignored by default)
 cargo run < demos/demo_recursive.txt   # recursive rules demo
 ```
 

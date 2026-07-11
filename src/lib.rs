@@ -91,7 +91,7 @@ pub(crate) mod wal;
 pub mod browser;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use db::OpenOptionsWithPath;
+pub use db::{BackupOutcome, OpenOptionsWithPath};
 pub use db::{
     MaintenanceAdvice, MaintenanceCheckpointEffect, MaintenanceDeltaEffect, MaintenanceOutcome,
     Minigraf, OpenOptions, WriteTransaction,

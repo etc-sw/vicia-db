@@ -277,6 +277,10 @@ browser read path rather than a Vetch-side shadow database.
 - Backup/restore must remain compatible with the single-file promise. Browser
   IndexedDB is an implementation detail; export/import is the portability
   boundary.
+- Native live-writer rollback points use `backup_to` (or session `backup`),
+  which returns the exact included `tx_count` only after the checkpointed
+  destination is fsynced and atomically published. External
+  `checkpoint(); copy` is not a supported concurrency guarantee.
 - Schema evolution should be represented by Vetch facts and migrations unless
   a database-format change is truly required.
 

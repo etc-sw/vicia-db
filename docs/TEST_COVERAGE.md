@@ -1,17 +1,17 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: A5-4 browser atomic compact maintenance (July 2026), 1201 native tests + 19 browser WASM tests ✅
+**Last Updated**: A9 linearized live-writer backup (July 2026), 1210 native tests + 19 browser WASM tests ✅
 
 ## Test Summary
 
-**Total Tests**: 1201 ✅ (1189 passing, 12 ignored)
-- ✅ 780 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A5-4 compact-copy identity/watermark guard, A7 FileLock crash-robustness guards, A2 since-tail page-probe/no-full-scan guards, and A8 forget parser plus short-WAL recovery guards)
+**Total Tests**: 1210 ✅ (1198 passing, 12 ignored)
+- ✅ 786 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v10 delta manifest/segment/header unit gates, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A5-4 compact-copy identity/watermark guard, A9 backup identity/linearization/conflict/symlink/watermark guards, A7 FileLock crash-robustness guards, A2 since-tail page-probe/no-full-scan guards, and A8 forget parser plus short-WAL recovery guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
 - ✅ 12 concurrency tests (integration, 1 ignored: nightly stress)
 - ✅ 22 WAL / crash recovery tests (integration — includes the A7-found header-only-WAL tx-counter regression)
-- ✅ 21 session protocol tests (integration, A6 — framed pipe NDJSON, tagged values, child-process gate runs; A2 export_since and A8 forgotten frames)
+- ✅ 24 session protocol tests (integration, A6 — framed pipe NDJSON, tagged values, child-process gate runs; A2 export_since, A8 forgotten frames, and A9 live-writer backup receipts/errors)
 - ✅ 2 kill -9 durability harness tests (integration, A7 — default smoke + `#[ignore]`d 2,400-cycle nightly gate)
 - ✅ 2 cross-platform compat tests (integration, Phase 8.1)
 - ✅ 6 index tests (integration, Phase 6.1)
@@ -55,7 +55,7 @@
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
 - ➕ 19 browser WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --lib --target wasm32-unknown-unknown --features browser` with a `CHROMEDRIVER` matching the local Chrome. A5-4 adds compact maintenance, replacement-failure, mutation guard, ordered durability result, rejected-write rollback, and poison-containment gates.)
 
-**Status**: ✅ **All 1189 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
+**Status**: ✅ **All 1198 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
@@ -1039,7 +1039,7 @@ cargo test -- --nocapture
 - Long-haul smoke verified: 500 entities × 10 attrs × 10 cycles, 7 invariants, nightly CI (Wave 3)
 - XTDB compatibility verified: 10 semantic ports covering EAV, time travel, negation, rules, prepared queries (Wave 3)
 - Datomic compatibility verified: 9 independently written semantic ports covering datom model, tx-time, retraction, Datalog patterns (Wave 3)
-- 1201 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure (plus 19 browser WASM tests, WASI, cross-platform compat, and fuzzing CI)
+- 1210 native tests covering all Phase 3-8.1 features + Wave 3 reliability/compat + Vetch ledger identity/export regressions + Vetch delta multi-segment checkpoint and native/browser maintenance regressions + A6 session protocol + A7/A8 kill -9 durability + A2 incremental fact log + A8 bulk valid-time closure + A9 linearized backup (plus 19 browser WASM tests, WASI, cross-platform compat, and fuzzing CI)
 
 **Confidence Level**: ✅ **Production-ready for Wave 3 scope**
 
