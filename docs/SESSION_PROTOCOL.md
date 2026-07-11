@@ -134,6 +134,10 @@ transition.
 | `published` | In the checkpointed durable image (checkpoint/maintenance responses). |
 | rejected | Not a field: rejection is the error frame (`parse`/`execution`) — nothing was applied. |
 
+Per-backend semantics behind these values — what `execute`/`checkpoint`
+guarantee at return on native vs browser, and the browser caller rules —
+are in `docs/DURABILITY_AND_CALLER_RULES.md`.
+
 ## Error kinds
 
 | kind | meaning | session |

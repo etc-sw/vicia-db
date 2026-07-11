@@ -2,8 +2,9 @@
 
 Status: revised 2026-07-11 against `docs/VETCH_CALLER_REQUIREMENTS.md` and
 `docs/HARREKKI_CALLER_REQUIREMENTS.md`. Caller decisions override the initial
-2026-07-11 audit inferences (see Revision Note). A0, A6, A7, and A2 landed
-2026-07-11 (A2's session frame shape awaits caller-lane ACK); next up is A5. This line
+2026-07-11 audit inferences (see Revision Note). A0, A6, A7, A2, and A5
+landed 2026-07-11 (A2's `export_since` frame frozen after harrekki-lane
+ACK; A5 gate passed — see the A5 block); next up is A8. This line
 sits after Q3-B on the Vetch delta-storage roadmap and does not modify any
 delta gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 apply unchanged.
@@ -43,7 +44,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G2 | No incremental change surface; `export_fact_log()` is full-export only (`src/db.rs:761`). | Public API audit. | **Harrekki P0 #2** ("what changed since my last tick"). Vetch consumes via stored cursor. Slice A2. |
 | G3 | Value-range predicates evaluate post-scan in memory; AVET/VAET range scans exist at storage layer but executor never pushes comparisons into them. | `eval_binop` (`src/query/datalog/executor.rs` ~2200); `threshold_filter` 57.8 ms at 10K (`docs/BENCHMARKS.md`). | Neither caller asks now. Vetch viewport culling is Vetch-owned UI projection; harrekki decay-candidate queries are benchmark-first (P1 #6 note). Demoted to candidate (A3). |
 | G4 | Single-fact cap `MAX_FACT_BYTES` = 4080 bytes (`src/storage/packed_pages.rs:47`); no documented chunking convention. | Insert-time validation. | Both callers pin payloads (harrekki: blobs/packets; Vetch: even note text) **outside** the graph — pointers/hashes only. Guard-rail doc only (A4). |
-| G5 | Browser backend: write-through per `execute`, no WAL, no maintenance outcome parity, open loads **all** IndexedDB pages into memory, no multi-tab coordination. | `src/browser/mod.rs:36–92`, `src/browser/indexeddb.rs`. | **Vetch P0/P1** — Gate E (browser/native parity) must pass before browser Vicia replaces the legacy load path. Slice A5 (expanded). |
+| G5 | Browser backend: write-through per `execute`, no WAL, no maintenance outcome parity, open loads **all** IndexedDB pages into memory, no multi-tab coordination. | `src/browser/mod.rs:36–92`, `src/browser/indexeddb.rs`. | **Vetch P0/P1** — Gate E (browser/native parity) must pass before browser Vicia replaces the legacy load path. Slice A5 (expanded) — CLOSED: adoption policy, durability semantics, and growth measurements documented (`docs/DURABILITY_AND_CALLER_RULES.md`, `docs/BENCHMARKS.md` A5). The semantic parity gap itself (no WAL tier, no maintenance surface, full-load open) remains open by policy: browser Vicia is read-mostly until a maintenance surface lands. |
 | G6 | `docs/BENCHMARKS.md` 100K/1M current-view rows predate v1.1.0 selective pushdown. | Query Latency section note ("unchanged from v0.8.0"). | Both callers demand caller-shaped evidence before API growth. Slice A0 (expanded). |
 | G7 | History grows monotonically; no forget or erasure surface. | Full-history identity invariant. | Harrekki splits this: semantic forget = **bulk valid-time closure** (P1 #6, plannable → A8); physical erasure/vacuum = P2, opt-in, auditable (stays an open decision). |
 | G8 | No long-lived session access for external (non-Rust) callers; harrekki currently spawns the CLI per call. | `~/projects/harrekki/src/harrekki/dev_system_minigraf.clj` (one-shot STDIO). | **Harrekki P0 #1** — framed pipe mode. Slice A6. |
@@ -51,7 +52,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G10 | No cheap status/telemetry surface (fact count, tx_count, WAL size, delta size, last checkpoint outcome) outside the Rust API. | `current_tx_count()` and `MaintenanceOutcome` exist; not reachable externally. | **Harrekki P0 #4**. Folded into A6 (status frames). |
 | G11 | No bulk valid-time closure primitive; closing many facts requires per-fact round-trips. | `retract_batch` exists but no query-result-set atomic closure command. | **Harrekki P1 #6**. Slice A8. |
 | G12 | No online snapshot/backup contract while the writer is live. | No documented checkpoint-then-copy guarantee. | **Harrekki P1 #7**. Slice A9. |
-| G13 | Durability states are not classified for the caller: applied-and-visible vs durably published vs rejected vs maintenance-pending. | Native semantics exist implicitly (WAL fsync before return; `MaintenanceOutcome`); undocumented, and absent in the browser binding. | **Vetch P0** (explicit durability receipts). Folded into A5 + A6 result framing. |
+| G13 | Durability states are not classified for the caller: applied-and-visible vs durably published vs rejected vs maintenance-pending. | Native semantics exist implicitly (WAL fsync before return; `MaintenanceOutcome`); undocumented, and absent in the browser binding. | **Vetch P0** (explicit durability receipts). Folded into A5 + A6 result framing — CLOSED: session frames carry `durability` (A6, `docs/SESSION_PROTOCOL.md`); the per-backend classification is documented in `docs/DURABILITY_AND_CALLER_RULES.md` (A5-3). |
 
 ## Slice Plan
 
@@ -159,10 +160,10 @@ discipline is regression-locked twice: a `SinceOnlyLoader` reader double
 whose full-stream entry points bail (`src/graph/storage.rs`), and a
 counting-backend page-read bound (`src/storage/persistent_facts.rs`).
 
-Session exposure: `export_since` op implemented and tested, but the frame
-shape is **proposed, pending caller-lane ACK** per the A6 precedent
-(`docs/SESSION_PROTOCOL.md` "export_since" — includes the open chunked-reply
-question). The Rust API is frozen; the first wire byte is not.
+Session exposure: `export_since` op implemented and tested; the frame shape
+is **frozen after harrekki-lane ACK** (`docs/SESSION_PROTOCOL.md`
+"export_since"). Chunking decided no — a request-side `limit` escape hatch
+is reserved but not built.
 
 - Gate: PASSED — at a 1M-fact committed base, a 100-record base tail
   returns in 91 µs cold / 32 µs warm (full-export contrast 256 ms,
@@ -196,8 +197,13 @@ legacy load path. Scope:
 Facade API expansion (`prepare`, explicit tx in `BrowserDb`, maintenance
 outcome parity) stays deferred until this evidence shows a measured wall.
 
-- Gate: the Vicia-side preconditions of Vetch Gate E are documented and
-  measured; import atomicity has a test.
+- Gate: PASSED — the Vicia-side preconditions of Vetch Gate E are
+  documented and measured; import atomicity has tests. Evidence:
+  `docs/DURABILITY_AND_CALLER_RULES.md` (caller rules + G13 durability
+  semantics + failure classification + both value encodings),
+  `docs/BENCHMARKS.md` "Browser Open at Scale" re-measure and "A5: Browser
+  IndexedDB Growth", six wasm atomicity tests in `src/browser/`.
+  Gate E itself (the cutover decision) stays vetch-app-owned.
 - Progress (2026-07-11): **import atomicity LANDED** — `importGraph` now
   commits the durable replacement in a single IndexedDB `clear`+`put`
   transaction *before* the live handle switches (was: swap-then-flush, which
@@ -221,6 +227,16 @@ outcome parity) stays deferred until this evidence shows a measured wall.
   the deferred facade decision: browser Vicia is read-mostly (bulk import +
   bounded writes) until a maintenance surface lands. Remaining for the gate:
   caller rules doc + durability semantics (G13) — A5-3.
+- Progress (2026-07-11): **caller rules + durability semantics documented**
+  (part 3/3) — `docs/DURABILITY_AND_CALLER_RULES.md`: per-backend
+  return-time guarantees (native WAL-fsync `applied` tier vs browser
+  single-IndexedDB-transaction commit with the Chrome 121+ `relaxed`
+  default caveat), the browser flush-failure handle-poisoning rule,
+  failure/corruption classification for open/execute/checkpoint/import,
+  both value encodings with the tagged A6 form named canonical and the
+  browser JSON named temporary, and the three browser caller rules (Web
+  Locks single-writer, batch+debounce, read-mostly adoption policy). This
+  closes A5.
 
 ### A8 — Bulk valid-time closure, the "forget" primitive (harrekki P1 #6)
 

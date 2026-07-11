@@ -194,7 +194,7 @@ See the [Mobile Integration](https://github.com/project-minigraf/minigraf/wiki/U
 
 ### For WASM / Browser
 
-Published as [`@minigraf/browser`](https://www.npmjs.com/package/@minigraf/browser) on npm (IndexedDB-backed, `wasm-pack`). WASI build (`wasm32-wasip1`) available as [`@minigraf/wasi`](https://www.npmjs.com/package/@minigraf/wasi) on npm and as a GitHub Releases artifact (Wasmtime / Wasmer). See the [Use Cases wiki](https://github.com/project-minigraf/minigraf/wiki/Use-Cases).
+Published as [`@minigraf/browser`](https://www.npmjs.com/package/@minigraf/browser) on npm (IndexedDB-backed, `wasm-pack`). WASI build (`wasm32-wasip1`) available as [`@minigraf/wasi`](https://www.npmjs.com/package/@minigraf/wasi) on npm and as a GitHub Releases artifact (Wasmtime / Wasmer). See the [Use Cases wiki](https://github.com/project-minigraf/minigraf/wiki/Use-Cases). Browser durability semantics and caller rules (single-writer via Web Locks, write batching, adoption policy) are documented in [`docs/DURABILITY_AND_CALLER_RULES.md`](docs/DURABILITY_AND_CALLER_RULES.md).
 
 ### For Python / Node.js / Java / C
 
