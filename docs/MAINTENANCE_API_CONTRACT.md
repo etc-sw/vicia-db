@@ -1,6 +1,7 @@
 # Maintenance API Contract
 
-Status: Q3-B native contract plus A5-4 browser atomic compact maintenance.
+Status: Q3-B native contract, A5-4 browser atomic compact maintenance, and the
+A5-6d 1M disposable-worker lifecycle boundary.
 
 `Minigraf::run_idle_maintenance()` and browser
 `BrowserDb.runIdleMaintenance()` are the public maintenance hooks in this
@@ -60,9 +61,13 @@ Do not call the hook while a `WriteTransaction` is active on the same thread.
 The API rejects that case to avoid deadlock. Cross-thread callers serialize
 behind the normal write lock.
 
-For BrowserDb, keep the writer and maintenance inside a dedicated worker and
-hold the caller-owned Web Lock across the handle lifetime. The same-handle
-guard rejects every read, export, or second mutation while a durability
+For BrowserDb, keep foreground writes behind the caller-owned Web Lock, but do
+not run O(total) maintenance inside a long-lived authority worker. After write
+advice requests maintenance, end use of the foreground handle. A disposable
+DedicatedWorker acquires the same lock, opens through `openPaged()`, runs
+maintenance, posts the outcome, and terminates after either success or failure;
+the next foreground operation reopens a fresh paged handle. The same-handle
+guard still rejects every read, export, or second mutation while a durability
 mutation is in flight; cross-handle and cross-tab writer ownership remains
 Vetch policy.
 
@@ -130,8 +135,10 @@ Recommended Vetch policy:
    schedule another idle maintenance pass.
 5. If maintenance returns an error, keep capture available, record the error,
    and retry from a later idle tick.
-6. In the browser, run the O(total-history) rebuild in a worker and reserve
-   quota headroom for the old and candidate images during atomic replacement.
+6. In the browser, run the O(total-history) rebuild in a disposable worker,
+   reserve quota headroom for the old and candidate images during atomic
+   replacement, post an outcome, terminate after either result, and reopen
+   through `openPaged()`.
 
 Forbidden policy:
 
@@ -167,9 +174,18 @@ The A5-4 browser implementation additionally pins:
   maintenance or export
 - four 100K-base soft-threshold cycles reclaim pages and reset write latency
 
+A5-6d adds one self-checking 1M threshold cycle on Chrome 150. Foreground
+`openPaged()` measured a 17.8 ms five-run maximum and 51.1 MiB maximum sampled
+PSS delta; maintenance took 16.679 s, peaked at a 2.09 GiB sampled PSS delta,
+and retained 1.27 GiB when the call returned. This is evidence for the
+disposable-worker lifetime, not proof that a particular runtime has reclaimed
+memory after termination and not a general device-memory floor.
+
 Future caller integration should add Vetch-side evidence for:
 
 - daemon idle tick invokes the hook outside capture
 - `ReduceCheckpointCadence` changes batching/backoff policy
 - maintenance errors are surfaced and retried without losing writes
 - startup/shutdown/import windows do not block interactive receipt capture
+- the browser worker acquires the same Web Lock, posts a success or failure
+  outcome, terminates, and a fresh `openPaged()` handle reopens the authority

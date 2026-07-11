@@ -7,9 +7,10 @@ landed 2026-07-11 (A2's `export_since` frame frozen after harrekki-lane
 ACK; A5 evidence gate and A5-4 browser maintenance passed — see the A5 block),
 and A8/A9 landed. The shared native/browser tagged, portability, and corruption
 corpus and A5-6a/b/c fail-closed integrity and sparse-browser work have also
-landed. Remaining acceptance proof includes the real Gate D Vetch trace, the
-1M sparse-browser matrix, Vetch adapter adoption, and a 1M browser maintenance
-peak-memory run. This line sits
+landed. A5-6d closes the Vicia-owned 1M sparse-browser measurement. Remaining
+acceptance proof is caller-owned: the real Gate D Vetch trace, package/adapter
+adoption of `openPaged()`, and the disposable-worker import/export/maintenance
+smoke. This line sits
 after Q3-B on the Vetch delta-storage roadmap and does not modify any delta
 gate. All `Fixed Invariants` in `docs/VETCH_DELTA_STORAGE_ROADMAP.md` apply
 unchanged.
@@ -49,7 +50,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G2 | No incremental change surface; `export_fact_log()` is full-export only (`src/db.rs:761`). | Public API audit. | **Harrekki P0 #2** ("what changed since my last tick"). Vetch consumes via stored cursor. Slice A2. |
 | G3 | Value-range predicates evaluate post-scan in memory; AVET/VAET range scans exist at storage layer but executor never pushes comparisons into them. | `eval_binop` (`src/query/datalog/executor.rs` ~2200); `threshold_filter` 57.8 ms at 10K (`docs/BENCHMARKS.md`). | Neither caller asks now. Vetch viewport culling is Vetch-owned UI projection; harrekki decay-candidate queries are benchmark-first (P1 #6 note). Demoted to candidate (A3). |
 | G4 | Single-fact cap `MAX_FACT_BYTES` = 4080 bytes (`src/storage/packed_pages.rs:47`); no documented chunking convention. | Insert-time validation. | Both callers pin payloads (harrekki: blobs/packets; Vetch: even note text) **outside** the graph — pointers/hashes only. Guard-rail doc only (A4). |
-| G5 | Browser backend is write-through with no WAL and cross-tab coordination remains caller-owned. `open()` is intentionally eager; `openPaged()` is the generation-aware v11 demand path. | `src/browser/mod.rs`, `src/browser/buffer.rs`, `src/browser/maintenance.rs`, `src/browser/indexeddb.rs`. | **Vetch P0/P1** — A5-4 closes maintenance/failure behavior, A5-5 closes tagged/portable/corruption parity, A5-6b closes page-local integrity/migration, and A5-6c closes the sparse implementation slice. Remaining Gate E work is the 1M measured matrix plus Vetch adapter adoption; 1M maintenance peak memory still needs evidence. |
+| G5 | Browser backend is write-through with no WAL and cross-tab coordination remains caller-owned. `open()` is intentionally eager; `openPaged()` is the generation-aware v11 demand path. | `src/browser/mod.rs`, `src/browser/buffer.rs`, `src/browser/maintenance.rs`, `src/browser/indexeddb.rs`; A5-6d in `docs/BENCHMARKS.md`. | **Vetch P0/P1** — A5-4 closes maintenance/failure behavior, A5-5 closes tagged/portable/corruption parity, A5-6b closes page-local integrity/migration, A5-6c closes sparse implementation, and A5-6d closes the 1M Vicia measurement. Remaining Gate E work is Vetch package/adapter adoption plus its worker lifecycle smoke. |
 | G6 | `docs/BENCHMARKS.md` 100K/1M current-view rows predate v1.1.0 selective pushdown. | Query Latency section note ("unchanged from v0.8.0"). | Both callers demand caller-shaped evidence before API growth. Slice A0 (expanded). |
 | G7 | History grows monotonically; no forget or erasure surface. | Full-history identity invariant. | Harrekki splits this: semantic forget = **bulk valid-time closure** (P1 #6, plannable → A8); physical erasure/vacuum = P2, opt-in, auditable (stays an open decision). |
 | G8 | No long-lived session access for external (non-Rust) callers; harrekki currently spawns the CLI per call. | `~/projects/harrekki/src/harrekki/dev_system_minigraf.clj` (one-shot STDIO). | **Harrekki P0 #1** — framed pipe mode. Slice A6. |
@@ -207,9 +208,9 @@ write durability fields landed later in A5-4.
   semantics + failure classification + canonical tagged encoding),
   `docs/BENCHMARKS.md` "Browser Open at Scale" re-measure and "A5: Browser
   IndexedDB Growth", six wasm atomicity tests in `src/browser/`.
-  A5-6b later closed page-local integrity and A5-6c supplied the bounded v11
-  open implementation. Vicia still owns the 1M measurement matrix before the
-  final browser cutover decision can move to vetch-app.
+  A5-6b later closed page-local integrity, A5-6c supplied the bounded v11 open
+  implementation, and A5-6d measured that exact path at 1M. The final browser
+  cutover decision now moves to vetch-app.
 - Progress (2026-07-11): **import atomicity LANDED** — `importGraph` now
   commits the durable replacement in a single IndexedDB `clear`+`put`
   transaction *before* the live handle switches (was: swap-then-flush, which
@@ -297,12 +298,12 @@ The repeatable CI entrypoint exercises the browser-WASM suite in headless
 Chrome; A5-6b added durable migration success, atomic abort, and verified
 export, and A5-6c expands the source suite to 55 structural tests.
 
-This still does **not** close Vetch Gate E. The eager `open()` compatibility
-path retains the recorded 1M shape of about 420 MB per handle. A5-6b detects an
-unread base-fact/index-page bit flip through a generation-bound in-file catalog
-even when a selected delta is present, and A5-6c now uses that verifier from a
-page-on-demand IndexedDB source. The 1M open/query/growth/maintenance
-peak-memory matrix has not yet run on that source.
+The eager `open()` compatibility path retains the recorded 1M shape of about
+420 MB per handle. A5-6b detects an unread base-fact/index-page bit flip through
+a generation-bound in-file catalog even when a selected delta is present, and
+A5-6c uses that verifier from a page-on-demand IndexedDB source. A5-6d below
+measures the exact sparse source; Vetch Gate E then depends on adopting it rather
+than preserving the eager compatibility path.
 
 #### A5-6a — Fail-closed query access boundary (DONE 2026-07-11)
 
@@ -362,9 +363,31 @@ readers retain their existing store shape.
 Writes, `forget`, failed-write rollback, import, complete v10 migration, and
 forced maintenance converge back to sparse live residency. All 55 structural
 browser tests pass in the final headless-Chrome run. This closes the
-implementation slice, not Gate E: the 1M
-open/query/growth/maintenance peak-memory matrix and Vetch adapter migration to
-`openPaged()` remain pending.
+implementation slice; A5-6d supplies its 1M measurement, while Vetch adapter
+migration to `openPaged()` remains caller-owned.
+
+#### A5-6d — 1M paged browser acceptance matrix (DONE 2026-07-12)
+
+The exact Vetch-facing path now has a self-checking Chrome 150 matrix on a
+407,580,672-byte / 99,507-page / 1,000,000-fact v11 image. Five fresh-renderer
+`openPaged()` runs measured 16.6 ms p50 / 17.8 ms five-run maximum; cold
+first/middle/last point reads measured 7.4 / 1.9 / 1.9 ms maximum, and the
+open's 200 ms sampled process-tree PSS delta was 51.1 MiB maximum. A single
+1,024-write 1M threshold cycle kept write p95 at 8.3 ms; its reopen reached
+428.1 ms maximum while three point probes stayed at 11.8 ms. Maintenance
+reclaimed 102,596 to 99,599 pages and restored a 16.3 ms reopen. The earlier
+A5-4 four-cycle 100K run remains the repeated-growth evidence.
+
+The matrix also fixes the lifecycle boundary. Verified export took 5.370 s and
+a 1.04 GiB sampled PSS delta; maintenance took 16.679 s and 2.09 GiB; initial
+import took 11.242 s and 2.55 GiB. Export retained its complete 1.04 GiB delta
+when the call returned, and maintenance retained 1.27 GiB until renderer close.
+Vetch therefore owns these explicit O(total) operations in a disposable
+DedicatedWorker under its Web Lock, emits a result, terminates the worker after
+either outcome, and reopens through `openPaged()`. This one 32 GiB host run is
+not a general 16 GiB support claim. Foreground authority open/query/write paths
+complete the Vicia-owned Gate E scale evidence; remaining work is Vetch package
+sync, adapter cutover, and the caller-owned worker lifecycle smoke.
 
 ### A8 — Bulk valid-time closure, the "forget" primitive (DONE 2026-07-11)
 
@@ -448,7 +471,7 @@ A9 are P1, after the P0 set. Candidates have no schedule.
 | Payloads (note text, blobs, embeddings, `.pt` packets) | both | Outside the graph; Vicia holds content-hash / path `Ref` pointers only. Both caller docs pin this. |
 | Viewport spatial index / geometry | vetch-app | Vetch-owned UI projection (TypeGPU/Rete); DB stays source of truth. Not a Vicia range-query problem. |
 | Write debounce | vetch-app | Commit note position on gesture end, not per frame. |
-| Browser maintenance | vetch-app | Hold the Web Lock, run `runIdleMaintenance()` in the BrowserDb worker at idle/slice/import boundaries, and react to write-result advice. Never rebuild on the UI capture path. |
+| Browser maintenance | vetch-app | Hold the Web Lock, run import/export/`runIdleMaintenance()` in a disposable BrowserDb worker at idle or explicit operation boundaries, react to write-result advice, emit the outcome, terminate the worker, then reopen through `openPaged()`. Never rebuild on the UI capture path or retain O(total) memory in the authority worker. |
 | Authority cutover sequencing | vetch-app | Governed by `docs/VETCH_CALLER_REQUIREMENTS.md` work order and Gates A–E; Vicia-side prerequisites are A0/A5. |
 | Maintenance cadence | harrekki | Schedule `run_idle_maintenance()` in idle windows per `docs/MAINTENANCE_API_CONTRACT.md`; hard-threshold recompact is seconds-scale at 1M and must not sit in the tick loop. |
 | Shared access | harrekki | One daemon = one writer = one `.graph` file; all other access (human inspection, other sessions) goes through the harrekki daemon over the A6 protocol. Read-only open of a live file is a fallback feature only if daemon mediation proves insufficient (harrekki P1 #8). |

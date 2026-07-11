@@ -800,11 +800,11 @@ Gate verdict:
 - **Caller constraint:** maintenance is O(total history) synchronous WASM work
   (`2.5–4.2 s` at 110K–141K facts) and atomic replacement temporarily needs old
   plus candidate quota. Run it in the BrowserDb worker, never the UI thread.
-- **Still open for Gate E:** eager `BrowserDb.open()` loads every IndexedDB
+- **Still open at A5-4:** eager `BrowserDb.open()` loads every IndexedDB
   page. `openPaged()` now supplies the bounded implementation path, but its 1M
   startup/query/growth matrix and the 1M maintenance peak-memory shape are
   unmeasured. Do not infer 1M browser authority readiness from the eager
-  baseline or the 100K maintenance pass.
+  baseline or the 100K maintenance pass; A5-6d records the later measurement.
 
 ### A5-5: Gate E Tagged Portability and Corruption Matrix
 
@@ -896,10 +896,71 @@ structure and correctness, not 1M performance numbers:
   for eager and in-memory handles.
 - All 55 browser-WASM structural tests pass in the final real-Chrome run.
 
-Gate status: the page-on-demand implementation exists, but no new 1M numbers
-are recorded here. The cold-open/query/warm-repeat/write/growth/export matrix,
-maintenance peak memory, and Vetch adapter adoption of `openPaged()` remain
-required before Gate E can close.
+Gate status at A5-6c: the page-on-demand implementation existed, but no new 1M
+numbers were recorded in that slice. A5-6d below supplies the cold-open/query/
+warm-repeat/write/growth/export and maintenance-memory matrix; Vetch adapter
+adoption of `openPaged()` remains required before Gate E can close.
+
+### A5-6d: 1M Paged Browser Acceptance Matrix (2026-07-12)
+
+`examples/browser/bench-driver.cjs paged-matrix` measures the exact bounded
+browser path intended for Vetch. The self-checking run imports one
+1,000,000-fact v11 image, then launches a fresh renderer for each open,
+verified export, 1,024 one-fact writes, five soft-threshold reopens,
+maintenance, and post-maintenance reopen. It fails if the write advice does
+not reach `schedule_idle_maintenance`, maintenance does not recompact and
+reclaim pages, or export length differs from the declared published prefix.
+The fixture is 407,580,672 bytes / 99,507 pages and uses the
+`:bench/base-{i}` shape from `examples/generate_bench_fixture.rs`.
+
+Reproduction: build `minigraf-wasm`, generate the fixture, serve the repository
+root, and run:
+
+```text
+CHROME_PATH=<chrome> NODE_PATH=<dir with puppeteer-or-puppeteer-core> \
+BENCH_PAGE=http://localhost:8123/examples/browser/bench.html \
+BENCH_PROFILE=/tmp/vicia-gate-e-profile \
+node examples/browser/bench-driver.cjs paged-matrix \
+  /target/bench-fixtures/bench-1m.graph 5 1024
+```
+
+Environment: Chrome for Testing 150 headless on WSL2, AMD Ryzen 7 7800X3D,
+16 logical CPUs, 32 GiB host memory, Node 23.11.1. Each memory measurement
+starts after WASM initialization. Linux process-tree RSS, PSS, and private
+memory were sampled every 200 ms from `/proc`; PSS is the primary process
+metric because summed RSS double-counts shared mappings. These are sampled
+peaks, not allocator-exact instantaneous maxima. With five runs, the harness's
+nearest-rank p95 is the five-run maximum, not a production SLA estimate.
+
+| Phase | Latency | Read/write detail | 200 ms sampled PSS peak delta | Physical result |
+|---|---:|---|---:|---|
+| Initial `importGraph` | 11.242 s total | 10.237 s import | +2.55 GiB | 99,507 pages / 1,000,000 facts |
+| Fresh `openPaged()` (5 runs) | 16.6 ms p50 / 17.8 ms max | cold first/middle/last max 7.4 / 1.9 / 1.9 ms; warm <= 0.2 ms | +51.1 MiB max | JS heap open delta 0.535 MiB |
+| `exportGraphAsync()` | 5.370 s | exact verified 407,580,672-byte image | +1.04 GiB | published prefix unchanged |
+| 1,024 one-fact writes | 5.121 s total | 4.9 / 8.3 / 11.9 ms p50/p95/max | +84.5 MiB | 99,507 -> 102,596 pages; soft advice emitted |
+| Pre-maintenance `openPaged()` (5 runs) | 405.2 ms p50 / 428.1 ms max | three cold probes 11.8 ms max; warm 0.7 ms max | +102.2 MiB max | 1,024 visible delta segments |
+| `runIdleMaintenance()` | 16.679 s | last write verified after replacement | +2.09 GiB | 102,596 -> 99,599 pages |
+| Post-maintenance `openPaged()` | 16.3 ms | cold probes 9.5 ms; warm 0.6 ms | +51.0 MiB | 1,001,024 facts preserved |
+
+Verdict: the Vicia-owned 1M foreground evidence is complete. `openPaged()`,
+selective cold/warm reads, normal writes, and post-maintenance reopen do not
+load the 407 MB graph into the JS heap. The soft-threshold lineage makes
+metadata bootstrap slower (428.1 ms five-run maximum) but leaves selective
+reads at 11.8 ms and returns to a 16.3 ms open after maintenance. The earlier
+A5-4 four-cycle 100K run remains the repeated-growth evidence; this A5-6d run
+adds one exact 1M threshold cycle rather than claiming a second long-duration
+study.
+
+Import, full verified export, and recompact remain explicit O(total)
+operations. Their 1.04-2.55 GiB sampled PSS deltas are real process-lifetime
+costs, not RSS double-counting artifacts: export retained its full 1.04 GiB
+delta when the call returned, while maintenance retained 1.27 GiB until the
+renderer closed. Vetch must run these phases in a disposable DedicatedWorker
+under its Web Lock, emit an outcome, terminate the worker after success or
+failure, and reopen through `openPaged()`. This single 32 GiB host run does not
+establish a general 16 GiB product budget. The whole Vetch Gate E remains open
+for package/adapter adoption and that caller-owned worker lifecycle smoke; it
+no longer needs another Vicia storage-format or 1M measurement slice.
 
 ---
 

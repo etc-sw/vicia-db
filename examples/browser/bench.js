@@ -7,7 +7,13 @@
 import init, { BrowserDb } from "../../minigraf-wasm/minigraf.js";
 
 const DB_NAME = "minigraf-bench";
+const PAGE_SIZE = 4096;
 const initPromise = init();
+
+window.benchReady = async () => {
+  await initPromise;
+  return true;
+};
 
 function heap() {
   return performance.memory ? performance.memory.usedJSHeapSize : null;
@@ -78,7 +84,8 @@ async function idbStats() {
   const conn = await promisifyReq(indexedDB.open(DB_NAME));
   try {
     const store = conn.transaction(DB_NAME, "readonly").objectStore(DB_NAME);
-    const idbCount = await promisifyReq(store.count());
+    const numericPages = IDBKeyRange.bound(0, Number.MAX_SAFE_INTEGER);
+    const idbCount = await promisifyReq(store.count(numericPages));
     const page0 = await promisifyReq(store.get(0));
     let headerVersion = null, headerPageCount = null, headerNodeCount = null;
     if (page0) {
@@ -261,4 +268,219 @@ window.benchOpen = async () => {
     heapBeforeBytes: heapBefore,
     heapAfterBytes: heapAfter,
   }));
+};
+
+// ── A5-6d paged 1M acceptance matrix ───────────────────────────────────────
+
+const PAGED_PROBES = [
+  {
+    id: "first",
+    datalog: "(query [:find ?v :where [:bench/base-1 :bench/value ?v]])",
+    expected: 1,
+  },
+  {
+    id: "middle",
+    datalog:
+      "(query [:find ?v :where [:bench/base-500001 :bench/value ?v]])",
+    expected: 500001,
+  },
+  {
+    id: "last",
+    datalog: "(query [:find ?v :where [:bench/base-999999 :bench/flag ?v]])",
+    expected: true,
+  },
+];
+
+async function timedProbe(db, probe) {
+  const started = performance.now();
+  const decoded = JSON.parse(await db.execute(probe.datalog));
+  const elapsed = performance.now() - started;
+  if (
+    decoded.results.length !== 1 ||
+    decoded.results[0][0] !== probe.expected
+  ) {
+    throw new Error(
+      `paged probe ${probe.id} mismatch: ${JSON.stringify(decoded.results)}`,
+    );
+  }
+  return {
+    id: probe.id,
+    ms: Math.round(elapsed * 1000) / 1000,
+    rows: decoded.results.length,
+  };
+}
+
+// Seed the persistent profile through the same paged API Vetch will adopt.
+// Import is intentionally O(total); the bounded claim begins with later opens.
+window.benchPagedImport = async (fixtureUrl) => {
+  await initPromise;
+  window.gc?.();
+  const heapBeforeBytes = heap();
+  const started = performance.now();
+  const response = await fetch(fixtureUrl);
+  if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const fetched = performance.now();
+  const db = await BrowserDb.openPaged(DB_NAME);
+  const opened = performance.now();
+  await db.importGraph(bytes);
+  const imported = performance.now();
+  const stats = await idbStats();
+  return show(
+    JSON.stringify({
+      fixtureBytes: bytes.byteLength,
+      fetchMs: Math.round((fetched - started) * 1000) / 1000,
+      openEmptyMs: Math.round((opened - fetched) * 1000) / 1000,
+      importMs: Math.round((imported - opened) * 1000) / 1000,
+      totalMs: Math.round((imported - started) * 1000) / 1000,
+      heapBeforeBytes,
+      heapAfterBytes: heap(),
+      stats,
+    }),
+  );
+};
+
+// Fresh-renderer bounded open plus first/middle/last cold and warm point reads.
+window.benchPagedOpen = async () => {
+  await initPromise;
+  window.gc?.();
+  const heapBeforeBytes = heap();
+  const started = performance.now();
+  const db = await BrowserDb.openPaged(DB_NAME);
+  const opened = performance.now();
+  const heapAfterOpenBytes = heap();
+  const cold = [];
+  for (const probe of PAGED_PROBES) cold.push(await timedProbe(db, probe));
+  const afterCold = performance.now();
+  const warm = [];
+  for (const probe of PAGED_PROBES) warm.push(await timedProbe(db, probe));
+  const finished = performance.now();
+  return show(
+    JSON.stringify({
+      openMs: Math.round((opened - started) * 1000) / 1000,
+      cold,
+      coldTotalMs: Math.round((afterCold - opened) * 1000) / 1000,
+      warm,
+      warmTotalMs: Math.round((finished - afterCold) * 1000) / 1000,
+      heapBeforeBytes,
+      heapAfterOpenBytes,
+      heapAfterQueriesBytes: heap(),
+      stats: await idbStats(),
+    }),
+  );
+};
+
+// The portability API is explicitly O(total), but it must not change the live
+// sparse residency or use the eager full-store loader.
+window.benchPagedExport = async () => {
+  await initPromise;
+  window.gc?.();
+  const heapBeforeBytes = heap();
+  const db = await BrowserDb.openPaged(DB_NAME);
+  const heapAfterOpenBytes = heap();
+  const started = performance.now();
+  const bytes = await db.exportGraphAsync();
+  const finished = performance.now();
+  const stats = await idbStats();
+  if (
+    bytes.byteLength < 4096 ||
+    String.fromCharCode(...bytes.slice(0, 4)) !== "MGRF" ||
+    bytes.byteLength !== stats.headerPageCount * PAGE_SIZE
+  ) {
+    throw new Error("paged export is not a portable MGRF image");
+  }
+  return show(
+    JSON.stringify({
+      exportMs: Math.round((finished - started) * 1000) / 1000,
+      exportBytes: bytes.byteLength,
+      heapBeforeBytes,
+      heapAfterOpenBytes,
+      heapWithExportBytes: heap(),
+      stats,
+    }),
+  );
+};
+
+// Accumulate one segment per write until the production soft threshold is
+// reached. The following maintenance phase runs in a fresh renderer.
+window.benchPagedGrowth = async (cycles) => {
+  await initPromise;
+  window.gc?.();
+  const db = await BrowserDb.openPaged(DB_NAME);
+  const durations = [];
+  let finalWrite = null;
+  const started = performance.now();
+  for (let cycle = 1; cycle <= cycles; cycle++) {
+    const writeStarted = performance.now();
+    finalWrite = JSON.parse(
+      await db.execute(
+        `(transact [[:gate-e/write-${cycle} :gate-e/value ${cycle}]])`,
+      ),
+    );
+    durations.push(performance.now() - writeStarted);
+    if (cycle % 128 === 0 || cycle === cycles) {
+      console.log(
+        `paged-growth: ${JSON.stringify({ cycle, advice: finalWrite.advice })}`,
+      );
+    }
+  }
+  if (finalWrite?.advice !== "schedule_idle_maintenance") {
+    throw new Error(
+      `growth did not reach the soft maintenance threshold: ${JSON.stringify(finalWrite)}`,
+    );
+  }
+  const sorted = [...durations].sort((left, right) => left - right);
+  return show(
+    JSON.stringify({
+      cycles,
+      totalMs: Math.round((performance.now() - started) * 1000) / 1000,
+      writeP50Ms: percentile(sorted, 50),
+      writeP95Ms: percentile(sorted, 95),
+      writeMaxMs: percentile(sorted, 100),
+      finalAdvice: finalWrite?.advice ?? null,
+      heapAfterBytes: heap(),
+      stats: await idbStats(),
+    }),
+  );
+};
+
+window.benchPagedMaintenance = async (lastCycle) => {
+  await initPromise;
+  window.gc?.();
+  const heapBeforeBytes = heap();
+  const before = await idbStats();
+  const started = performance.now();
+  const db = await BrowserDb.openPaged(DB_NAME);
+  const opened = performance.now();
+  const result = JSON.parse(await db.runIdleMaintenance());
+  const maintained = performance.now();
+  const after = await idbStats();
+  if (
+    result.delta !== "recompacted" ||
+    after.idbCount >= before.idbCount
+  ) {
+    throw new Error(
+      `maintenance did not compact the soft-threshold lineage: ${JSON.stringify({ result, before, after })}`,
+    );
+  }
+  const verify = JSON.parse(
+    await db.execute(
+      `(query [:find ?v :where [:gate-e/write-${lastCycle} :gate-e/value ?v]])`,
+    ),
+  );
+  if (verify.results?.[0]?.[0] !== lastCycle) {
+    throw new Error(`maintenance verification failed: ${JSON.stringify(verify)}`);
+  }
+  return show(
+    JSON.stringify({
+      openMs: Math.round((opened - started) * 1000) / 1000,
+      maintenanceMs: Math.round((maintained - opened) * 1000) / 1000,
+      result,
+      before,
+      after,
+      heapBeforeBytes,
+      heapAfterBytes: heap(),
+      verifyRows: verify.results.length,
+    }),
+  );
 };

@@ -1,6 +1,6 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: A5-6c generation-aware sparse IndexedDB paging (July 2026), 1277 native tests + 55 browser WASM tests in source
+**Last Updated**: A5-6d 1M paged-browser acceptance evidence (July 2026), 1277 native tests + 55 browser WASM tests in source
 
 ## Test Summary
 
@@ -45,6 +45,7 @@
 - ✅ 1 delta manifest recovery test (integration, Vetch delta storage — manifest recovery gate)
 - ✅ 1 header extension gate test (integration, Vetch delta storage — v10 extension module gate)
 - ✅ Agent-brief read-path benchmark harness (bench, Vetch Q1-A — current/as-of/prepared/export receipt-read surfaces; not counted as a test)
+- ✅ Self-checking 1M paged-browser matrix harness (bench, Vetch A5-6d — import, fresh `openPaged` cold/warm probes, verified async export, 1,024-write threshold, maintenance reclaim, and post-maintenance reopen; not counted as a test)
 - ✅ 4 index corruption tests (integration, v11 public API — header/catalog corruption rejects open; exact fact/EAVT pages fail closed on first selective query)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)
 - ✅ 1 long-haul smoke test (integration, Wave 3 #220 — 500 entities × 10 attrs × 10 cycles; ignored: nightly)

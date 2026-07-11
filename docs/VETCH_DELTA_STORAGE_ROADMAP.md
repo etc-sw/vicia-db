@@ -28,9 +28,10 @@ maintenance: BrowserDb applies the threshold policy from a caller-owned
 worker/idle window and atomically replaces IndexedDB with a fresh contiguous
 image so obsolete page records are actually reclaimed.
 A5-6c adds the bounded `BrowserDb.openPaged()` source and verified asynchronous
-export while retaining eager `open()` compatibility. Its 1M matrix and Vetch
-adapter adoption remain acceptance work rather than another storage-format
-slice.
+export while retaining eager `open()` compatibility. A5-6d measures that exact
+path at 1M and closes the Vicia-owned browser scale work. Vetch adapter adoption
+and its disposable-worker lifecycle smoke remain acceptance work rather than
+another storage-format slice.
 This document is the single high-level plan for the Vetch-driven Minigraf /
 Vicia DB delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
@@ -64,7 +65,7 @@ later benchmark-backed proposal proves they belong in Minigraf core.
 | `docs/DELTA_INDEX_REFERENCE_SURVEY.md` | Reference DB survey. Extracts portable invariants from GrafeoDB, Fjall, and redb without adopting them as dependencies. |
 | `docs/DELTA_INDEX_DESIGN.md` | Detailed v10 delta format, reader semantics, crash matrix, and T0-T7 test spec. |
 | `docs/MAINTENANCE_API_CONTRACT.md` | Q3-B/A5-4 caller contract for native and browser idle maintenance: safe windows, outcome semantics, retry/error policy, and Vetch worker scheduling. |
-| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, Q2-A, Q2-B, and A5-4. |
+| `docs/BENCHMARKS.md` | Numeric evidence for R2, T6, T7A, T7B, T7C, T8B, T8C, Q1-A, Q1-B, Q2-A, Q2-B, A5-4, and the A5-6d 1M paged-browser matrix. |
 | `docs/VETCH_DELTA_STORAGE_ROADMAP.md` | This document: overall sequencing, gates, Vetch operating policy, and next-slice specs. |
 | `docs/VICIA_DB_RENAME_PLAN.md` | Staged Vicia DB successor rename plan, compatibility policy, attribution checklist, and `vicia-db-decision-gate` skill shape. |
 
@@ -134,9 +135,9 @@ public receipt API. A5-4 supplied the browser caller evidence and page-record
 reclaim that Q3-B left outside native core. A5-6c then supplied the
 generation-aware page-on-demand open path without breaking eager callers.
 Native work proceeds separately through the now-landed A9 linearized backup.
-The remaining browser acceptance work is to measure the 1M sparse
-open/query/growth/maintenance shape and adopt that exact API in Vetch, not to
-change the delta algorithm again.
+The 1M sparse open/query/growth/maintenance shape is now measured in A5-6d.
+Remaining browser acceptance work is to adopt that exact API and its explicit
+O(total) worker lifecycle in Vetch, not to change the delta algorithm again.
 
 ## Evidence Trail
 
@@ -171,6 +172,7 @@ the result of progressively narrower gates:
 | A5-6a | Query access planning is a deterministic internal boundary; selective index/fact I/O failures propagate instead of triggering a full scan, and declared fact ranges reject wrong-type pages. | Sparse browser reads can distinguish an explicit full-scan plan from a failed selective read without hiding corruption. |
 | A5-6b | File format v11 adds an in-file, generation/page-id-bound checksum catalog for every immutable base fact/index page; v10 migrates catalog-first/page0-last and BrowserDb durably commits that migration before returning. | Page-local corruption detection and the verified committed-read/export/backup boundary pass; sparse IndexedDB paging and the 1M bounded-memory matrix remain Gate E work. |
 | A5-6c | `BrowserDb.openPaged()` bootstraps bounded v11 metadata, demand-fetches verified pages, preserves sparse residency across writes/rollback/import/maintenance, and pairs with `exportGraphAsync()`; exact page-0 bytes are the cross-handle authority with no added schema key. | Sparse implementation work passes structurally while eager `open()` remains compatible; the 1M measured matrix and Vetch adapter adoption remain Gate E work. |
+| A5-6d | Chrome 150 on a 1M-fact v11 image measures `openPaged()` at 17.8 ms five-run maximum and 51.1 MiB maximum sampled PSS growth, one-fact writes at 8.3 ms p95, soft-threshold reopen at 428.1 ms maximum, and post-maintenance reopen at 16.3 ms. | The Vicia-owned scale measurement is complete; import/export/recompact remain disposable-worker O(total) operations, and Vetch adapter adoption is the remaining Gate E work. |
 
 ## Philosophy Fit
 
@@ -690,6 +692,10 @@ Run benchmark gates only when the relevant slice is ready:
 - Q1-A agent-brief read-path benchmark/spec is complete. It adds
   `benches/agent_brief_read_path_benchmark.rs` and separates current point,
   as-of point, prepared as-of, and export/recent-filter timing.
+- A5-6d paged-browser scale measurement is complete. Reproduce it with
+  `examples/browser/bench-driver.cjs paged-matrix <fixture> 5 1024` after the
+  browser WASM build; the runner self-checks export length, threshold advice,
+  page reclamation, and post-maintenance visibility.
 
 Known verification caveat:
 

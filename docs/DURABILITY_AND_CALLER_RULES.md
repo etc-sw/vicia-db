@@ -81,7 +81,7 @@ Backends covered:
 | Browser write result | Meaning | Caller action |
 | --- | --- | --- |
 | `maintenance_pending = false`, `advice = "none"` | Delta growth is healthy. | Continue normal batching. |
-| `maintenance_pending = true`, `advice = "schedule_idle_maintenance"` | Soft threshold crossed. | Schedule `runIdleMaintenance()` in the next worker/idle window while retaining the Web Lock. |
+| `maintenance_pending = true`, `advice = "schedule_idle_maintenance"` | Soft threshold crossed. | End the foreground handle scope and schedule a disposable worker that acquires the same Web Lock, runs maintenance, reports, and terminates. |
 | `maintenance_pending = true`, `advice = "reduce_checkpoint_cadence"` | Hard threshold crossed. | Increase batch size/backoff and run maintenance before resuming the prior cadence. |
 | `durability = "noop"`, null `tx_id`/`tx_count` | A `forget` matched no open fact and consumed no transaction. | Treat as successful idempotent no-op; no maintenance action. |
 
@@ -208,17 +208,19 @@ Derived from the semantics above plus the A5 growth measurements
    frame. Successful write results expose `maintenance_pending` and `advice`;
    use those fields instead of guessing from commit count.
 
-3. **Schedule browser maintenance in a worker.** Call
-   `runIdleMaintenance()` at startup/import/slice/idle boundaries while the
-   caller-owned Web Lock is held. It no-ops below threshold and atomically
-   reclaims superseded page records after soft/hard pressure. The rebuild is
-   O(total history), synchronous WASM work; run the writing BrowserDb inside
-   a dedicated worker so maintenance cannot block the main UI. The 100K
-   maintained-growth gate proves repeated reclaim and latency reset. The
-   binding now discovers IndexedDB through `globalThis`; the repeatable
-   `bench-driver.cjs worker-smoke` gate passes open/write/query/maintenance in
-   a real module DedicatedWorker. The
-   eager 1M full-load baseline (~420 MB per handle) is not the paged verdict.
-   The `openPaged()` 1M startup/query/growth matrix and 1M maintenance
-   peak-memory proof remain Gate E blockers; do not claim browser authority
-   readiness until those measurements and Vetch adapter adoption are complete.
+3. **Give O(total) browser work a disposable worker lifetime.** React to write
+   advice at startup/import/slice/idle boundaries. End use of the foreground
+   handle, launch a DedicatedWorker that acquires the same caller-owned Web
+   Lock, opens with `openPaged()`, calls `runIdleMaintenance()`, posts its
+   outcome, and terminates after either success or failure. The next foreground
+   operation reopens through `openPaged()`. Maintenance no-ops below threshold
+   and atomically reclaims superseded page records after soft/hard pressure.
+   Initial import and `exportGraphAsync()` use the same disposable-worker rule.
+   The 100K maintained-growth gate proves repeated reclaim and latency reset;
+   `bench-driver.cjs worker-smoke` proves the binding works in a real module
+   worker. A5-6d completes the recorded-host 1M matrix: foreground open/query/
+   write stays sparse, but import/export/maintenance add 2.55/1.04/2.09 GiB of
+   200 ms sampled process-tree PSS. Export retains 1.04 GiB and maintenance
+   retains 1.27 GiB when the call returns, so a long-lived authority worker is
+   not the reclamation boundary. Gate E still requires Vetch adapter adoption
+   and proof that its actual runtime terminates the worker and reopens cleanly.
