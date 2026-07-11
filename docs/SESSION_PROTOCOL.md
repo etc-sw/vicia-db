@@ -39,7 +39,7 @@ line-based transport.
 | `status` | — | Cheap telemetry snapshot; see Status fields. |
 | `checkpoint` | — | Foreground checkpoint (WAL → durable image). |
 | `maintenance` | — | `run_idle_maintenance()`; call in idle windows per `docs/MAINTENANCE_API_CONTRACT.md`. |
-| `export_since` | `since_tx_count`: uint | **Proposed (A2), pending caller-lane ACK** — incremental fact-log tail; see export_since below. |
+| `export_since` | `since_tx_count`: uint | Incremental fact-log tail (A2); see export_since below. |
 | `ping` | — | Liveness. |
 | `shutdown` | — | Responds, then exits the loop. Equivalent to stdin EOF. |
 
@@ -59,11 +59,13 @@ Success: `{"ok": true, "result": {...}, "id"?}`. Result bodies by type:
 
 Error: `{"ok": false, "error": {"kind": "...", "message": "..."}, "id"?}`.
 
-## export_since (A2) — status: proposed, pending caller-lane ACK
+## export_since (A2) — status: frozen (caller-lane ACK 2026-07-11)
 
 The incremental "facts since tx_count N" read (harrekki P0 #2). The Rust API
-(`Minigraf::export_fact_log_since`) is frozen; this frame shape follows the
-A6 precedent of a caller-lane veto before the first byte is canon.
+(`Minigraf::export_fact_log_since`) is frozen; the frame shape was ACKed
+verbatim by the harrekki lane per the A6 precedent (record:
+`docs/A6_SESSION_PROTOCOL_ANSWERS_HARREKKI.md` "A2 export_since frame",
+shared-memory need `:need/vicia-a2-export-since-frame-ack` resolved).
 
 Request: `{"op": "export_since", "since_tx_count": <uint>, "id"?}`
 
@@ -98,10 +100,12 @@ Response result body:
 - Missing or negative `since_tx_count` → `protocol` error; the session
   continues. `since_tx_count: 0` is the full export — intended for small
   tails; full exports of large databases should use the Rust API.
-- Open question for the ACK: whether a bounded-size chunked reply is needed.
-  Current position: no — the daemon polls small tails by design, and a
-  chunked reply adds a multi-frame state machine to every adapter. Veto if
-  the JVM side disagrees.
+- Chunking: **decided no** (harrekki-lane ACK) — the daemon polls small
+  tails by design; the boot-time full export is a replay the caller reads
+  in one line; and a multi-frame reply would break "resync = next newline".
+  Reserved escape hatch if a bounded reply ever becomes necessary: a
+  request-side `limit` with the cut rounded down to a `tx_count` boundary
+  (caller-driven pagination) — not chunked responses. Not built.
 
 ## Value encoding (tagged, lossless)
 
