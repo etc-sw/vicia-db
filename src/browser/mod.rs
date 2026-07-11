@@ -1619,6 +1619,78 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn paged_exact_entity_set_query_avoids_full_fact_prefetch() {
+        let fact_count = 4_000;
+        let bytes = build_sparse_v11_fixture(fact_count).await;
+        let plan = BrowserV11BootstrapPlan::from_page0(&bytes[..crate::storage::PAGE_SIZE])
+            .expect("plan entity-set fixture");
+        assert!(
+            plan.base_fact_range().page_count() > 1,
+            "fixture must contain a multi-page fact range"
+        );
+
+        let db_name = format!("vicia-paged-entity-set-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open entity-set seed IDB");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed entity-set fixture");
+        idb.reset_read_counters_for_test();
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open paged entity-set fixture");
+        idb.reset_read_counters_for_test();
+
+        let entity_indexes: Vec<usize> = (10..138).collect();
+        let branches = entity_indexes
+            .iter()
+            .map(|index| format!("[:sparse/e{index} :sparse/value ?value]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = db
+            .execute(format!("(query [:find ?value :where (or {branches})])"))
+            .await
+            .expect("execute exact entity-set query");
+        let result: serde_json::Value = serde_json::from_str(&result).expect("entity-set JSON");
+        let mut values: Vec<i64> = result["results"]
+            .as_array()
+            .expect("entity-set rows")
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .and_then(|values| values.first())
+                    .and_then(serde_json::Value::as_i64)
+                    .expect("integer entity-set value")
+            })
+            .collect();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            entity_indexes
+                .iter()
+                .map(|index| i64::try_from(*index).unwrap())
+                .collect::<Vec<_>>()
+        );
+
+        let query_counts = idb.read_counters_for_test();
+        assert_eq!(query_counts.full_store_reads, 0);
+        assert!(query_counts.pages_returned > 0);
+        assert_eq!(
+            query_counts.pages_requested, query_counts.transactions,
+            "exact entity-set query must use single-page demand reads, not range prefetch"
+        );
+        let inner = db.inner.borrow();
+        inner.pfs.with_backend(|backend| {
+            assert_eq!(
+                backend.resident_page_count(),
+                backend.pinned_page_count(),
+                "entity-set query staging pages must be released"
+            );
+        });
+    }
+
+    #[wasm_bindgen_test]
     async fn paged_query_detects_lazy_base_corruption_and_async_export_is_exact() {
         let bytes = build_sparse_v11_fixture(300).await;
         let plan = BrowserV11BootstrapPlan::from_page0(&bytes[..crate::storage::PAGE_SIZE])

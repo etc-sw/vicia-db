@@ -8,6 +8,10 @@ use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
 
 pub(crate) const MAX_SELECTIVE_LOOKUPS: usize = 4;
+/// Exact entity sets stay bounded by caller-supplied identities rather than by
+/// attribute cardinality. This larger cap supports batched embedded-ledger
+/// reads without turning broad mixed/attribute plans into accidental scans.
+pub(crate) const MAX_SELECTIVE_ENTITY_LOOKUPS: usize = 128;
 
 /// One bounded committed-index lookup needed by a Datalog query.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,10 +39,19 @@ impl QueryAccessPlan {
         }
 
         let mut lookups = BTreeSet::new();
-        if !collect_lookups(&query.where_clauses, &mut lookups)
-            || lookups.is_empty()
-            || lookups.len() > MAX_SELECTIVE_LOOKUPS
+        if !collect_lookups(&query.where_clauses, &mut lookups) || lookups.is_empty() {
+            return Self::FullScan;
+        }
+
+        let lookup_limit = if lookups
+            .iter()
+            .all(|lookup| matches!(lookup, QueryLookup::Entity(_)))
         {
+            MAX_SELECTIVE_ENTITY_LOOKUPS
+        } else {
+            MAX_SELECTIVE_LOOKUPS
+        };
+        if lookups.len() > lookup_limit {
             return Self::FullScan;
         }
 
@@ -138,7 +151,7 @@ fn collect_lookups(clauses: &[WhereClause], lookups: &mut BTreeSet<QueryLookup>)
 mod tests {
     use super::*;
     use crate::query::datalog::parser::parse_datalog_command;
-    use crate::query::datalog::types::DatalogCommand;
+    use crate::query::datalog::types::{DatalogCommand, FindSpec, Pattern};
 
     fn parse_query(input: &str) -> DatalogQuery {
         match parse_datalog_command(input).unwrap() {
@@ -198,6 +211,118 @@ mod tests {
         let over_limit = parse_query(
             "(query [:find ?e :where \
              [?e :a ?a] [?e :b ?b] [?e :c ?c] [?e :d ?d] [?e :e ?e]])",
+        );
+        assert_eq!(
+            QueryAccessPlan::for_query(&over_limit),
+            QueryAccessPlan::FullScan
+        );
+    }
+
+    #[test]
+    fn bounded_exact_entity_set_has_a_separate_selective_limit() {
+        let entities: Vec<Uuid> = (1..=MAX_SELECTIVE_ENTITY_LOOKUPS)
+            .map(|value| Uuid::from_u128(value as u128))
+            .collect();
+        let query = DatalogQuery::new(
+            vec![FindSpec::Variable("?value".to_string())],
+            vec![WhereClause::Or(
+                entities
+                    .iter()
+                    .map(|entity| {
+                        vec![WhereClause::Pattern(Pattern::new(
+                            EdnValue::Uuid(*entity),
+                            EdnValue::Keyword(":bounded/value".to_string()),
+                            EdnValue::Symbol("?value".to_string()),
+                        ))]
+                    })
+                    .collect(),
+            )],
+        );
+
+        assert_eq!(
+            QueryAccessPlan::for_query(&query),
+            QueryAccessPlan::Selective {
+                lookups: entities.into_iter().map(QueryLookup::Entity).collect(),
+            }
+        );
+    }
+
+    #[test]
+    fn exact_entity_set_over_its_bound_requires_full_scan() {
+        let query = DatalogQuery::new(
+            vec![FindSpec::Variable("?value".to_string())],
+            vec![WhereClause::Or(
+                (1..=MAX_SELECTIVE_ENTITY_LOOKUPS + 1)
+                    .map(|value| {
+                        vec![WhereClause::Pattern(Pattern::new(
+                            EdnValue::Uuid(Uuid::from_u128(value as u128)),
+                            EdnValue::Keyword(":bounded/value".to_string()),
+                            EdnValue::Symbol("?value".to_string()),
+                        ))]
+                    })
+                    .collect(),
+            )],
+        );
+
+        assert_eq!(
+            QueryAccessPlan::for_query(&query),
+            QueryAccessPlan::FullScan
+        );
+    }
+
+    #[test]
+    fn mixed_entity_and_attribute_plans_keep_the_general_lookup_limit() {
+        let bounded_entities: Vec<Uuid> = (1..=3).map(Uuid::from_u128).collect();
+        let mut bounded_clauses: Vec<WhereClause> = bounded_entities
+            .iter()
+            .map(|entity| {
+                WhereClause::Pattern(Pattern::new(
+                    EdnValue::Uuid(*entity),
+                    EdnValue::Keyword(":bounded/value".to_string()),
+                    EdnValue::Symbol("?value".to_string()),
+                ))
+            })
+            .collect();
+        bounded_clauses.push(WhereClause::Pattern(Pattern::new(
+            EdnValue::Symbol("?entity".to_string()),
+            EdnValue::Keyword(":bounded/kind".to_string()),
+            EdnValue::Keyword(":bounded/selected".to_string()),
+        )));
+        let bounded = DatalogQuery::new(
+            vec![FindSpec::Variable("?value".to_string())],
+            bounded_clauses,
+        );
+
+        let mut over_limit_clauses: Vec<WhereClause> = (1u128..=4)
+            .map(|value| {
+                WhereClause::Pattern(Pattern::new(
+                    EdnValue::Uuid(Uuid::from_u128(value)),
+                    EdnValue::Keyword(":bounded/value".to_string()),
+                    EdnValue::Symbol("?value".to_string()),
+                ))
+            })
+            .collect();
+        over_limit_clauses.push(WhereClause::Pattern(Pattern::new(
+            EdnValue::Symbol("?entity".to_string()),
+            EdnValue::Keyword(":bounded/kind".to_string()),
+            EdnValue::Keyword(":bounded/selected".to_string()),
+        )));
+        let over_limit = DatalogQuery::new(
+            vec![FindSpec::Variable("?value".to_string())],
+            over_limit_clauses,
+        );
+
+        assert_eq!(
+            QueryAccessPlan::for_query(&bounded),
+            QueryAccessPlan::Selective {
+                lookups: bounded_entities
+                    .into_iter()
+                    .map(QueryLookup::Entity)
+                    .chain(std::iter::once(QueryLookup::Attribute(
+                        ":bounded/kind".to_string()
+                    )))
+                    .collect(),
+            }
         );
         assert_eq!(
             QueryAccessPlan::for_query(&over_limit),
