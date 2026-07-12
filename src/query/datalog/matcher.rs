@@ -92,25 +92,6 @@ impl PatternMatcher {
         results
     }
 
-    /// Visit matches one at a time without retaining a `Vec<Bindings>`.
-    ///
-    /// This is the matcher-side boundary for streaming consumers such as
-    /// aggregate sinks. Join execution still uses the materialized methods
-    /// below because later patterns need the preceding bindings as seeds.
-    pub(crate) fn try_for_each_pattern_match<E>(
-        &self,
-        pattern: &Pattern,
-        mut visit: impl FnMut(Bindings) -> Result<(), E>,
-    ) -> Result<(), E> {
-        let facts = self.get_facts();
-        for fact in &*facts {
-            if let Some(bindings) = self.match_fact_against_pattern(fact, pattern) {
-                visit(bindings)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Try to match a single fact against a pattern
     /// Returns Some(bindings) if successful, None otherwise
     fn match_fact_against_pattern(&self, fact: &Fact, pattern: &Pattern) -> Option<Bindings> {

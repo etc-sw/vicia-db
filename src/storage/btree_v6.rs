@@ -603,6 +603,41 @@ where
     Ok(result)
 }
 
+fn visit_range_entries<K>(
+    root_page_id: u64,
+    start: &K,
+    end: Option<&K>,
+    backend: &dyn StorageBackend,
+    cache: &PageCache,
+    visit: &mut dyn FnMut(&K, FactRef) -> Result<()>,
+) -> Result<()>
+where
+    K: Serialize + for<'de> Deserialize<'de> + Ord,
+{
+    let mut leaf_id = find_leaf_for_key(root_page_id, start, backend, cache)?;
+    'outer: loop {
+        let page = cache.get_or_load(leaf_id, backend)?;
+        if page.first().copied() != Some(PAGE_TYPE_LEAF) {
+            anyhow::bail!("range_scan: expected leaf at page_id={}", leaf_id);
+        }
+        let next_leaf = read_u64_at(&page[..], 4)?;
+        for (key, fact_ref) in read_leaf_entries::<K>(&page[..])? {
+            if key < *start {
+                continue;
+            }
+            if end.is_some_and(|end| key >= *end) {
+                break 'outer;
+            }
+            visit(&key, fact_ref)?;
+        }
+        if next_leaf == 0 {
+            break;
+        }
+        leaf_id = next_leaf;
+    }
+    Ok(())
+}
+
 // ─── MutexStorageBackend ──────────────────────────────────────────────────────
 
 /// Read-only [`StorageBackend`] adapter that locks `Arc<Mutex<B>>` only for the
@@ -769,6 +804,28 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         )
     }
 
+    fn visit_aevt_entries(
+        &self,
+        start: &crate::storage::index::AevtKey,
+        end: Option<&crate::storage::index::AevtKey>,
+        visit: &mut dyn FnMut(
+            &crate::storage::index::AevtKey,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        if self.aevt_root == 0 {
+            return Ok(());
+        }
+        visit_range_entries(
+            self.aevt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+            visit,
+        )
+    }
+
     fn range_scan_avet(
         &self,
         start: &crate::storage::index::AvetKey,
@@ -848,6 +905,28 @@ impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
             end,
             &self.backend_adapter,
             &self.cache,
+        )
+    }
+
+    fn visit_aevt_entries(
+        &self,
+        start: &crate::storage::index::AevtKey,
+        end: Option<&crate::storage::index::AevtKey>,
+        visit: &mut dyn FnMut(
+            &crate::storage::index::AevtKey,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        if self.aevt_root == 0 {
+            return Ok(());
+        }
+        visit_range_entries(
+            self.aevt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+            visit,
         )
     }
 

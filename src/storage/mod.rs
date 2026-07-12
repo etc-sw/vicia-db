@@ -437,6 +437,23 @@ pub trait CommittedIndexReader: Send + Sync {
         end: Option<&crate::storage::index::AevtKey>,
     ) -> anyhow::Result<Vec<crate::storage::index::FactRef>>;
 
+    /// Visit keyed AEVT entries in `[start, end)` without retaining the whole
+    /// range. Implementations backed by paged indexes should keep at most one
+    /// leaf decoded at a time. The default preserves compatibility for test
+    /// readers that only expose fact references, but cannot serve covering
+    /// aggregate reads.
+    fn visit_aevt_entries(
+        &self,
+        _start: &crate::storage::index::AevtKey,
+        _end: Option<&crate::storage::index::AevtKey>,
+        _visit: &mut dyn FnMut(
+            &crate::storage::index::AevtKey,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("committed index reader does not expose keyed AEVT visitation")
+    }
+
     /// Returns all committed AVET entries in `[start, end)`. `end: None` means unbounded upper.
     #[allow(dead_code)]
     fn range_scan_avet(

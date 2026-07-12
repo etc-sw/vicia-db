@@ -3,7 +3,7 @@ use crate::graph::types::{
     Value, tx_id_now,
 };
 use crate::query::datalog::types::AsOf;
-use crate::storage::index::{FactRef, Indexes, encode_value};
+use crate::storage::index::{AevtKey, FactRef, Indexes, encode_value};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +16,19 @@ use std::sync::{Arc, RwLock};
 /// `encode_value` is used for the value field because `Value` contains `f64`
 /// and therefore cannot implement `Hash` directly.
 type PendingKey = (EntityId, String, Vec<u8>, i64, i64, u64, TxId, bool);
+
+#[derive(Clone, Copy)]
+pub(crate) enum CurrentValidTime {
+    At(i64),
+    Any,
+}
+
+#[derive(Default)]
+struct CurrentValueState {
+    max_unscoped_retract_tx: u64,
+    max_scoped_retract_tx: std::collections::HashMap<(i64, i64), u64>,
+    assertions: std::collections::HashMap<(i64, i64), (u64, FactRef)>,
+}
 
 fn pending_key(f: &Fact) -> PendingKey {
     (
@@ -975,6 +988,168 @@ impl FactStorage {
         }
 
         Ok(facts)
+    }
+
+    /// Visit the net-asserted current view for one attribute without building
+    /// an attribute-sized `Vec<Fact>`. AEVT keeps all history for one entity
+    /// adjacent, so reducer memory is bounded by that entity's distinct
+    /// values/windows rather than total matching entities.
+    pub(crate) fn visit_current_attribute_values(
+        &self,
+        attribute: &Attribute,
+        as_of: Option<&AsOf>,
+        valid_time: CurrentValidTime,
+        visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
+    ) -> Result<()> {
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        let start = AevtKey {
+            attribute: attribute.clone(),
+            entity: uuid::Uuid::nil(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        };
+        let end = next_string_prefix(attribute).map(|attribute| AevtKey {
+            attribute,
+            entity: uuid::Uuid::nil(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        });
+        let pending: Vec<(AevtKey, FactRef)> = match &end {
+            Some(end) => d
+                .pending_indexes
+                .aevt
+                .range(start.clone()..end.clone())
+                .map(|(key, fact_ref)| (key.clone(), *fact_ref))
+                .collect(),
+            None => d
+                .pending_indexes
+                .aevt
+                .range(start.clone()..)
+                .take_while(|(key, _)| key.attribute == *attribute)
+                .map(|(key, fact_ref)| (key.clone(), *fact_ref))
+                .collect(),
+        };
+        let mut pending = pending.into_iter().peekable();
+        let mut current_entity = None;
+        let mut values = std::collections::HashMap::<Vec<u8>, CurrentValueState>::new();
+
+        let mut flush = |entity: Option<EntityId>,
+                         values: &mut std::collections::HashMap<Vec<u8>, CurrentValueState>|
+         -> Result<()> {
+            let Some(entity) = entity else { return Ok(()) };
+            for (encoded, state) in values.drain() {
+                for ((valid_from, valid_to), (assert_tx, fact_ref)) in state.assertions {
+                    let scoped_retract = state
+                        .max_scoped_retract_tx
+                        .get(&(valid_from, valid_to))
+                        .copied()
+                        .unwrap_or(0);
+                    if assert_tx <= state.max_unscoped_retract_tx.max(scoped_retract) {
+                        continue;
+                    }
+                    if matches!(valid_time, CurrentValidTime::At(at) if !(valid_from <= at && at < valid_to))
+                    {
+                        continue;
+                    }
+                    let value = if encoded.first() == Some(&0x03) {
+                        resolve_fact_ref(&d, fact_ref)?.value
+                    } else {
+                        decode_index_value(&encoded)?
+                    };
+                    visit(entity, &value)?;
+                }
+            }
+            Ok(())
+        };
+
+        let mut accept = |key: &AevtKey, fact_ref: FactRef| -> Result<()> {
+            if !entry_visible_as_of(key, as_of) {
+                return Ok(());
+            }
+            if current_entity.is_some_and(|entity| entity != key.entity) {
+                flush(current_entity.take(), &mut values)?;
+            }
+            current_entity = Some(key.entity);
+            let state = values.entry(key.value_bytes.clone()).or_default();
+            if key.asserted {
+                state
+                    .assertions
+                    .entry((key.valid_from, key.valid_to))
+                    .and_modify(|winner| {
+                        if key.tx_count > winner.0 {
+                            *winner = (key.tx_count, fact_ref);
+                        }
+                    })
+                    .or_insert((key.tx_count, fact_ref));
+            } else if key.valid_from == RETRACT_ALL_VALID_FROM && key.valid_to == VALID_TIME_FOREVER
+            {
+                state.max_unscoped_retract_tx = state.max_unscoped_retract_tx.max(key.tx_count);
+            } else {
+                state
+                    .max_scoped_retract_tx
+                    .entry((key.valid_from, key.valid_to))
+                    .and_modify(|tx| *tx = (*tx).max(key.tx_count))
+                    .or_insert(key.tx_count);
+            }
+            Ok(())
+        };
+
+        if let Some(reader) = &d.committed_index_reader {
+            reader.visit_aevt_entries(&start, end.as_ref(), &mut |key, fact_ref| {
+                while pending
+                    .peek()
+                    .is_some_and(|(pending_key, _)| pending_key < key)
+                {
+                    if let Some((pending_key, pending_ref)) = pending.next() {
+                        accept(&pending_key, pending_ref)?;
+                    }
+                }
+                accept(key, fact_ref)
+            })?;
+        }
+        for (key, fact_ref) in pending {
+            accept(&key, fact_ref)?;
+        }
+        flush(current_entity, &mut values)
+    }
+}
+
+fn entry_visible_as_of(key: &AevtKey, as_of: Option<&AsOf>) -> bool {
+    match as_of {
+        None => true,
+        Some(AsOf::Counter(counter)) => key.tx_count <= *counter,
+        Some(AsOf::Timestamp(timestamp)) => key.tx_id <= u64::try_from(*timestamp).unwrap_or(0),
+        Some(AsOf::Slot(_)) => false,
+    }
+}
+
+fn decode_index_value(encoded: &[u8]) -> Result<Value> {
+    let payload = encoded
+        .get(1..)
+        .ok_or_else(|| anyhow::anyhow!("empty encoded index value"))?;
+    match encoded.first().copied() {
+        Some(0x00) if payload.is_empty() => Ok(Value::Null),
+        Some(0x01) if payload.len() == 1 => Ok(Value::Boolean(payload.first() == Some(&1))),
+        Some(0x02) if payload.len() == 8 => {
+            let bits = u64::from_be_bytes(payload.try_into()?);
+            Ok(Value::Integer((bits ^ 0x8000_0000_0000_0000).cast_signed()))
+        }
+        Some(0x04) => Ok(Value::String(std::str::from_utf8(payload)?.to_owned())),
+        Some(0x05) => Ok(Value::Keyword(std::str::from_utf8(payload)?.to_owned())),
+        Some(0x06) if payload.len() == 16 => {
+            Ok(Value::Ref(uuid::Uuid::from_bytes(payload.try_into()?)))
+        }
+        Some(0x03) => anyhow::bail!("float index values require exact fact resolution"),
+        Some(tag) => anyhow::bail!("malformed encoded index value tag 0x{tag:02x}"),
+        None => anyhow::bail!("empty encoded index value"),
     }
 }
 

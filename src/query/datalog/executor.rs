@@ -9,6 +9,7 @@ use super::types::{
     Pattern, Rule, Transaction, UnaryOp, ValidAt, WhereClause, WindowFunc,
 };
 use crate::graph::FactStorage;
+use crate::graph::storage::CurrentValidTime;
 use crate::graph::types::{Fact, TransactOptions, TxId, Value, tx_id_now};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
@@ -404,6 +405,46 @@ impl DatalogExecutor {
             ));
         }
 
+        // Acquire function registry before the plan loop — needed for inline Expr evaluation.
+        let registry = self
+            .functions
+            .read()
+            .map_err(|_| anyhow!("functions lock poisoned"))?;
+
+        if let Some((attribute, entity_var, value_var)) = owned_attribute_aggregate(&query) {
+            let mut sink = AggregationSink::new(&query.find, &query.with_vars, &registry);
+            let valid_time = match query.valid_at {
+                Some(ValidAt::AnyValidTime) => CurrentValidTime::Any,
+                Some(ValidAt::Timestamp(timestamp)) => CurrentValidTime::At(timestamp),
+                None => CurrentValidTime::At(now),
+                Some(ValidAt::Slot(_)) => unreachable!("bind slots are rejected above"),
+            };
+            self.storage.visit_current_attribute_values(
+                attribute,
+                query.as_of.as_ref(),
+                valid_time,
+                &mut |entity, value| {
+                    if entity_var == value_var && Value::Ref(entity) != *value {
+                        return Ok(());
+                    }
+                    sink.push_values(|var| {
+                        if Some(var) == entity_var {
+                            Some(Value::Ref(entity))
+                        } else if Some(var) == value_var {
+                            Some(value.clone())
+                        } else {
+                            None
+                        }
+                    })
+                },
+            )?;
+            let results = project_find_specs(&sink.finish()?, &query.find);
+            return Ok(QueryResult::QueryResults {
+                vars: query.find.iter().map(|spec| spec.display_name()).collect(),
+                results,
+            });
+        }
+
         // Apply temporal filters before pattern matching
         let filtered_facts = self.filter_facts_for_query(&query)?;
         let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
@@ -411,33 +452,6 @@ impl DatalogExecutor {
             valid_at_value.clone(),
             retain_fact_metadata,
         );
-        // Acquire function registry before the plan loop — needed for inline Expr evaluation.
-        let registry = self
-            .functions
-            .read()
-            .map_err(|_| anyhow!("functions lock poisoned"))?;
-
-        // A single pattern can feed an aggregate sink directly. This avoids
-        // retaining one HashMap binding per matching fact, while keeping the
-        // same matcher and aggregation semantics used by the general plan.
-        if let [WhereClause::Pattern(pattern)] = query.where_clauses.as_slice()
-            && query
-                .find
-                .iter()
-                .any(|spec| matches!(spec, FindSpec::Aggregate { .. }))
-            && !query
-                .find
-                .iter()
-                .any(|spec| matches!(spec, FindSpec::Window(_)))
-        {
-            let mut sink = AggregationSink::new(&query.find, &query.with_vars, &registry);
-            matcher.try_for_each_pattern_match(pattern, |binding| sink.push(binding))?;
-            let results = project_find_specs(&sink.finish()?, &query.find);
-            return Ok(QueryResult::QueryResults {
-                vars: query.find.iter().map(|spec| spec.display_name()).collect(),
-                results,
-            });
-        }
 
         // Pre-validate UDF predicate names: surface unknown predicates as errors before
         // processing any rows (matches the behaviour of the former apply_expr_clauses post-pass).
@@ -1222,6 +1236,53 @@ impl DatalogExecutor {
     }
 }
 
+fn owned_attribute_aggregate(
+    query: &DatalogQuery,
+) -> Option<(&String, Option<&str>, Option<&str>)> {
+    let [WhereClause::Pattern(pattern)] = query.where_clauses.as_slice() else {
+        return None;
+    };
+    if query
+        .find
+        .iter()
+        .any(|spec| matches!(spec, FindSpec::Window(_)))
+        || !query
+            .find
+            .iter()
+            .any(|spec| matches!(spec, FindSpec::Aggregate { .. }))
+    {
+        return None;
+    }
+    let AttributeSpec::Real(EdnValue::Keyword(attribute)) = &pattern.attribute else {
+        return None;
+    };
+    fn component_var(component: &EdnValue) -> Option<&str> {
+        match component {
+            EdnValue::Symbol(var) if var.starts_with('?') && !var.starts_with("?_") => {
+                Some(var.as_str())
+            }
+            _ => None,
+        }
+    }
+    if !matches!(&pattern.entity, EdnValue::Symbol(var) if var == "_" || var.starts_with('?'))
+        || !matches!(&pattern.value, EdnValue::Symbol(var) if var == "_" || var.starts_with('?'))
+    {
+        return None;
+    }
+    let entity_var = component_var(&pattern.entity);
+    let value_var = component_var(&pattern.value);
+    let all_vars_supported = query
+        .find
+        .iter()
+        .map(|spec| match spec {
+            FindSpec::Variable(var) | FindSpec::Aggregate { var, .. } => var.as_str(),
+            FindSpec::Window(_) => unreachable!("windows are rejected above"),
+        })
+        .chain(query.with_vars.iter().map(String::as_str))
+        .all(|var| Some(var) == entity_var || Some(var) == value_var);
+    all_vars_supported.then_some((attribute, entity_var, value_var))
+}
+
 /// Normalize a `Value` for use as a hash-join key.
 ///
 /// Entity keywords (`:foo`) and entity refs (`Value::Ref(uuid)`) represent the same
@@ -1580,6 +1641,7 @@ struct AggregationSink<'a> {
     registry: &'a FunctionRegistry,
     group_var_names: Vec<&'a str>,
     groups: std::collections::BTreeMap<Vec<Value>, AggregateGroup>,
+    global_group: Option<AggregateGroup>,
     saw_binding: bool,
 }
 
@@ -1607,18 +1669,23 @@ impl<'a> AggregationSink<'a> {
             registry,
             group_var_names,
             groups: Default::default(),
+            global_group: None,
             saw_binding: false,
         }
     }
 
     fn push(&mut self, binding: Binding) -> Result<()> {
+        self.push_values(|var| binding.get(var).cloned())
+    }
+
+    fn push_values(&mut self, mut value_for: impl FnMut(&str) -> Option<Value>) -> Result<()> {
         self.saw_binding = true;
         let key: Vec<Value> = self
             .group_var_names
             .iter()
-            .map(|var| binding.get(*var).cloned().unwrap_or(Value::Null))
+            .map(|var| value_for(var).unwrap_or(Value::Null))
             .collect();
-        if !self.groups.contains_key(&key) {
+        let make_group = || -> Result<AggregateGroup> {
             let accumulators = self
                 .find_specs
                 .iter()
@@ -1635,17 +1702,29 @@ impl<'a> AggregationSink<'a> {
                     accumulator.map(|accumulator| (index, func, accumulator))
                 })
                 .collect::<Result<Vec<_>>>()?;
+            Ok(AggregateGroup { accumulators })
+        };
+        let group = if self.group_var_names.is_empty() {
+            if self.global_group.is_none() {
+                self.global_group = Some(make_group()?);
+            }
+            self.global_group
+                .as_mut()
+                .ok_or_else(|| anyhow!("internal: global aggregate initialization failed"))?
+        } else {
+            if !self.groups.contains_key(&key) {
+                self.groups.insert(key.clone(), make_group()?);
+            }
             self.groups
-                .insert(key.clone(), AggregateGroup { accumulators });
-        }
-        let Some(group) = self.groups.get_mut(&key) else {
-            return Err(anyhow!("internal: aggregate group insertion failed"));
+                .get_mut(&key)
+                .ok_or_else(|| anyhow!("internal: aggregate group insertion failed"))?
         };
         for (index, func, accumulator) in &mut group.accumulators {
             let Some(FindSpec::Aggregate { var, .. }) = self.find_specs.get(*index) else {
                 continue;
             };
-            accumulator.push(func, binding.get(var), self.registry)?;
+            let value = value_for(var);
+            accumulator.push(func, value.as_ref(), self.registry)?;
         }
         Ok(())
     }
@@ -1675,8 +1754,12 @@ impl<'a> AggregationSink<'a> {
                 _ => None,
             })
             .collect();
-        let mut results = Vec::with_capacity(self.groups.len());
-        for (key, group) in self.groups {
+        let mut groups = self.groups;
+        if let Some(group) = self.global_group {
+            groups.insert(Vec::new(), group);
+        }
+        let mut results = Vec::with_capacity(groups.len());
+        for (key, group) in groups {
             let mut binding = Binding::new();
             for (index, variable) in variable_names.iter().enumerate() {
                 if let Some(value) = key.get(index) {
