@@ -1,0 +1,19 @@
+[package]
+name = "vicia-ref-db-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+cozo = { path = "@DB_REF_DIR@/cozo/cozo-core", default-features = false, features = ["storage-sqlite", "graph-algo"] }
+fjall = { path = "@DB_REF_DIR@/fjall" }
+grafeo = { path = "@DB_REF_DIR@/grafeo/crates/grafeo", features = ["storage"] }
+minigraf = { path = "../.." }
+redb = { path = "@DB_REF_DIR@/redb" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+turso = { path = "@DB_REF_DIR@/turso/bindings/rust", default-features = false }

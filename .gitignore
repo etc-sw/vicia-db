@@ -4,6 +4,9 @@
 
 .idea
 .worktrees/
+tools/ref-db-bench/Cargo.toml
+tools/ref-db-bench/Cargo.lock
+tools/ref-db-bench/target/
 .codex
 .opencode/
 .claude/
