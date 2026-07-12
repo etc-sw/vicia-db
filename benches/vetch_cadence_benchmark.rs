@@ -14,9 +14,14 @@
 
 use anyhow::{Result, bail};
 use minigraf::{Minigraf, OpenOptions, QueryResult};
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
+
+#[path = "helpers/receipt.rs"]
+mod receipt;
 
 const BASE_BATCH_SIZE: usize = 1_000;
 const PAGE_SIZE_BYTES: u64 = 4096;
@@ -59,6 +64,7 @@ struct DurationStats {
 }
 
 fn main() -> Result<()> {
+    let started_at = SystemTime::now();
     let config = selected_config();
     let root = tempfile::tempdir()?;
     let path = root.path().join("vetch-cadence.graph");
@@ -73,6 +79,13 @@ fn main() -> Result<()> {
         "mode,base_facts,slices,capture_p50_ms,capture_p95_ms,capture_max_ms,edit_p50_ms,edit_p95_ms,edit_max_ms,receipt_p50_ms,receipt_p95_ms,receipt_max_ms,brief_current_p50_ms,brief_current_p95_ms,brief_current_max_ms,brief_as_of_p50_ms,brief_as_of_p95_ms,brief_as_of_max_ms,checkpoint_p50_ms,checkpoint_p95_ms,checkpoint_max_ms,base_file_bytes,final_file_bytes,file_growth_bytes,file_growth_pages"
     );
     print_row(config, &samples, base_file_bytes, final_file_bytes)?;
+    write_receipt(
+        started_at,
+        config,
+        &samples,
+        base_file_bytes,
+        final_file_bytes,
+    )?;
     Ok(())
 }
 
@@ -238,7 +251,10 @@ fn duration_stats(samples: &[Duration]) -> Result<DurationStats> {
 
 fn percentile(sorted: &[Duration], percentile: usize) -> Duration {
     let rank = sorted.len().saturating_mul(percentile).saturating_add(99) / 100;
-    sorted[rank.saturating_sub(1).min(sorted.len().saturating_sub(1))]
+    sorted
+        .get(rank.saturating_sub(1).min(sorted.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or_default()
 }
 
 fn file_len(path: &Path) -> Result<u64> {
@@ -295,4 +311,62 @@ fn print_row(
 
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+fn write_receipt(
+    started_at: SystemTime,
+    config: CadenceConfig,
+    samples: &OpSamples,
+    base_file_bytes: u64,
+    final_file_bytes: u64,
+) -> Result<()> {
+    let metrics = [
+        ("capture", &samples.capture),
+        ("edit", &samples.edit),
+        ("receipt", &samples.receipt),
+        ("brief_current", &samples.brief_current),
+        ("brief_as_of", &samples.brief_as_of),
+        ("checkpoint", &samples.checkpoint),
+    ]
+    .into_iter()
+    .map(|(name, values)| {
+        Ok((
+            name.to_owned(),
+            receipt::MetricSeries::from_durations(values)?,
+        ))
+    })
+    .collect::<Result<BTreeMap<_, _>>>()?;
+
+    receipt::write_if_requested(receipt::ReceiptInput {
+        suite: "vetch-cadence".to_owned(),
+        acceptance_eligible: config.label == "full",
+        started_at,
+        configuration: json!({
+            "mode": config.label,
+            "baseFacts": config.base_facts,
+            "slices": config.slices,
+            "receiptFactsPerSlice": RECEIPT_FACTS_PER_SLICE,
+            "coldWarmPolicy": "fresh-base-single-process-cadence"
+        }),
+        metrics,
+        files: json!({
+            "baseBytes": base_file_bytes,
+            "finalBytes": final_file_bytes,
+            "growthBytes": final_file_bytes.saturating_sub(base_file_bytes),
+            "growthPages": final_file_bytes
+                .saturating_sub(base_file_bytes)
+                .div_ceil(PAGE_SIZE_BYTES)
+        }),
+        correctness_checks: vec![
+            receipt::CorrectnessCheck {
+                name: "current brief read cardinality".to_owned(),
+                passed: true,
+            },
+            receipt::CorrectnessCheck {
+                name: "historical brief read cardinality".to_owned(),
+                passed: true,
+            },
+        ],
+    })?;
+    Ok(())
 }

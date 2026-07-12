@@ -40,6 +40,29 @@ jobs:
       - name: Compile benchmarks
         run: cargo bench --no-run
 
+      - name: Verify nightly benchmark coverage
+        run: node scripts/check-benchmark-coverage.mjs
+
+      - name: Produce caller-shaped smoke receipt
+        env:
+          VICIA_BENCH_RECEIPT: target/benchmark-receipts/vetch-cadence-smoke.json
+          VICIA_BENCH_SOURCE_COMMIT: ${{ github.sha }}
+          VICIA_BENCH_SOURCE_DIRTY: "false"
+          VICIA_BENCH_TESTBED: ubuntu-latest-shared
+        run: |
+          mkdir -p target/benchmark-receipts
+          cargo bench --bench vetch_cadence_benchmark -- smoke \
+            > target/benchmark-receipts/vetch-cadence-smoke.csv
+          node scripts/check-benchmark-receipt.mjs \
+            target/benchmark-receipts/vetch-cadence-smoke.json
+
+      - name: Upload caller-shaped smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: vetch-cadence-smoke-receipt
+          path: target/benchmark-receipts/
+          if-no-files-found: error
+
   benchmark:
     name: bench / ${{ matrix.name }}
     runs-on: ubuntu-latest
@@ -65,6 +88,12 @@ jobs:
           - name: query
             filter: "^query/"
             file: bench_query.txt
+            threshold: "0.99"
+
+          # ── Decay candidate queries ────────────────────────────────────────
+          - name: decay
+            filter: "^decay/"
+            file: bench_decay.txt
             threshold: "0.99"
 
           # ── Sequential: time_travel ─────────────────────────────────────────
@@ -174,6 +203,30 @@ jobs:
           - name: udf
             filter: "^udf/"
             file: bench_udf.txt
+            threshold: "0.99"
+
+          # ── Prepared query execution ───────────────────────────────────────
+          - name: prepared
+            filter: "^prepared/"
+            file: bench_prepared.txt
+            threshold: "0.99"
+
+          # ── Retraction throughput ──────────────────────────────────────────
+          - name: retract
+            filter: "^retract/"
+            file: bench_retract.txt
+            threshold: "0.99"
+
+          # ── Direct B+tree lookups ──────────────────────────────────────────
+          - name: btree_lookup
+            filter: "^btree_lookup/"
+            file: bench_btree_lookup.txt
+            threshold: "0.99"
+
+          # ── Scalar/SIMD comparison groups ──────────────────────────────────
+          - name: simd
+            filter: "^simd_"
+            file: bench_simd.txt
             threshold: "0.99"
 
     steps:

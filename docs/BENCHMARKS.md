@@ -42,6 +42,35 @@ against older i7 rows.
 
 Benchmarks were run with [Criterion 0.8](https://bheisler.github.io/criterion.rs/book/). Each benchmark group is described below.
 
+### Evidence contract and CI coverage
+
+Nightly CI treats `benches/minigraf_bench.rs` as the Criterion group source of
+truth. `node scripts/check-benchmark-coverage.mjs` verifies both directions:
+every literal Criterion group must match a nightly workflow filter, and every
+workflow filter must match at least one group. This prevents a newly added group
+from compiling successfully while remaining absent from longitudinal tracking.
+
+Caller-shaped harnesses retain their existing human-readable output and may
+also emit `vicia.benchmark.receipt.v1` JSON. The first adopter is the Vetch
+cadence harness:
+
+```bash
+VICIA_BENCH_RECEIPT=target/vetch-cadence-smoke.json \
+VICIA_BENCH_TESTBED=local-a0 \
+cargo bench --bench vetch_cadence_benchmark -- smoke
+node scripts/check-benchmark-receipt.mjs target/vetch-cadence-smoke.json
+```
+
+The receipt records source and executable provenance, testbed identity,
+configuration, sorted raw latency samples, nearest-rank p50/p95/max, file
+growth, and correctness checks. A series with fewer than 20 observations keeps
+its p95 value for inspection but marks its sample count ineligible. Smoke mode
+receipts are never acceptance-eligible, and a full receipt is eligible only
+when every series has enough observations and the source checkout is clean.
+Absolute performance budgets remain caller-owned; this first receipt slice does
+not reinterpret the existing Bencher prediction thresholds as
+percentage-regression allowances.
+
 ### How to read these numbers
 
 **All times are per-call latency** — the time for a single operation (one insert, one query, one open, etc.), not a total or cumulative time.
