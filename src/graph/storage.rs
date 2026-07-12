@@ -59,6 +59,8 @@ pub struct PendingMemoryDiagnostics {
     pub avet: PendingMemoryComponent,
     /// Pending VAET index payload (only `Value::Ref` facts).
     pub vaet: PendingMemoryComponent,
+    /// Number of live sorted runs in EAVT, AEVT, AVET, and VAET order.
+    pub index_run_counts: [u64; 4],
     /// Sum across all accounted live components.
     pub total_accounted_bytes: u64,
     /// Bytes not represented by the accounting: tree nodes, hash controls,
@@ -771,7 +773,7 @@ impl FactStorage {
             0,
             0,
         );
-        let index_component = |(entries, capacity)| {
+        let index_component = |(entries, capacity, _)| {
             memory_component(
                 entries,
                 capacity,
@@ -793,6 +795,12 @@ impl FactStorage {
             aevt,
             avet,
             vaet,
+            index_run_counts: [
+                usize_to_u64(shape.eavt.2),
+                usize_to_u64(shape.aevt.2),
+                usize_to_u64(shape.avet.2),
+                usize_to_u64(shape.vaet.2),
+            ],
             total_accounted_bytes: sum_component_bytes(&[
                 facts,
                 duplicate_keys,

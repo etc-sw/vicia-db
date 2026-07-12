@@ -1,3 +1,8 @@
+// Pending IDs and run cursors are constructed exclusively from these owned
+// vectors; indexing expresses that internal invariant without adding a branch
+// to every comparison in the hot merge path.
+#![allow(clippy::indexing_slicing)]
+
 use crate::graph::types::{Fact, Value};
 use crate::storage::index::{AevtKey, EavtKey, encode_value};
 use anyhow::Result;
@@ -367,7 +372,7 @@ impl PendingOverlay {
                 .filter_map(Option::as_ref)
                 .map(Vec::capacity)
                 .sum();
-            (runs.len, capacity)
+            (runs.len, capacity, runs.run_count())
         };
         PendingOverlayMemoryShape {
             records_len: self.records.len(),
@@ -391,16 +396,6 @@ impl PendingOverlay {
             avet: run_shape(&self.indexes.avet),
             vaet: run_shape(&self.indexes.vaet),
         }
-    }
-
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn run_counts(&self) -> (usize, usize, usize, usize) {
-        (
-            self.indexes.eavt.run_count(),
-            self.indexes.aevt.run_count(),
-            self.indexes.avet.run_count(),
-            self.indexes.vaet.run_count(),
-        )
     }
 
     fn find_duplicate(&self, fact: &Fact) -> Option<PendingFactId> {
@@ -445,10 +440,10 @@ pub(crate) struct PendingOverlayMemoryShape {
     pub(crate) duplicate_buckets: usize,
     pub(crate) duplicate_capacity: usize,
     pub(crate) duplicate_ids: usize,
-    pub(crate) eavt: (usize, usize),
-    pub(crate) aevt: (usize, usize),
-    pub(crate) avet: (usize, usize),
-    pub(crate) vaet: (usize, usize),
+    pub(crate) eavt: (usize, usize, usize),
+    pub(crate) aevt: (usize, usize, usize),
+    pub(crate) avet: (usize, usize, usize),
+    pub(crate) vaet: (usize, usize, usize),
 }
 
 fn identity_hash(fact: &Fact) -> u64 {

@@ -322,6 +322,12 @@ function validateMemoryAudit(variant) {
       pending.vaet.entries === 0,
     `${variant.label}: pending component entry ownership mismatch`,
   );
+  assert(
+    Array.isArray(pending.indexRunCounts) &&
+      pending.indexRunCounts.length === 4 &&
+      pending.indexRunCounts.every((count) => Number.isSafeInteger(count) && count >= 0 && count <= 21),
+    `${variant.label}: pending sorted run bound`,
+  );
 
   const wal = audit.walReplay;
   const expectedPeakWalFacts = Math.min(1_000, variant.pendingFacts);
