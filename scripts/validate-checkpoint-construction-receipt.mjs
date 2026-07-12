@@ -6,7 +6,8 @@ if (!path || !["smoke", "full"].includes(profile)) process.exit(2);
 const receipt = JSON.parse(readFileSync(path, "utf8"));
 const facts = profile === "full" ? 1_000_000 : 10_000;
 const repetitions = profile === "full" ? 20 : 5;
-assert(receipt.schema === "vicia.checkpoint-construction.v1", "schema");
+assert(receipt.schema === "vicia.checkpoint-construction.v2", "schema");
+assert(/^[0-9a-f]{40}$/.test(receipt.sourceCommit), "source commit");
 assert(receipt.baseFacts === facts && receipt.repetitions === repetitions, "profile");
 assert(receipt.variants.map((v) => v.pendingFacts).join(",") === "1,10,100,1000", "variants");
 for (const variant of receipt.variants) {
@@ -17,16 +18,22 @@ for (const variant of receipt.variants) {
     assert(sample.diagnostics.peakTypedEntries === facts + variant.pendingFacts, "typed entry bound");
     assert(sample.diagnostics.factPageVisits > 0, "page visits");
     assert(sample.diagnostics.peakSerializedBytes <= 4096, "serialized byte frontier");
+    for (const [name, phase] of [["checkpoint", sample.checkpoint], ["recompact", sample.recompact]]) {
+      assert(phase.postHwmBytes >= phase.baselineHwmBytes, `${name}: monotonic HWM`);
+      assert(phase.conservativePeakRssBytes >= phase.postHwmBytes, `${name}: HWM-backed peak`);
+      assert(phase.sampledPeakRssBytes >= phase.baselineRssBytes, `${name}: sampled peak`);
+      assert(phase.hwmGrowthBytes === phase.postHwmBytes - phase.baselineHwmBytes, `${name}: HWM growth`);
+    }
   }
 }
 if (profile === "full") {
   assert(receipt.trackedClean, "clean full source");
   const all = receipt.variants.flatMap((variant) => variant.samples);
-  assert(Math.max(...all.map((sample) => sample.recompactDeltaRssBytes)) <= 640 * 1024 * 1024, "RSS gate");
+  assert(Math.max(...all.map((sample) => sample.recompact.conservativeDeltaRssBytes)) <= 640 * 1024 * 1024, "RSS gate");
   for (const variant of receipt.variants) {
-    const checkpoints = variant.samples.map((sample) => sample.checkpointElapsedMs).sort((a, b) => a - b);
+    const checkpoints = variant.samples.map((sample) => sample.checkpoint.elapsedMs).sort((a, b) => a - b);
     assert(percentile(checkpoints, 95) <= 50, `${variant.pendingFacts}: checkpoint p95 gate`);
-    const times = variant.samples.map((sample) => sample.recompactElapsedMs).sort((a, b) => a - b);
+    const times = variant.samples.map((sample) => sample.recompact.elapsedMs).sort((a, b) => a - b);
     const p50 = percentile(times, 50);
     const p95 = percentile(times, 95);
     assert(p50 <= 7510 * 1.10, `${variant.pendingFacts}: p50 gate`);

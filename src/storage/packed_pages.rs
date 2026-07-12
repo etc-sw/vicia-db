@@ -71,6 +71,7 @@ pub fn pack_facts(facts: &[Fact], start_page_id: u64) -> Result<(Vec<Vec<u8>>, V
 /// allowing callers to stream facts instead of materializing a full fact slice.
 pub struct PackedFactPacker {
     start_page_id: u64,
+    completed_page_count: u64,
     pages: Vec<Vec<u8>>,
     current_page: Vec<u8>,
     current_record_count: u16,
@@ -82,6 +83,7 @@ impl PackedFactPacker {
     pub fn new(start_page_id: u64) -> Self {
         Self {
             start_page_id,
+            completed_page_count: 0,
             pages: Vec::new(),
             current_page: new_packed_page(),
             current_record_count: 0,
@@ -115,6 +117,10 @@ impl PackedFactPacker {
             write_record_count(&mut self.current_page, self.current_record_count);
             let flushed_page = std::mem::replace(&mut self.current_page, new_packed_page());
             self.pages.push(flushed_page);
+            self.completed_page_count = self
+                .completed_page_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("packed fact page count overflow"))?;
             self.current_record_count = 0;
             self.dir_offset = PACKED_HEADER_SIZE;
             self.data_offset = PAGE_SIZE;
@@ -163,10 +169,10 @@ impl PackedFactPacker {
             .copy_from_slice(&len_u16.to_le_bytes());
         self.dir_offset = self.dir_offset.saturating_add(4);
 
-        let page_id = self.start_page_id.saturating_add(
-            u64::try_from(self.pages.len())
-                .map_err(|_| anyhow::anyhow!("too many pages: overflows u64"))?,
-        );
+        let page_id = self
+            .start_page_id
+            .checked_add(self.completed_page_count)
+            .ok_or_else(|| anyhow::anyhow!("packed fact page id overflow"))?;
         let fact_ref = FactRef {
             page_id,
             slot_index: self.current_record_count,
@@ -594,15 +600,31 @@ mod tests {
     #[test]
     fn draining_completed_pages_preserves_exact_layout() {
         let facts: Vec<Fact> = (0..200).map(make_fact).collect();
-        let (expected, _) = pack_facts(&facts, 7).unwrap();
+        let (expected_pages, expected_refs) = pack_facts(&facts, 7).unwrap();
         let mut packer = PackedFactPacker::new(7);
-        let mut actual = Vec::new();
+        let mut actual_pages = Vec::new();
+        let mut actual_refs = Vec::new();
         for fact in &facts {
-            packer.push(fact).unwrap();
-            actual.extend(packer.take_completed_pages());
+            actual_refs.push(packer.push(fact).unwrap());
+            actual_pages.extend(packer.take_completed_pages());
         }
-        actual.extend(packer.finish());
-        assert_eq!(actual, expected, "streaming drain must be byte-identical");
+        actual_pages.extend(packer.finish());
+        assert_eq!(
+            actual_pages, expected_pages,
+            "streaming drain must be byte-identical"
+        );
+        assert_eq!(
+            actual_refs, expected_refs,
+            "draining pages must not reset physical FactRef numbering"
+        );
+        for (expected_fact, fact_ref) in facts.iter().zip(actual_refs) {
+            let page_index = usize::try_from(fact_ref.page_id - 7).unwrap();
+            let resolved = read_slot(&expected_pages[page_index], fact_ref.slot_index).unwrap();
+            assert_eq!(
+                resolved, *expected_fact,
+                "FactRef must resolve its source fact"
+            );
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &str = "vicia.checkpoint-construction.v1";
+const SCHEMA: &str = "vicia.checkpoint-construction.v2";
 const PENDING: &[u64] = &[1, 10, 100, 1_000];
 
 #[derive(Clone, Copy)]
@@ -69,18 +69,33 @@ struct Variant {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Sample {
-    checkpoint_elapsed_ms: f64,
-    checkpoint_baseline_rss_bytes: u64,
-    checkpoint_peak_rss_bytes: u64,
-    checkpoint_delta_rss_bytes: u64,
-    recompact_elapsed_ms: f64,
-    recompact_baseline_rss_bytes: u64,
-    recompact_peak_rss_bytes: u64,
-    recompact_delta_rss_bytes: u64,
+    checkpoint: PhaseMeasurement,
+    recompact: PhaseMeasurement,
     graph_bytes: u64,
     count: u64,
     checksum: i128,
     diagnostics: CheckpointConstructionDiagnostics,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhaseMeasurement {
+    elapsed_ms: f64,
+    baseline_rss_bytes: u64,
+    baseline_hwm_bytes: u64,
+    sampled_peak_rss_bytes: u64,
+    post_rss_bytes: u64,
+    post_hwm_bytes: u64,
+    conservative_peak_rss_bytes: u64,
+    conservative_delta_rss_bytes: u64,
+    hwm_growth_bytes: u64,
+    sampler_observations: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ProcessMemory {
+    rss_bytes: u64,
+    hwm_bytes: u64,
 }
 
 fn main() -> Result<()> {
@@ -149,7 +164,7 @@ fn run(profile: Profile, output: &Path) -> Result<()> {
         base_facts: profile.base_facts(),
         repetitions: profile.repetitions(),
         generated_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-        source_commit: command_text("git", &["rev-parse", "HEAD"])?,
+        source_commit: git_source_commit()?,
         tracked_clean: command_text("git", &["status", "--short", "--untracked-files=no"])?
             .is_empty(),
         variants,
@@ -211,14 +226,8 @@ fn measure_sample(base: &Path, path: &Path, base_facts: u64, pending: u64) -> Re
         bail!("base count mismatch")
     }
     Ok(Sample {
-        checkpoint_elapsed_ms: checkpoint.0,
-        checkpoint_baseline_rss_bytes: checkpoint.1,
-        checkpoint_peak_rss_bytes: checkpoint.2,
-        checkpoint_delta_rss_bytes: checkpoint.2.saturating_sub(checkpoint.1),
-        recompact_elapsed_ms: recompact.0,
-        recompact_baseline_rss_bytes: recompact.1,
-        recompact_peak_rss_bytes: recompact.2,
-        recompact_delta_rss_bytes: recompact.2.saturating_sub(recompact.1),
+        checkpoint,
+        recompact,
         graph_bytes: fs::metadata(path)?.len(),
         count,
         checksum,
@@ -247,28 +256,47 @@ fn aggregate(db: &Minigraf) -> Result<(u64, i128)> {
     ))
 }
 
-fn sampled<T>(operation: impl FnOnce() -> Result<T>) -> Result<(f64, u64, u64)> {
-    let baseline = rss_bytes()?;
+fn sampled<T>(operation: impl FnOnce() -> Result<T>) -> Result<PhaseMeasurement> {
+    let baseline = process_memory()?;
     let running = Arc::new(AtomicBool::new(true));
-    let peak = Arc::new(AtomicU64::new(baseline));
+    let peak = Arc::new(AtomicU64::new(baseline.rss_bytes));
+    let observations = Arc::new(AtomicU64::new(0));
     let r = running.clone();
     let p = peak.clone();
+    let o = observations.clone();
     let sampler = std::thread::spawn(move || {
         while r.load(Ordering::Relaxed) {
-            if let Ok(value) = rss_bytes() {
-                p.fetch_max(value, Ordering::Relaxed);
+            if let Ok(value) = process_memory() {
+                p.fetch_max(value.rss_bytes, Ordering::Relaxed);
+                o.fetch_add(1, Ordering::Relaxed);
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     });
     let started = Instant::now();
-    operation()?;
+    let operation_result = operation();
     let elapsed = started.elapsed().as_secs_f64() * 1_000.0;
     running.store(false, Ordering::SeqCst);
     sampler
         .join()
         .map_err(|_| anyhow::anyhow!("RSS sampler panicked"))?;
-    Ok((elapsed, baseline, peak.load(Ordering::SeqCst)))
+    operation_result?;
+    let post = process_memory()?;
+    let sampled_peak_rss_bytes = peak.load(Ordering::SeqCst);
+    let conservative_peak_rss_bytes = sampled_peak_rss_bytes.max(post.hwm_bytes);
+    Ok(PhaseMeasurement {
+        elapsed_ms: elapsed,
+        baseline_rss_bytes: baseline.rss_bytes,
+        baseline_hwm_bytes: baseline.hwm_bytes,
+        sampled_peak_rss_bytes,
+        post_rss_bytes: post.rss_bytes,
+        post_hwm_bytes: post.hwm_bytes,
+        conservative_peak_rss_bytes,
+        conservative_delta_rss_bytes: conservative_peak_rss_bytes
+            .saturating_sub(baseline.rss_bytes),
+        hwm_growth_bytes: post.hwm_bytes.saturating_sub(baseline.hwm_bytes),
+        sampler_observations: observations.load(Ordering::SeqCst),
+    })
 }
 
 fn remove_graph(path: &Path) {
@@ -293,22 +321,66 @@ fn child_json<T: for<'de> Deserialize<'de>>(executable: &Path, args: &[&str]) ->
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 fn command_text(command: &str, args: &[&str]) -> Result<String> {
-    Ok(
-        String::from_utf8(Command::new(command).args(args).output()?.stdout)?
-            .trim()
-            .to_owned(),
-    )
+    let output = Command::new(command).args(args).output()?;
+    if !output.status.success() {
+        bail!(
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
-fn rss_bytes() -> Result<u64> {
+fn git_source_commit() -> Result<String> {
+    let commit = command_text("git", &["rev-parse", "HEAD"])?;
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("git rev-parse returned an invalid commit id")
+    }
+    Ok(commit)
+}
+fn process_memory() -> Result<ProcessMemory> {
     let status = fs::read_to_string("/proc/self/status")?;
-    let line = status
-        .lines()
-        .find(|line| line.starts_with("VmRSS:"))
-        .context("VmRSS missing")?;
-    Ok(line
-        .split_whitespace()
-        .nth(1)
-        .context("VmRSS value missing")?
-        .parse::<u64>()?
-        .saturating_mul(1024))
+    let read_kib = |label: &str| -> Result<u64> {
+        let line = status
+            .lines()
+            .find(|line| line.starts_with(label))
+            .with_context(|| format!("{label} missing"))?;
+        Ok(line
+            .split_whitespace()
+            .nth(1)
+            .with_context(|| format!("{label} value missing"))?
+            .parse::<u64>()?
+            .saturating_mul(1024))
+    };
+    Ok(ProcessMemory {
+        rss_bytes: read_kib("VmRSS:")?,
+        hwm_bytes: read_kib("VmHWM:")?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provenance_command_rejects_nonzero_exit() {
+        assert!(
+            command_text("git", &["not-a-real-subcommand"]).is_err(),
+            "failed provenance commands must not produce receipt text"
+        );
+    }
+
+    #[test]
+    fn source_commit_has_full_git_identity() {
+        let commit = git_source_commit().unwrap();
+        assert_eq!(commit.len(), 40);
+        assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn short_phase_has_hwm_backed_peak() {
+        let phase = sampled(|| Ok(())).unwrap();
+        assert!(phase.post_hwm_bytes >= phase.baseline_hwm_bytes);
+        assert!(phase.conservative_peak_rss_bytes >= phase.post_hwm_bytes);
+        assert!(phase.sampled_peak_rss_bytes >= phase.baseline_rss_bytes);
+    }
 }
