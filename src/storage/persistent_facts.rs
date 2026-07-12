@@ -8,8 +8,8 @@ use crate::storage::FACT_PAGE_FORMAT_PACKED;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::backend::file::FileBackend;
 use crate::storage::btree_v6::{
-    MutexStorageBackend, OnDiskIndexReader, btree_entries, build_btree, merge_sorted_vecs,
-    stream_all_entries,
+    BtreeBuildOptions, MutexStorageBackend, OnDiskIndexReader, btree_entries,
+    build_btree_with_options, merge_sorted_vecs, stream_all_entries,
 };
 use crate::storage::cache::PageCache;
 use crate::storage::delta_growth::{DeltaGrowthMetrics, DeltaMaintenanceDecision};
@@ -953,6 +953,7 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     committed_fact_page_start: Arc<AtomicU64>,
     base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
     write_blocked_legacy: bool,
+    btree_build_options: BtreeBuildOptions,
 }
 
 impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
@@ -964,6 +965,27 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     /// `page_cache_capacity` controls the LRU page cache size (in pages).
     /// A value of 256 means at most 256 x 4KB = 1MB of cached pages.
     pub fn new(backend: B, page_cache_capacity: usize) -> Result<Self> {
+        Self::new_with_btree_options(backend, page_cache_capacity, BtreeBuildOptions::default())
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn new_with_btree_fill_percent(
+        backend: B,
+        page_cache_capacity: usize,
+        fill_percent: u8,
+    ) -> Result<Self> {
+        Self::new_with_btree_options(
+            backend,
+            page_cache_capacity,
+            BtreeBuildOptions::new(fill_percent)?,
+        )
+    }
+
+    fn new_with_btree_options(
+        backend: B,
+        page_cache_capacity: usize,
+        btree_build_options: BtreeBuildOptions,
+    ) -> Result<Self> {
         let backend = Arc::new(Mutex::new(backend));
         let page_cache = Arc::new(PageCache::new(page_cache_capacity));
         let committed_fact_pages = Arc::new(AtomicU64::new(0));
@@ -983,6 +1005,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             committed_fact_page_start,
             base_integrity: None,
             write_blocked_legacy: false,
+            btree_build_options,
         };
 
         // Try to load existing data.
@@ -1008,6 +1031,21 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
 
         Ok(persistent)
+    }
+
+    fn build_btree(
+        &self,
+        entries: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        backend: &mut dyn StorageBackend,
+        start_page_id: u64,
+    ) -> Result<(u64, u64)> {
+        build_btree_with_options(
+            entries,
+            backend,
+            &self.page_cache,
+            start_page_id,
+            self.btree_build_options,
+        )
     }
 
     fn base_fact_loader(&self) -> Arc<dyn CommittedFactReader> {
@@ -1489,28 +1527,24 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let index_start = 1u64
             .checked_add(num_fact_pages)
             .ok_or_else(|| anyhow::anyhow!("page count overflow computing index start"))?;
-        let (eavt_root, next1) = build_btree(
+        let (eavt_root, next1) = self.build_btree(
             btree_entries(eavt_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             index_start,
         )?;
-        let (aevt_root, next2) = build_btree(
+        let (aevt_root, next2) = self.build_btree(
             btree_entries(aevt_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             next1,
         )?;
-        let (avet_root, next3) = build_btree(
+        let (avet_root, next3) = self.build_btree(
             btree_entries(avet_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             next2,
         )?;
-        let (vaet_root, next4) = build_btree(
+        let (vaet_root, next4) = self.build_btree(
             btree_entries(vaet_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             next3,
         )?;
         let total_data_pages = next4.saturating_sub(1);
@@ -1682,28 +1716,24 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .ok_or_else(|| {
                 anyhow::anyhow!("page count overflow computing recompact index_start")
             })?;
-        let (eavt_root, next1) = build_btree(
+        let (eavt_root, next1) = self.build_btree(
             btree_entries(eavt_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             index_start,
         )?;
-        let (aevt_root, next2) = build_btree(
+        let (aevt_root, next2) = self.build_btree(
             btree_entries(aevt_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             next1,
         )?;
-        let (avet_root, next3) = build_btree(
+        let (avet_root, next3) = self.build_btree(
             btree_entries(avet_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             next2,
         )?;
-        let (vaet_root, next4) = build_btree(
+        let (vaet_root, next4) = self.build_btree(
             btree_entries(vaet_entries.into_iter())?.into_iter(),
             &mut *backend,
-            &self.page_cache,
             next3,
         )?;
 
@@ -2062,28 +2092,24 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                     .ok_or_else(|| anyhow::anyhow!("page id overflow writing fact pages"))?;
                 backend.write_page(page_id, page_data)?;
             }
-            let (eavt_root, next1) = build_btree(
+            let (eavt_root, next1) = self.build_btree(
                 btree_entries(eavt_entries.into_iter())?.into_iter(),
                 &mut *backend,
-                &self.page_cache,
                 index_start,
             )?;
-            let (aevt_root, next2) = build_btree(
+            let (aevt_root, next2) = self.build_btree(
                 btree_entries(aevt_entries.into_iter())?.into_iter(),
                 &mut *backend,
-                &self.page_cache,
                 next1,
             )?;
-            let (avet_root, next3) = build_btree(
+            let (avet_root, next3) = self.build_btree(
                 btree_entries(avet_entries.into_iter())?.into_iter(),
                 &mut *backend,
-                &self.page_cache,
                 next2,
             )?;
-            let (vaet_root, next4) = build_btree(
+            let (vaet_root, next4) = self.build_btree(
                 btree_entries(vaet_entries.into_iter())?.into_iter(),
                 &mut *backend,
-                &self.page_cache,
                 next3,
             )?;
 
@@ -2564,36 +2590,29 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         } else {
             btree_entries(pending_eavt.into_iter())?
         };
-        let (eavt_root, next1) = build_btree(
-            eavt_ser.into_iter(),
-            &mut *backend,
-            &self.page_cache,
-            index_start,
-        )?;
+        let (eavt_root, next1) =
+            self.build_btree(eavt_ser.into_iter(), &mut *backend, index_start)?;
 
         let aevt_ser = if !committed_aevt.is_empty() {
             btree_entries(merge_sorted_vecs(committed_aevt, pending_aevt))?
         } else {
             btree_entries(pending_aevt.into_iter())?
         };
-        let (aevt_root, next2) =
-            build_btree(aevt_ser.into_iter(), &mut *backend, &self.page_cache, next1)?;
+        let (aevt_root, next2) = self.build_btree(aevt_ser.into_iter(), &mut *backend, next1)?;
 
         let avet_ser = if !committed_avet.is_empty() {
             btree_entries(merge_sorted_vecs(committed_avet, pending_avet))?
         } else {
             btree_entries(pending_avet.into_iter())?
         };
-        let (avet_root, next3) =
-            build_btree(avet_ser.into_iter(), &mut *backend, &self.page_cache, next2)?;
+        let (avet_root, next3) = self.build_btree(avet_ser.into_iter(), &mut *backend, next2)?;
 
         let vaet_ser = if !committed_vaet.is_empty() {
             btree_entries(merge_sorted_vecs(committed_vaet, pending_vaet))?
         } else {
             btree_entries(pending_vaet.into_iter())?
         };
-        let (vaet_root, next4) =
-            build_btree(vaet_ser.into_iter(), &mut *backend, &self.page_cache, next3)?;
+        let (vaet_root, next4) = self.build_btree(vaet_ser.into_iter(), &mut *backend, next3)?;
 
         // Sync index pages to disk before writing the header.
         // The header update is the atomic commit point: once it's durable,

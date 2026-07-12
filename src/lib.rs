@@ -116,6 +116,11 @@ pub use db::WalReplayMemoryDiagnostics;
 pub use graph::storage::{
     CurrentAttributeCursorDiagnostics, PendingMemoryComponent, PendingMemoryDiagnostics,
 };
+#[cfg(feature = "bench-internals")]
+pub use storage::layout_diagnostics::{
+    PrefixEstimate, StorageIndexLayout, StorageLayoutDiagnostics, StoragePageLayout,
+    inspect_storage_layout,
+};
 
 // Query result type
 pub use query::datalog::executor::QueryResult;

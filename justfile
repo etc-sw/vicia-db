@@ -31,3 +31,11 @@ pending-isolation-smoke OUTPUT_DIR="target/pending-isolation/smoke":
 # Run the clean-source 0/10K/100K/1M unrelated pending acceptance matrix.
 pending-isolation-full OUTPUT_DIR="target/pending-isolation/full":
     ./scripts/run-pending-isolation-bench.sh full "{{OUTPUT_DIR}}"
+
+# Measure the 10K B-tree fill-factor and storage-layout matrix.
+storage-layout-smoke OUTPUT_DIR="target/storage-layout/smoke":
+    ./scripts/run-storage-layout-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Measure the clean 1M/20-sample B-tree fill-factor matrix.
+storage-layout-full OUTPUT_DIR="target/storage-layout/full":
+    ./scripts/run-storage-layout-bench.sh full "{{OUTPUT_DIR}}"

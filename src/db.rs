@@ -330,6 +330,9 @@ pub struct OpenOptions {
     pub max_derived_facts: usize,
     /// Maximum total query results. Defaults to 1_000_000.
     pub max_results: usize,
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub benchmark_btree_fill_percent: u8,
 }
 
 impl Default for OpenOptions {
@@ -339,6 +342,8 @@ impl Default for OpenOptions {
             page_cache_size: 256,
             max_derived_facts: DEFAULT_MAX_DERIVED_FACTS,
             max_results: DEFAULT_MAX_RESULTS,
+            #[cfg(feature = "bench-internals")]
+            benchmark_btree_fill_percent: crate::storage::btree_v6::DEFAULT_BTREE_FILL_PERCENT,
         }
     }
 }
@@ -372,6 +377,13 @@ impl OpenOptions {
     /// Defaults to 1_000_000. Use lower values to limit result set size.
     pub fn max_results(mut self, n: usize) -> Self {
         self.max_results = n;
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn benchmark_btree_fill_percent(mut self, fill_percent: u8) -> Self {
+        self.benchmark_btree_fill_percent = fill_percent;
         self
     }
 
@@ -684,6 +696,13 @@ impl Minigraf {
 
         // Open the main .graph file
         let backend = FileBackend::open(&db_path)?;
+        #[cfg(feature = "bench-internals")]
+        let pfs = PersistentFactStorage::new_with_btree_fill_percent(
+            backend,
+            opts.page_cache_size,
+            opts.benchmark_btree_fill_percent,
+        )?;
+        #[cfg(not(feature = "bench-internals"))]
         let pfs = PersistentFactStorage::new(backend, opts.page_cache_size)?;
 
         // Share the fact storage
@@ -3496,6 +3515,8 @@ mod tests {
             page_cache_size: 256,
             max_derived_facts: 100_000,
             max_results: 1_000_000,
+            #[cfg(feature = "bench-internals")]
+            benchmark_btree_fill_percent: 75,
         };
         let db = Minigraf::open_with_options(&path, opts).unwrap();
         assert_eq!(db.inner.options.wal_checkpoint_threshold, 5);

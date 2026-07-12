@@ -15,6 +15,8 @@ pub(crate) mod delta_manifest;
 pub(crate) mod delta_segment;
 pub(crate) mod header_extension;
 pub mod index;
+#[cfg(feature = "bench-internals")]
+pub mod layout_diagnostics;
 pub mod packed_pages;
 pub(crate) mod page_integrity;
 pub mod persistent_facts;

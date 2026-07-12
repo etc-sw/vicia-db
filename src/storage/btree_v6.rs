@@ -28,8 +28,35 @@ const LEAF_HEADER_SIZE: usize = 12;
 const INTERNAL_HEADER_SIZE: usize = 12;
 /// Slot directory entry: offset(u16) + length(u16) = 4 bytes.
 const SLOT_SIZE: usize = 4;
-/// Fill-factor threshold: stop packing once total used bytes exceed this (~75% of PAGE_SIZE).
-const PAGE_FILL_BYTES: usize = PAGE_SIZE * 3 / 4;
+/// Production bulk-build fill percentage. This changes packing policy only;
+/// every resulting page retains the same v11 byte format.
+pub(crate) const DEFAULT_BTREE_FILL_PERCENT: u8 = 75;
+
+#[derive(Clone, Copy)]
+pub(crate) struct BtreeBuildOptions {
+    fill_percent: u8,
+}
+
+impl BtreeBuildOptions {
+    pub(crate) fn new(fill_percent: u8) -> Result<Self> {
+        if !(50..=100).contains(&fill_percent) {
+            anyhow::bail!("B-tree fill percent must be between 50 and 100")
+        }
+        Ok(Self { fill_percent })
+    }
+
+    fn fill_bytes(self) -> usize {
+        PAGE_SIZE.saturating_mul(usize::from(self.fill_percent)) / 100
+    }
+}
+
+impl Default for BtreeBuildOptions {
+    fn default() -> Self {
+        Self {
+            fill_percent: DEFAULT_BTREE_FILL_PERCENT,
+        }
+    }
+}
 
 // ─── Safe slice access helpers ───────────────────────────────────────────────
 
@@ -194,12 +221,30 @@ pub fn btree_entries<K: Serialize>(
 ///
 /// All written pages are inserted into `cache` via `put_dirty`.
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_btree(
     sorted_entries: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
     backend: &mut dyn StorageBackend,
     cache: &PageCache,
     start_page_id: u64,
 ) -> Result<(u64, u64)> {
+    build_btree_with_options(
+        sorted_entries,
+        backend,
+        cache,
+        start_page_id,
+        BtreeBuildOptions::default(),
+    )
+}
+
+pub(crate) fn build_btree_with_options(
+    sorted_entries: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+    backend: &mut dyn StorageBackend,
+    cache: &PageCache,
+    start_page_id: u64,
+    options: BtreeBuildOptions,
+) -> Result<(u64, u64)> {
+    let page_fill_bytes = options.fill_bytes();
     // ── Phase 1: pack entries into leaf pages ─────────────────────────────────
     let mut leaf_infos: Vec<(u64, Vec<u8>)> = Vec::new();
 
@@ -214,7 +259,11 @@ pub fn build_btree(
             + cur_data_bytes
             + entry_bytes.len();
 
-        if projected > PAGE_FILL_BYTES && !cur_entries.is_empty() {
+        if projected > PAGE_SIZE && cur_entries.is_empty() {
+            anyhow::bail!("B-tree leaf entry does not fit in one page")
+        }
+
+        if projected > page_fill_bytes && !cur_entries.is_empty() {
             write_leaf_page(backend, cache, next_page, &cur_entries, 0)?;
             let first_key = cur_first_key.take().ok_or_else(|| {
                 anyhow::anyhow!("BUG: cur_first_key empty when writing leaf page")
@@ -317,7 +366,11 @@ pub fn build_btree(
                     + sep_data_bytes
                     + sep.len();
 
-                if projected > PAGE_FILL_BYTES && !sep_bytes.is_empty() {
+                if projected > PAGE_SIZE && sep_bytes.is_empty() {
+                    anyhow::bail!("B-tree separator does not fit in one page")
+                }
+
+                if projected > page_fill_bytes && !sep_bytes.is_empty() {
                     break;
                 }
 
@@ -984,6 +1037,14 @@ mod tests {
     use crate::storage::backend::MemoryBackend;
     use crate::storage::index::{EavtKey, FactRef, encode_value};
     use uuid::Uuid;
+
+    #[test]
+    fn btree_fill_percent_is_bounded() {
+        assert!(BtreeBuildOptions::new(49).is_err());
+        assert!(BtreeBuildOptions::new(50).is_ok());
+        assert!(BtreeBuildOptions::new(100).is_ok());
+        assert!(BtreeBuildOptions::new(101).is_err());
+    }
 
     fn make_eavt(n: u128, attr: &str, tx: u64) -> (EavtKey, FactRef) {
         (
