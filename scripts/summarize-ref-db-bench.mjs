@@ -19,12 +19,14 @@ const expectedChecksum = facts * (facts - 1) / 2;
 
 for (const receipt of receipts) {
   if (
-    receipt.schema !== "vicia.ref-db-bench.v1" ||
+    receipt.schema !== "vicia.ref-db-bench.v2" ||
     receipt.facts !== facts ||
     receipt.count !== facts ||
     receipt.checksum !== expectedChecksum ||
-    !Array.isArray(receipt.aggregateSamplesMs) ||
-    receipt.aggregateSamplesMs.length !== (profile === "full" ? 20 : 5)
+    !Array.isArray(receipt.memory?.aggregateSamplesMs) ||
+    receipt.memory.aggregateSamplesMs.length !== (profile === "full" ? 20 : 5) ||
+    receipt.memory.count !== facts ||
+    receipt.memory.checksum !== expectedChecksum
   ) {
     throw new Error(`${receipt.engine}: invalid or incorrect receipt`);
   }
@@ -40,7 +42,7 @@ const sourceCommits = Object.fromEntries(
 sourceCommits.vicia = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 const rows = receipts.map((receipt) => {
-  const samples = [...receipt.aggregateSamplesMs].sort((a, b) => a - b);
+  const samples = [...receipt.memory.aggregateSamplesMs].sort((a, b) => a - b);
   return {
     engine: receipt.engine,
     role: receipt.role,
@@ -50,7 +52,10 @@ const rows = receipts.map((receipt) => {
     p50Ms: round(percentile(samples, 50)),
     p95Ms: round(percentile(samples, 95)),
     maxMs: round(samples.at(-1)),
-    rssMiB: round(receipt.peakRssBytes / 1024 / 1024),
+    baselineRssMiB: toMiB(receipt.memory.openBaselineRssBytes),
+    deltaRssMiB: toMiB(receipt.memory.workloadDeltaRssBytes),
+    peakRssMiB: toMiB(receipt.memory.workloadPeakRssBytes),
+    retainedRssMiB: toMiB(receipt.memory.retainedRssBytes),
     storageMiB: round(receipt.storageBytes / 1024 / 1024),
     count: receipt.count,
     checksum: receipt.checksum,
@@ -58,7 +63,7 @@ const rows = receipts.map((receipt) => {
 });
 
 const report = {
-  schema: "vicia.ref-db-bench.summary.v1",
+  schema: "vicia.ref-db-bench.summary.v2",
   profile,
   facts,
   repetitions: profile === "full" ? 20 : 5,
@@ -67,14 +72,15 @@ const report = {
     engineAggregate: ["vicia", "grafeo", "turso", "cozo"],
     ownedResultScan: ["redb", "fjall"],
     warning: "Engine aggregate and owned result scan are different contracts and must not be ranked in one column.",
-    timing: "Database open is excluded from aggregate samples; build includes database creation and durable inserts.",
+    timing: "Aggregate samples run in a fresh child process. Database open is excluded; build runs in the parent process.",
+    memory: "Baseline is VmRSS after open. Delta is VmHWM minus baseline. Retained is final VmRSS minus baseline. Values are process-wide Linux RSS.",
   },
   rows,
 };
 writeFileSync(join(outputDir, "summary.json"), `${JSON.stringify(report, null, 2)}\n`);
 
-const header = ["engine", "role", "boundary", "build ms", "point read ms", "aggregate/scan p50 ms", "p95 ms", "max ms", "peak RSS MiB", "storage MiB", "correct"];
-const tableRows = rows.map((row) => [row.engine, row.role, row.boundary, row.buildMs, row.pointReadMs, row.p50Ms, row.p95Ms, row.maxMs, row.rssMiB, row.storageMiB, "yes"]);
+const header = ["engine", "role", "boundary", "build ms", "point read ms", "aggregate/scan p50 ms", "p95 ms", "open baseline RSS MiB", "workload delta RSS MiB", "peak RSS MiB", "retained RSS MiB", "storage MiB", "correct"];
+const tableRows = rows.map((row) => [row.engine, row.role, row.boundary, row.buildMs, row.pointReadMs, row.p50Ms, row.p95Ms, row.baselineRssMiB, row.deltaRssMiB, row.peakRssMiB, row.retainedRssMiB, row.storageMiB, "yes"]);
 const markdown = [
   `# Vicia reference DB comparison (${profile})`,
   "",
@@ -85,6 +91,7 @@ const markdown = [
   ...tableRows.map((row) => `| ${row.join(" | ")} |`),
   "",
   "`engineAggregate` and `ownedResultScan` are separate contracts. redb and Fjall are storage floors, not graph/query-engine peers.",
+  "Memory columns come from the fresh aggregate/scan child, so build high-water memory does not contaminate them.",
   "Every row passed the same exact count and arithmetic-checksum validation.",
   "",
 ].join("\n");
@@ -100,3 +107,6 @@ function round(value) {
   return Math.round(value * 1000) / 1000;
 }
 
+function toMiB(bytes) {
+  return round(bytes / 1024 / 1024);
+}

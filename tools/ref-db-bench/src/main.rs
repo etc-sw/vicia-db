@@ -4,10 +4,11 @@ use fjall::{Database as FjallDatabase, KeyspaceCreateOptions};
 use grafeo::{GrafeoDB, Value as GrafeoValue};
 use minigraf::{OpenOptions, QueryResult};
 use redb::{Database as RedbDatabase, ReadableDatabase, ReadableTable, TableDefinition};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 use turso::Builder as TursoBuilder;
 
@@ -84,13 +85,35 @@ struct Receipt {
     aggregate_samples_ms: Vec<f64>,
     count: u64,
     checksum: i128,
-    peak_rss_bytes: Option<u64>,
+    memory: MemoryMeasurement,
     storage_bytes: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryMeasurement {
+    aggregate_samples_ms: Vec<f64>,
+    count: u64,
+    checksum: i128,
+    open_baseline_rss_bytes: u64,
+    workload_peak_rss_bytes: u64,
+    workload_delta_rss_bytes: u64,
+    retained_rss_bytes: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 5 && args[1] == "measure" {
+        let measurement = measure_fresh(
+            Engine::parse(&args[2])?,
+            Path::new(&args[3]),
+            args[4].parse()?,
+        )
+        .await?;
+        println!("{}", serde_json::to_string(&measurement)?);
+        return Ok(());
+    }
     if args.len() != 6 || args[1] != "run" {
         bail!("usage: vicia-ref-db-bench run <engine> <data-dir> <facts> <repetitions>");
     }
@@ -135,8 +158,15 @@ fn receipt(
             engine.id()
         );
     }
+    let memory = measure_in_child(engine, dir, samples.len())?;
+    if memory.count != facts || memory.checksum != expected {
+        bail!(
+            "{} fresh memory measurement correctness mismatch",
+            engine.id()
+        );
+    }
     Ok(Receipt {
-        schema: "vicia.ref-db-bench.v1",
+        schema: "vicia.ref-db-bench.v2",
         engine: engine.id(),
         role: engine.role(),
         execution_boundary: engine.boundary(),
@@ -146,9 +176,27 @@ fn receipt(
         aggregate_samples_ms: samples,
         count,
         checksum,
-        peak_rss_bytes: peak_rss_bytes(),
+        memory,
         storage_bytes: directory_bytes(dir)?,
     })
+}
+
+fn measure_in_child(engine: Engine, dir: &Path, repetitions: usize) -> Result<MemoryMeasurement> {
+    let output = Command::new(std::env::current_exe()?)
+        .arg("measure")
+        .arg(engine.id())
+        .arg(dir)
+        .arg(repetitions.to_string())
+        .output()
+        .with_context(|| format!("launch fresh {} memory measurement", engine.id()))?;
+    if !output.status.success() {
+        bail!(
+            "fresh {} memory measurement failed: {}",
+            engine.id(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("decode fresh memory measurement")
 }
 
 fn run_vicia(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Result<Receipt> {
@@ -179,6 +227,7 @@ fn run_vicia(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
         final_pair = vicia_aggregate(&db)?;
         samples.push(elapsed(started));
     }
+    drop(db);
     receipt(
         engine,
         dir,
@@ -263,6 +312,7 @@ fn run_redb(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
         final_pair = (count, sum);
         samples.push(elapsed(started));
     }
+    drop(db);
     receipt(
         engine,
         dir,
@@ -314,6 +364,8 @@ fn run_fjall(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
         final_pair = (count, sum);
         samples.push(elapsed(started));
     }
+    drop(items);
+    drop(db);
     receipt(
         engine,
         dir,
@@ -366,6 +418,8 @@ fn run_grafeo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Res
         final_pair = (u64::try_from(count)?, i128::from(sum));
         samples.push(elapsed(started));
     }
+    drop(session);
+    db.close()?;
     receipt(
         engine,
         dir,
@@ -448,6 +502,7 @@ fn run_cozo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
         );
         samples.push(elapsed(started));
     }
+    drop(db);
     receipt(
         engine,
         dir,
@@ -526,6 +581,10 @@ async fn run_turso(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -
         );
         samples.push(elapsed(started));
     }
+    drop(row);
+    drop(rows);
+    drop(conn);
+    drop(db);
     receipt(
         engine,
         dir,
@@ -538,6 +597,146 @@ async fn run_turso(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -
     )
 }
 
+async fn measure_fresh(
+    engine: Engine,
+    dir: &Path,
+    repetitions: usize,
+) -> Result<MemoryMeasurement> {
+    match engine {
+        Engine::Vicia => {
+            let db = OpenOptions::new().path(dir.join("vicia.graph")).open()?;
+            measure_loaded(repetitions, || vicia_aggregate(&db))
+        }
+        Engine::Grafeo => {
+            let db = GrafeoDB::open(dir.join("grafeo"))?;
+            let session = db.session();
+            measure_loaded(repetitions, || {
+                let result = session.execute("MATCH (n:Fact) RETURN COUNT(n), SUM(n.value)")?;
+                let row = result
+                    .rows()
+                    .first()
+                    .context("Grafeo aggregate returned no row")?;
+                let count = row
+                    .first()
+                    .and_then(|v| v.as_int64())
+                    .context("missing Grafeo count")?;
+                let sum = row
+                    .get(1)
+                    .and_then(|v| v.as_int64())
+                    .context("missing Grafeo sum")?;
+                Ok((u64::try_from(count)?, i128::from(sum)))
+            })
+        }
+        Engine::Redb => {
+            let db = RedbDatabase::open(dir.join("redb.db"))?;
+            measure_loaded(repetitions, || {
+                let tx = db.begin_read()?;
+                let table = tx.open_table(REDB_FACTS)?;
+                let mut count = 0_u64;
+                let mut checksum = 0_i128;
+                for entry in table.iter()? {
+                    let (_, value) = entry?;
+                    count += 1;
+                    checksum += i128::from(value.value());
+                }
+                Ok((count, checksum))
+            })
+        }
+        Engine::Fjall => {
+            let db = FjallDatabase::builder(dir.join("fjall")).open()?;
+            let items = db.keyspace("facts", KeyspaceCreateOptions::default)?;
+            measure_loaded(repetitions, || {
+                let mut count = 0_u64;
+                let mut checksum = 0_i128;
+                for entry in items.iter() {
+                    let value = entry.value()?;
+                    let bytes: [u8; 8] = value.as_ref().try_into()?;
+                    count += 1;
+                    checksum += i128::from(u64::from_be_bytes(bytes));
+                }
+                Ok((count, checksum))
+            })
+        }
+        Engine::Turso => {
+            let path = dir.join("turso.db");
+            let db = TursoBuilder::new_local(&path.to_string_lossy())
+                .build()
+                .await?;
+            let conn = db.connect()?;
+            let baseline = current_rss_bytes().context("read Turso baseline RSS")?;
+            let mut samples = Vec::with_capacity(repetitions);
+            let mut pair = (0_u64, 0_i128);
+            for _ in 0..repetitions {
+                let started = Instant::now();
+                let mut rows = conn
+                    .query("SELECT COUNT(*), COALESCE(SUM(value), 0) FROM facts", ())
+                    .await?;
+                let row = rows.next().await?.context("Turso aggregate missing")?;
+                pair = (
+                    u64::try_from(row.get::<i64>(0)?)?,
+                    i128::from(row.get::<i64>(1)?),
+                );
+                samples.push(elapsed(started));
+            }
+            finish_memory_measurement(baseline, samples, pair)
+        }
+        Engine::Cozo => {
+            let db = cozo_open(&dir.join("cozo.db"))?;
+            measure_loaded(repetitions, || {
+                let result = db
+                    .run_script(
+                        "?[count(value), sum(value)] := *facts{value}",
+                        BTreeMap::new(),
+                        ScriptMutability::Immutable,
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let row = result.rows.first().context("Cozo aggregate missing")?;
+                Ok((
+                    u64::try_from(
+                        row.first()
+                            .and_then(data_i64)
+                            .context("Cozo count missing")?,
+                    )?,
+                    i128::from(row.get(1).and_then(data_i64).context("Cozo sum missing")?),
+                ))
+            })
+        }
+    }
+}
+
+fn measure_loaded(
+    repetitions: usize,
+    mut workload: impl FnMut() -> Result<(u64, i128)>,
+) -> Result<MemoryMeasurement> {
+    let baseline = current_rss_bytes().context("read open baseline RSS")?;
+    let mut samples = Vec::with_capacity(repetitions);
+    let mut pair = (0_u64, 0_i128);
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        pair = workload()?;
+        samples.push(elapsed(started));
+    }
+    finish_memory_measurement(baseline, samples, pair)
+}
+
+fn finish_memory_measurement(
+    baseline: u64,
+    samples: Vec<f64>,
+    pair: (u64, i128),
+) -> Result<MemoryMeasurement> {
+    let retained = current_rss_bytes().context("read retained RSS")?;
+    let peak = peak_rss_bytes().context("read peak RSS")?;
+    Ok(MemoryMeasurement {
+        aggregate_samples_ms: samples,
+        count: pair.0,
+        checksum: pair.1,
+        open_baseline_rss_bytes: baseline,
+        workload_peak_rss_bytes: peak,
+        workload_delta_rss_bytes: peak.saturating_sub(baseline),
+        retained_rss_bytes: retained.saturating_sub(baseline),
+    })
+}
+
 fn elapsed(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
 }
@@ -545,6 +744,16 @@ fn elapsed(started: Instant) -> f64 {
 fn peak_rss_bytes() -> Option<u64> {
     let status = fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    line.split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+fn current_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
     line.split_whitespace()
         .nth(1)?
         .parse::<u64>()
