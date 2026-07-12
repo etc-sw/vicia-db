@@ -132,17 +132,23 @@ fn run(profile: Profile, output: &Path) -> Result<()> {
         &executable,
         &["base", text_path(&base)?, &profile.base_facts().to_string()],
     )?;
-    let mut variants = Vec::new();
-    for pending in PENDING {
-        let mut samples = Vec::new();
-        for repetition in 0..profile.repetitions() {
+    let mut variants = PENDING
+        .iter()
+        .map(|pending| Variant {
+            pending_facts: *pending,
+            samples: Vec::with_capacity(profile.repetitions()),
+        })
+        .collect::<Vec<_>>();
+    for repetition in 0..profile.repetitions() {
+        for variant in &mut variants {
+            let pending = variant.pending_facts;
             eprintln!(
                 "checkpoint-construction: pending-{pending} {}/{}",
                 repetition + 1,
                 profile.repetitions()
             );
             let sample_path = output.join(format!("pending-{pending}.graph"));
-            samples.push(child_json(
+            variant.samples.push(child_json(
                 &executable,
                 &[
                     "sample",
@@ -153,10 +159,6 @@ fn run(profile: Profile, output: &Path) -> Result<()> {
                 ],
             )?);
         }
-        variants.push(Variant {
-            pending_facts: *pending,
-            samples,
-        });
     }
     let receipt = Receipt {
         schema: SCHEMA,
