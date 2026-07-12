@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 fn normalize_legacy_retractions(facts: &mut [Fact]) {
     for fact in facts {
@@ -219,7 +219,7 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
 
 struct LayeredFactLoaderImpl {
     base: Arc<dyn CommittedFactReader>,
-    delta_facts: BTreeMap<FactRef, Fact>,
+    delta_facts: Arc<RwLock<BTreeMap<FactRef, Fact>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,28 +836,34 @@ fn plan_browser_manifest_segments(
 }
 
 impl LayeredFactLoaderImpl {
-    fn new(base: Arc<dyn CommittedFactReader>, segments: &[DeltaSegment]) -> Self {
-        let mut delta_facts = BTreeMap::new();
-        for segment in segments {
-            for (fact_ref, fact) in segment.payload().facts() {
-                delta_facts.insert(*fact_ref, fact.clone());
-            }
-        }
+    fn new(
+        base: Arc<dyn CommittedFactReader>,
+        delta_facts: Arc<RwLock<BTreeMap<FactRef, Fact>>>,
+    ) -> Self {
         Self { base, delta_facts }
     }
 }
 
 impl CommittedFactReader for LayeredFactLoaderImpl {
     fn resolve(&self, fact_ref: FactRef) -> anyhow::Result<Fact> {
-        if let Some(fact) = self.delta_facts.get(&fact_ref) {
+        let delta_facts = self
+            .delta_facts
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(fact) = delta_facts.get(&fact_ref) {
             return Ok(fact.clone());
         }
+        drop(delta_facts);
         self.base.resolve(fact_ref)
     }
 
     fn stream_all(&self) -> anyhow::Result<Vec<Fact>> {
         let mut facts = self.base.stream_all()?;
-        facts.extend(self.delta_facts.values().cloned());
+        let delta_facts = self
+            .delta_facts
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        facts.extend(delta_facts.values().cloned());
         Ok(facts)
     }
 
@@ -866,7 +872,14 @@ impl CommittedFactReader for LayeredFactLoaderImpl {
         visit: &mut dyn FnMut(Fact) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         self.base.for_each_fact(visit)?;
-        for fact in self.delta_facts.values().cloned() {
+        let delta_facts: Vec<Fact> = self
+            .delta_facts
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for fact in delta_facts {
             visit(fact)?;
         }
         Ok(())
@@ -881,7 +894,11 @@ impl CommittedFactReader for LayeredFactLoaderImpl {
         // probe; delta facts already live in memory, so the filter below is
         // proportional to the delta size, not the committed graph size.
         self.base.for_each_fact_since(since_tx_count, visit)?;
-        for fact in self.delta_facts.values() {
+        let delta_facts = self
+            .delta_facts
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        for fact in delta_facts.values() {
             if fact.tx_count > since_tx_count {
                 visit(fact.clone())?;
             }
@@ -926,10 +943,12 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     last_checkpointed_tx_count: u64,
     header_manifest_selection: HeaderManifestSlotSelection,
     delta_manifest_selection: PersistedManifestSelection,
-    /// Decoded segments selected by the current manifest. Keep them resident
-    /// for the lifetime of the handle: checkpoint appends one new segment and
-    /// must not reread every previously selected segment from the backend.
-    resident_delta_segments: Vec<DeltaSegment>,
+    /// Shared committed delta state for the selected manifest. A checkpoint
+    /// extends these maps with only the newly published segment instead of
+    /// rereading or rematerializing the complete selected lineage.
+    resident_delta_segment_count: usize,
+    resident_delta_facts: Option<Arc<RwLock<BTreeMap<FactRef, Fact>>>>,
+    resident_delta_indexes: Option<Arc<RwLock<DeltaIndexEntries>>>,
     committed_fact_pages: Arc<AtomicU64>,
     committed_fact_page_start: Arc<AtomicU64>,
     base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
@@ -957,7 +976,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             last_checkpointed_tx_count: 0,
             header_manifest_selection: HeaderManifestSlotSelection::NoDeltaManifest,
             delta_manifest_selection: PersistedManifestSelection::NoDeltaManifest,
-            resident_delta_segments: Vec::new(),
+            resident_delta_segment_count: 0,
+            resident_delta_facts: None,
+            resident_delta_indexes: None,
             committed_fact_pages,
             committed_fact_page_start,
             base_integrity: None,
@@ -1004,17 +1025,45 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         })
     }
 
-    fn wire_committed_readers(&mut self, header: &FileHeader) -> Result<()> {
-        let delta_segments = self.resident_delta_segments.as_slice();
+    fn wire_committed_readers(
+        &mut self,
+        header: &FileHeader,
+        delta_segments: Vec<DeltaSegment>,
+    ) -> Result<()> {
+        let mut delta_facts = BTreeMap::new();
+        let mut eavt = Vec::new();
+        let mut aevt = Vec::new();
+        let mut avet = Vec::new();
+        let mut vaet = Vec::new();
+        for segment in &delta_segments {
+            let payload = segment.payload();
+            delta_facts.extend(payload.facts().iter().cloned());
+            eavt.extend(payload.eavt.iter().cloned());
+            aevt.extend(payload.aevt.iter().cloned());
+            avet.extend(payload.avet.iter().cloned());
+            vaet.extend(payload.vaet.iter().cloned());
+        }
+
+        let resident_delta_facts =
+            (!delta_segments.is_empty()).then(|| Arc::new(RwLock::new(delta_facts)));
+        let resident_delta_indexes = (!delta_segments.is_empty()).then(|| {
+            Arc::new(RwLock::new(DeltaIndexEntries::from_entries(
+                eavt, aevt, avet, vaet,
+            )))
+        });
         let base_loader = self.base_fact_loader();
-        let fact_reader: Arc<dyn CommittedFactReader> = if delta_segments.is_empty() {
-            base_loader
-        } else {
-            Arc::new(LayeredFactLoaderImpl::new(base_loader, delta_segments))
+        let fact_reader: Arc<dyn CommittedFactReader> = match &resident_delta_facts {
+            Some(delta_facts) => {
+                Arc::new(LayeredFactLoaderImpl::new(base_loader, delta_facts.clone()))
+            }
+            None => base_loader,
         };
         self.storage.set_committed_reader(fact_reader);
 
         if header.eavt_root_page == 0 {
+            self.resident_delta_segment_count = delta_segments.len();
+            self.resident_delta_facts = resident_delta_facts;
+            self.resident_delta_indexes = resident_delta_indexes;
             return Ok(());
         }
 
@@ -1037,37 +1086,46 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 header.vaet_root_page,
             ),
         });
-        let index_reader: Arc<dyn CommittedIndexReader> = if delta_segments.is_empty() {
-            base_index_reader
-        } else {
-            let mut eavt = Vec::new();
-            let mut aevt = Vec::new();
-            let mut avet = Vec::new();
-            let mut vaet = Vec::new();
-            for segment in delta_segments {
-                let payload = segment.payload();
-                eavt.extend(payload.eavt.iter().cloned());
-                aevt.extend(payload.aevt.iter().cloned());
-                avet.extend(payload.avet.iter().cloned());
-                vaet.extend(payload.vaet.iter().cloned());
+        let index_reader: Arc<dyn CommittedIndexReader> = match &resident_delta_indexes {
+            Some(delta_indexes) => {
+                let base_keyed_reader: Arc<dyn KeyedIndexReader> = base_index_reader;
+                Arc::new(LayeredIndexReader::new_shared(
+                    base_keyed_reader,
+                    delta_indexes.clone(),
+                ))
             }
-            let base_keyed_reader: Arc<dyn KeyedIndexReader> = base_index_reader;
-            Arc::new(LayeredIndexReader::new(
-                base_keyed_reader,
-                DeltaIndexEntries::from_entries(eavt, aevt, avet, vaet),
-            ))
+            None => base_index_reader,
         };
         self.storage.set_committed_index_reader(index_reader);
+        self.resident_delta_segment_count = delta_segments.len();
+        self.resident_delta_facts = resident_delta_facts;
+        self.resident_delta_indexes = resident_delta_indexes;
         Ok(())
     }
 
-    fn replace_resident_delta_segments(
-        &mut self,
-        header: &FileHeader,
-        delta_segments: Vec<DeltaSegment>,
-    ) -> Result<()> {
-        self.resident_delta_segments = delta_segments;
-        self.wire_committed_readers(header)
+    fn append_resident_delta_segment(&mut self, segment: &DeltaSegment) -> Result<()> {
+        let resident_delta_facts = self
+            .resident_delta_facts
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Resident delta fact state is missing"))?;
+        let resident_delta_indexes = self
+            .resident_delta_indexes
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Resident delta index state is missing"))?;
+        let payload = segment.payload();
+        resident_delta_facts
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(payload.facts().iter().cloned());
+        resident_delta_indexes
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend_from_entries(&payload.eavt, &payload.aevt, &payload.avet, &payload.vaet);
+        self.resident_delta_segment_count = self
+            .resident_delta_segment_count
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Resident delta segment count overflow"))?;
+        Ok(())
     }
 
     fn load_usable_delta_selection(
@@ -1484,7 +1542,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.last_checkpointed_tx_count = checkpoint_tx_count;
         self.storage.restore_tx_counter_from(checkpoint_tx_count);
         self.dirty = false;
-        self.replace_resident_delta_segments(&header, Vec::new())?;
+        self.wire_committed_readers(&header, Vec::new())?;
         self.storage.post_checkpoint_clear();
         Ok(())
     }
@@ -1708,7 +1766,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.base_integrity = Some(candidate.base_integrity);
         self.last_checkpointed_tx_count = candidate.checkpoint_tx_count;
         self.dirty = false;
-        self.replace_resident_delta_segments(&candidate.header, Vec::new())?;
+        self.wire_committed_readers(&candidate.header, Vec::new())?;
         self.storage.post_checkpoint_clear();
         Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
     }
@@ -2063,7 +2121,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             self.committed_fact_page_start.store(1, Ordering::SeqCst);
             self.base_integrity = Some(integrity.catalog);
 
-            self.replace_resident_delta_segments(&new_header, Vec::new())?;
+            self.wire_committed_readers(&new_header, Vec::new())?;
         } else {
             // No rebuild needed - validate header checksum for v7+ files
             // Re-read header from disk to get any updates from rebuild path
@@ -2083,7 +2141,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
 
             if header.eavt_root_page != 0 {
-                self.replace_resident_delta_segments(&header, selected_delta_segments)?;
+                self.wire_committed_readers(&header, selected_delta_segments)?;
             }
         }
         // else: empty DB — indexes are empty by default, nothing to do.
@@ -2306,12 +2364,12 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let (base_identity, mut manifest_segments) = if let Some(manifest) =
             selected_delta_manifest.as_ref()
         {
-            if manifest.segments().len() != self.resident_delta_segments.len() {
+            if manifest.segments().len() != self.resident_delta_segment_count {
                 anyhow::bail!("Resident delta segment count does not match the selected manifest");
             }
             (manifest.base_identity(), manifest.segments().to_vec())
         } else {
-            if !self.resident_delta_segments.is_empty() {
+            if self.resident_delta_segment_count != 0 {
                 anyhow::bail!("Resident delta segments exist without a selected manifest");
             }
             (DeltaBaseIdentity::from_header(&curr_header), Vec::new())
@@ -2378,8 +2436,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         };
         self.last_checkpointed_tx_count = self.storage.current_tx_count();
         self.dirty = false;
-        self.resident_delta_segments.push(segment);
-        self.wire_committed_readers(&header)?;
+        if self.resident_delta_segment_count == 0 {
+            self.wire_committed_readers(&header, vec![segment])?;
+        } else {
+            self.append_resident_delta_segment(&segment)?;
+        }
         self.storage.post_checkpoint_clear();
         Ok(Some(CheckpointOutcome::DeltaSegment))
     }
@@ -2587,7 +2648,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.dirty = false;
 
         // ── Step F: wire verified committed readers ──────────────────────────────
-        self.replace_resident_delta_segments(&header, Vec::new())?;
+        self.wire_committed_readers(&header, Vec::new())?;
 
         // Clear pending — all data now on disk
         self.storage.post_checkpoint_clear();
@@ -6413,7 +6474,7 @@ mod tests {
             1,
             "checkpoint should read page 0, not replay older delta pages"
         );
-        assert_eq!(storage.resident_delta_segments.len(), 2);
+        assert_eq!(storage.resident_delta_segment_count, 2);
         assert_eq!(
             storage
                 .storage()

@@ -1,7 +1,8 @@
 use crate::storage::CommittedIndexReader;
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey};
 use anyhow::Result;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 pub(crate) trait KeyedIndexReader: Send + Sync {
     fn range_scan_eavt_entries(
@@ -31,10 +32,10 @@ pub(crate) trait KeyedIndexReader: Send + Sync {
 
 #[derive(Clone, Default)]
 pub(crate) struct DeltaIndexEntries {
-    eavt: Vec<(EavtKey, FactRef)>,
-    aevt: Vec<(AevtKey, FactRef)>,
-    avet: Vec<(AvetKey, FactRef)>,
-    vaet: Vec<(VaetKey, FactRef)>,
+    eavt: BTreeMap<EavtKey, FactRef>,
+    aevt: BTreeMap<AevtKey, FactRef>,
+    avet: BTreeMap<AvetKey, FactRef>,
+    vaet: BTreeMap<VaetKey, FactRef>,
 }
 
 impl DeltaIndexEntries {
@@ -45,33 +46,51 @@ impl DeltaIndexEntries {
 
     #[allow(dead_code)]
     pub(crate) fn from_entries(
-        mut eavt: Vec<(EavtKey, FactRef)>,
-        mut aevt: Vec<(AevtKey, FactRef)>,
-        mut avet: Vec<(AvetKey, FactRef)>,
-        mut vaet: Vec<(VaetKey, FactRef)>,
+        eavt: Vec<(EavtKey, FactRef)>,
+        aevt: Vec<(AevtKey, FactRef)>,
+        avet: Vec<(AvetKey, FactRef)>,
+        vaet: Vec<(VaetKey, FactRef)>,
     ) -> Self {
-        eavt.sort_by(|a, b| a.0.cmp(&b.0));
-        aevt.sort_by(|a, b| a.0.cmp(&b.0));
-        avet.sort_by(|a, b| a.0.cmp(&b.0));
-        vaet.sort_by(|a, b| a.0.cmp(&b.0));
-
         Self {
-            eavt,
-            aevt,
-            avet,
-            vaet,
+            eavt: eavt.into_iter().collect(),
+            aevt: aevt.into_iter().collect(),
+            avet: avet.into_iter().collect(),
+            vaet: vaet.into_iter().collect(),
         }
+    }
+
+    pub(crate) fn extend_from_entries(
+        &mut self,
+        eavt: &[(EavtKey, FactRef)],
+        aevt: &[(AevtKey, FactRef)],
+        avet: &[(AvetKey, FactRef)],
+        vaet: &[(VaetKey, FactRef)],
+    ) {
+        self.eavt.extend(eavt.iter().cloned());
+        self.aevt.extend(aevt.iter().cloned());
+        self.avet.extend(avet.iter().cloned());
+        self.vaet.extend(vaet.iter().cloned());
     }
 }
 
 pub(crate) struct LayeredIndexReader {
     base: Arc<dyn KeyedIndexReader>,
-    delta: DeltaIndexEntries,
+    delta: Arc<RwLock<DeltaIndexEntries>>,
 }
 
 impl LayeredIndexReader {
     #[allow(dead_code)]
     pub(crate) fn new(base: Arc<dyn KeyedIndexReader>, delta: DeltaIndexEntries) -> Self {
+        Self {
+            base,
+            delta: Arc::new(RwLock::new(delta)),
+        }
+    }
+
+    pub(crate) fn new_shared(
+        base: Arc<dyn KeyedIndexReader>,
+        delta: Arc<RwLock<DeltaIndexEntries>>,
+    ) -> Self {
         Self { base, delta }
     }
 }
@@ -79,47 +98,49 @@ impl LayeredIndexReader {
 impl CommittedIndexReader for LayeredIndexReader {
     fn range_scan_eavt(&self, start: &EavtKey, end: Option<&EavtKey>) -> Result<Vec<FactRef>> {
         let base = self.base.range_scan_eavt_entries(start, end)?;
-        let delta = range_delta_entries(&self.delta.eavt, start, end);
+        let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
+        let delta = range_delta_entries(&delta.eavt, start, end);
         Ok(merge_entry_refs(base, delta))
     }
 
     fn range_scan_aevt(&self, start: &AevtKey, end: Option<&AevtKey>) -> Result<Vec<FactRef>> {
         let base = self.base.range_scan_aevt_entries(start, end)?;
-        let delta = range_delta_entries(&self.delta.aevt, start, end);
+        let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
+        let delta = range_delta_entries(&delta.aevt, start, end);
         Ok(merge_entry_refs(base, delta))
     }
 
     fn range_scan_avet(&self, start: &AvetKey, end: Option<&AvetKey>) -> Result<Vec<FactRef>> {
         let base = self.base.range_scan_avet_entries(start, end)?;
-        let delta = range_delta_entries(&self.delta.avet, start, end);
+        let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
+        let delta = range_delta_entries(&delta.avet, start, end);
         Ok(merge_entry_refs(base, delta))
     }
 
     fn range_scan_vaet(&self, start: &VaetKey, end: Option<&VaetKey>) -> Result<Vec<FactRef>> {
         let base = self.base.range_scan_vaet_entries(start, end)?;
-        let delta = range_delta_entries(&self.delta.vaet, start, end);
+        let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
+        let delta = range_delta_entries(&delta.vaet, start, end);
         Ok(merge_entry_refs(base, delta))
     }
 }
 
 fn range_delta_entries<K: Clone + Ord>(
-    entries: &[(K, FactRef)],
+    entries: &BTreeMap<K, FactRef>,
     start: &K,
     end: Option<&K>,
 ) -> Vec<(K, FactRef)> {
-    let mut out = Vec::new();
-    for (key, fact_ref) in entries {
-        if key < start {
-            continue;
-        }
-        if let Some(end) = end
-            && key >= end
-        {
-            break;
-        }
-        out.push((key.clone(), *fact_ref));
+    if let Some(end) = end {
+        entries
+            .range(start.clone()..end.clone())
+            .map(|(key, fact_ref)| (key.clone(), *fact_ref))
+            .collect()
+    } else {
+        entries
+            .range(start.clone()..)
+            .map(|(key, fact_ref)| (key.clone(), *fact_ref))
+            .collect()
     }
-    out
 }
 
 fn merge_entry_refs<K: Ord>(base: Vec<(K, FactRef)>, delta: Vec<(K, FactRef)>) -> Vec<FactRef> {
