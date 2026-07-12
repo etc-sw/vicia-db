@@ -19,7 +19,7 @@ const expectedChecksum = facts * (facts - 1) / 2;
 
 for (const receipt of receipts) {
   if (
-    receipt.schema !== "vicia.ref-db-bench.v2" ||
+    receipt.schema !== "vicia.ref-db-bench.v3" ||
     receipt.facts !== facts ||
     receipt.count !== facts ||
     receipt.checksum !== expectedChecksum ||
@@ -56,6 +56,12 @@ const rows = receipts.map((receipt) => {
     deltaRssMiB: toMiB(receipt.memory.workloadDeltaRssBytes),
     peakRssMiB: toMiB(receipt.memory.workloadPeakRssBytes),
     retainedRssMiB: toMiB(receipt.memory.retainedRssBytes),
+    baselineAnonymousMiB: toMiB(receipt.memory.baselineBreakdown.anonymousRssBytes),
+    baselineFileBackedMiB: toMiB(receipt.memory.baselineBreakdown.fileBackedRssBytes),
+    retainedAnonymousDeltaMiB: toMiB(receipt.memory.retainedDeltaBreakdown.anonymousRssBytes),
+    retainedFileBackedDeltaMiB: toMiB(receipt.memory.retainedDeltaBreakdown.fileBackedRssBytes),
+    retainedHeapMappingDeltaMiB: toMiB(receipt.memory.retainedDeltaBreakdown.heapMappingRssBytes),
+    retainedDatabaseMappedDeltaMiB: toMiB(receipt.memory.retainedDeltaBreakdown.databaseMappedRssBytes),
     storageMiB: round(receipt.storageBytes / 1024 / 1024),
     count: receipt.count,
     checksum: receipt.checksum,
@@ -63,7 +69,7 @@ const rows = receipts.map((receipt) => {
 });
 
 const report = {
-  schema: "vicia.ref-db-bench.summary.v2",
+  schema: "vicia.ref-db-bench.summary.v3",
   profile,
   facts,
   repetitions: profile === "full" ? 20 : 5,
@@ -73,7 +79,8 @@ const report = {
     ownedResultScan: ["redb", "fjall"],
     warning: "Engine aggregate and owned result scan are different contracts and must not be ranked in one column.",
     timing: "Aggregate samples run in a fresh child process. Database open is excluded; build runs in the parent process.",
-    memory: "Baseline is VmRSS after open. Delta is VmHWM minus baseline. Retained is final VmRSS minus baseline. Values are process-wide Linux RSS.",
+    memory: "Baseline is VmRSS after open. Delta is VmHWM minus baseline. Retained is final VmRSS minus baseline. smaps separates anonymous, file-backed, [heap], and mappings whose path is inside the database directory.",
+    kernelPageCache: "Not reported: Linux does not attribute buffered file-page cache to one process. databaseMappedRss covers only database files actually mmaped into this process.",
   },
   rows,
 };
@@ -81,6 +88,8 @@ writeFileSync(join(outputDir, "summary.json"), `${JSON.stringify(report, null, 2
 
 const header = ["engine", "role", "boundary", "build ms", "point read ms", "aggregate/scan p50 ms", "p95 ms", "open baseline RSS MiB", "workload delta RSS MiB", "peak RSS MiB", "retained RSS MiB", "storage MiB", "correct"];
 const tableRows = rows.map((row) => [row.engine, row.role, row.boundary, row.buildMs, row.pointReadMs, row.p50Ms, row.p95Ms, row.baselineRssMiB, row.deltaRssMiB, row.peakRssMiB, row.retainedRssMiB, row.storageMiB, "yes"]);
+const memoryHeader = ["engine", "baseline anonymous MiB", "baseline file-backed MiB", "retained anonymous delta MiB", "retained file-backed delta MiB", "retained [heap] delta MiB", "retained DB mmap delta MiB"];
+const memoryRows = rows.map((row) => [row.engine, row.baselineAnonymousMiB, row.baselineFileBackedMiB, row.retainedAnonymousDeltaMiB, row.retainedFileBackedDeltaMiB, row.retainedHeapMappingDeltaMiB, row.retainedDatabaseMappedDeltaMiB]);
 const markdown = [
   `# Vicia reference DB comparison (${profile})`,
   "",
@@ -90,8 +99,15 @@ const markdown = [
   `| ${header.map(() => "---").join(" | ")} |`,
   ...tableRows.map((row) => `| ${row.join(" | ")} |`),
   "",
+  "## Memory breakdown",
+  "",
+  `| ${memoryHeader.join(" | ")} |`,
+  `| ${memoryHeader.map(() => "---").join(" | ")} |`,
+  ...memoryRows.map((row) => `| ${row.join(" | ")} |`),
+  "",
   "`engineAggregate` and `ownedResultScan` are separate contracts. redb and Fjall are storage floors, not graph/query-engine peers.",
   "Memory columns come from the fresh aggregate/scan child, so build high-water memory does not contaminate them.",
+  "Kernel buffered page cache is not attributed to a process; DB mmap reports only resident mappings owned by the process.",
   "Every row passed the same exact count and arithmetic-checksum validation.",
   "",
 ].join("\n");

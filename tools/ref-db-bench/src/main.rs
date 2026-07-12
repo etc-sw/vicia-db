@@ -99,6 +99,37 @@ struct MemoryMeasurement {
     workload_peak_rss_bytes: u64,
     workload_delta_rss_bytes: u64,
     retained_rss_bytes: u64,
+    baseline_breakdown: MemoryBreakdown,
+    retained_breakdown: MemoryBreakdown,
+    retained_delta_breakdown: MemoryBreakdown,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryBreakdown {
+    anonymous_rss_bytes: u64,
+    file_backed_rss_bytes: u64,
+    heap_mapping_rss_bytes: u64,
+    database_mapped_rss_bytes: u64,
+}
+
+impl MemoryBreakdown {
+    fn saturating_sub(self, baseline: Self) -> Self {
+        Self {
+            anonymous_rss_bytes: self
+                .anonymous_rss_bytes
+                .saturating_sub(baseline.anonymous_rss_bytes),
+            file_backed_rss_bytes: self
+                .file_backed_rss_bytes
+                .saturating_sub(baseline.file_backed_rss_bytes),
+            heap_mapping_rss_bytes: self
+                .heap_mapping_rss_bytes
+                .saturating_sub(baseline.heap_mapping_rss_bytes),
+            database_mapped_rss_bytes: self
+                .database_mapped_rss_bytes
+                .saturating_sub(baseline.database_mapped_rss_bytes),
+        }
+    }
 }
 
 #[tokio::main]
@@ -166,7 +197,7 @@ fn receipt(
         );
     }
     Ok(Receipt {
-        schema: "vicia.ref-db-bench.v2",
+        schema: "vicia.ref-db-bench.v3",
         engine: engine.id(),
         role: engine.role(),
         execution_boundary: engine.boundary(),
@@ -605,12 +636,12 @@ async fn measure_fresh(
     match engine {
         Engine::Vicia => {
             let db = OpenOptions::new().path(dir.join("vicia.graph")).open()?;
-            measure_loaded(repetitions, || vicia_aggregate(&db))
+            measure_loaded(dir, repetitions, || vicia_aggregate(&db))
         }
         Engine::Grafeo => {
             let db = GrafeoDB::open(dir.join("grafeo"))?;
             let session = db.session();
-            measure_loaded(repetitions, || {
+            measure_loaded(dir, repetitions, || {
                 let result = session.execute("MATCH (n:Fact) RETURN COUNT(n), SUM(n.value)")?;
                 let row = result
                     .rows()
@@ -629,7 +660,7 @@ async fn measure_fresh(
         }
         Engine::Redb => {
             let db = RedbDatabase::open(dir.join("redb.db"))?;
-            measure_loaded(repetitions, || {
+            measure_loaded(dir, repetitions, || {
                 let tx = db.begin_read()?;
                 let table = tx.open_table(REDB_FACTS)?;
                 let mut count = 0_u64;
@@ -645,7 +676,7 @@ async fn measure_fresh(
         Engine::Fjall => {
             let db = FjallDatabase::builder(dir.join("fjall")).open()?;
             let items = db.keyspace("facts", KeyspaceCreateOptions::default)?;
-            measure_loaded(repetitions, || {
+            measure_loaded(dir, repetitions, || {
                 let mut count = 0_u64;
                 let mut checksum = 0_i128;
                 for entry in items.iter() {
@@ -664,6 +695,7 @@ async fn measure_fresh(
                 .await?;
             let conn = db.connect()?;
             let baseline = current_rss_bytes().context("read Turso baseline RSS")?;
+            let baseline_breakdown = memory_breakdown(dir)?;
             let mut samples = Vec::with_capacity(repetitions);
             let mut pair = (0_u64, 0_i128);
             for _ in 0..repetitions {
@@ -678,11 +710,17 @@ async fn measure_fresh(
                 );
                 samples.push(elapsed(started));
             }
-            finish_memory_measurement(baseline, samples, pair)
+            finish_memory_measurement_with_baseline(
+                dir,
+                baseline,
+                baseline_breakdown,
+                samples,
+                pair,
+            )
         }
         Engine::Cozo => {
             let db = cozo_open(&dir.join("cozo.db"))?;
-            measure_loaded(repetitions, || {
+            measure_loaded(dir, repetitions, || {
                 let result = db
                     .run_script(
                         "?[count(value), sum(value)] := *facts{value}",
@@ -705,10 +743,12 @@ async fn measure_fresh(
 }
 
 fn measure_loaded(
+    dir: &Path,
     repetitions: usize,
     mut workload: impl FnMut() -> Result<(u64, i128)>,
 ) -> Result<MemoryMeasurement> {
     let baseline = current_rss_bytes().context("read open baseline RSS")?;
+    let baseline_breakdown = memory_breakdown(dir)?;
     let mut samples = Vec::with_capacity(repetitions);
     let mut pair = (0_u64, 0_i128);
     for _ in 0..repetitions {
@@ -716,16 +756,19 @@ fn measure_loaded(
         pair = workload()?;
         samples.push(elapsed(started));
     }
-    finish_memory_measurement(baseline, samples, pair)
+    finish_memory_measurement_with_baseline(dir, baseline, baseline_breakdown, samples, pair)
 }
 
-fn finish_memory_measurement(
+fn finish_memory_measurement_with_baseline(
+    dir: &Path,
     baseline: u64,
+    baseline_breakdown: MemoryBreakdown,
     samples: Vec<f64>,
     pair: (u64, i128),
 ) -> Result<MemoryMeasurement> {
     let retained = current_rss_bytes().context("read retained RSS")?;
     let peak = peak_rss_bytes().context("read peak RSS")?;
+    let retained_breakdown = memory_breakdown(dir)?;
     Ok(MemoryMeasurement {
         aggregate_samples_ms: samples,
         count: pair.0,
@@ -734,6 +777,9 @@ fn finish_memory_measurement(
         workload_peak_rss_bytes: peak,
         workload_delta_rss_bytes: peak.saturating_sub(baseline),
         retained_rss_bytes: retained.saturating_sub(baseline),
+        baseline_breakdown,
+        retained_breakdown,
+        retained_delta_breakdown: retained_breakdown.saturating_sub(baseline_breakdown),
     })
 }
 
@@ -756,6 +802,60 @@ fn current_rss_bytes() -> Option<u64> {
     let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
     line.split_whitespace()
         .nth(1)?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+fn memory_breakdown(database_dir: &Path) -> Result<MemoryBreakdown> {
+    let smaps = fs::read_to_string("/proc/self/smaps").context("read /proc/self/smaps")?;
+    let database_dir = database_dir.canonicalize()?;
+    let database_prefix = database_dir.to_string_lossy();
+    let mut current_heap = false;
+    let mut current_database = false;
+    let mut total_rss = 0_u64;
+    let mut anonymous_rss = 0_u64;
+    let mut heap_rss = 0_u64;
+    let mut database_rss = 0_u64;
+
+    for line in smaps.lines() {
+        if is_smaps_header(line) {
+            let path = line.split_whitespace().nth(5).unwrap_or("");
+            current_heap = path == "[heap]";
+            current_database = !path.is_empty() && path.starts_with(database_prefix.as_ref());
+            continue;
+        }
+        if let Some(bytes) = smaps_kib_value(line, "Rss:") {
+            total_rss = total_rss.saturating_add(bytes);
+            if current_heap {
+                heap_rss = heap_rss.saturating_add(bytes);
+            }
+            if current_database {
+                database_rss = database_rss.saturating_add(bytes);
+            }
+        } else if let Some(bytes) = smaps_kib_value(line, "Anonymous:") {
+            anonymous_rss = anonymous_rss.saturating_add(bytes);
+        }
+    }
+
+    Ok(MemoryBreakdown {
+        anonymous_rss_bytes: anonymous_rss,
+        file_backed_rss_bytes: total_rss.saturating_sub(anonymous_rss),
+        heap_mapping_rss_bytes: heap_rss,
+        database_mapped_rss_bytes: database_rss,
+    })
+}
+
+fn is_smaps_header(line: &str) -> bool {
+    line.split_whitespace().next().is_some_and(|range| {
+        range.contains('-') && range.bytes().all(|b| b == b'-' || b.is_ascii_hexdigit())
+    })
+}
+
+fn smaps_kib_value(line: &str, field: &str) -> Option<u64> {
+    line.strip_prefix(field)?
+        .split_whitespace()
+        .next()?
         .parse::<u64>()
         .ok()?
         .checked_mul(1024)
