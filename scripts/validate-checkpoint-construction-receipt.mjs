@@ -24,6 +24,8 @@ if (profile === "full") {
   const all = receipt.variants.flatMap((variant) => variant.samples);
   assert(Math.max(...all.map((sample) => sample.recompactDeltaRssBytes)) <= 640 * 1024 * 1024, "RSS gate");
   for (const variant of receipt.variants) {
+    const checkpoints = variant.samples.map((sample) => sample.checkpointElapsedMs).sort((a, b) => a - b);
+    assert(percentile(checkpoints, 95) <= 50, `${variant.pendingFacts}: checkpoint p95 gate`);
     const times = variant.samples.map((sample) => sample.recompactElapsedMs).sort((a, b) => a - b);
     const p50 = percentile(times, 50);
     const p95 = percentile(times, 95);

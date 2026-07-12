@@ -186,7 +186,7 @@ fn build_base(path: &Path, facts: u64) -> Result<()> {
 
 fn measure_sample(base: &Path, path: &Path, base_facts: u64, pending: u64) -> Result<Sample> {
     remove_graph(path);
-    reflink_copy(base, path)?;
+    fs::copy(base, path)?;
     let db = Minigraf::open_with_options(
         path,
         OpenOptions {
@@ -270,17 +270,6 @@ fn sampled<T>(operation: impl FnOnce() -> Result<T>) -> Result<(f64, u64, u64)> 
     Ok((elapsed, baseline, peak.load(Ordering::SeqCst)))
 }
 
-fn reflink_copy(source: &Path, destination: &Path) -> Result<()> {
-    let status = Command::new("cp")
-        .arg("--reflink=auto")
-        .arg(source)
-        .arg(destination)
-        .status()?;
-    if !status.success() {
-        bail!("copy base graph failed")
-    }
-    Ok(())
-}
 fn remove_graph(path: &Path) {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{}.wal", path.display()));
