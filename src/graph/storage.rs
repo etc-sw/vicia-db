@@ -869,7 +869,11 @@ impl FactStorage {
 
         // Committed: on-disk B+tree range scan
         if let Some(reader) = &d.committed_index_reader {
-            let committed_refs = reader.range_scan_eavt(&start, Some(&end))?;
+            let mut committed_refs = reader.range_scan_eavt(&start, Some(&end))?;
+            // Index order is a query-planning concern, not a result-order
+            // contract. Resolve in packed-page order so broad entity histories
+            // do not churn the bounded page cache.
+            committed_refs.sort_unstable();
             for fr in committed_refs {
                 facts.push(resolve_fact_ref(&d, fr)?);
             }
@@ -956,7 +960,12 @@ impl FactStorage {
 
         // Committed
         if let Some(reader) = &d.committed_index_reader {
-            let committed_refs = reader.range_scan_aevt(&start, end_opt.as_ref())?;
+            let mut committed_refs = reader.range_scan_aevt(&start, end_opt.as_ref())?;
+            // AEVT key order can revisit the same packed fact page many times.
+            // Physical order makes each page cache-resident while all of its
+            // referenced slots are decoded. Net-assertion and Datalog result
+            // semantics are order-independent.
+            committed_refs.sort_unstable();
             for fr in committed_refs {
                 let fact = resolve_fact_ref(&d, fr)?;
                 if &fact.attribute == attribute {
@@ -2137,6 +2146,100 @@ mod tests {
             "storage should be usable after setting committed index reader"
         );
         assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn attribute_lookup_resolves_committed_refs_in_physical_page_order() {
+        use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey};
+        use crate::storage::{CommittedFactReader, CommittedIndexReader};
+        use std::sync::Arc;
+
+        struct Loader;
+        impl CommittedFactReader for Loader {
+            fn resolve(&self, fact_ref: FactRef) -> anyhow::Result<Fact> {
+                Ok(Fact::with_valid_time(
+                    uuid::Uuid::from_u128(u128::from(fact_ref.page_id)),
+                    ":physical".to_string(),
+                    Value::Integer(i64::try_from(fact_ref.page_id)?),
+                    1,
+                    fact_ref.page_id,
+                    1,
+                    VALID_TIME_FOREVER,
+                ))
+            }
+
+            fn stream_all(&self) -> anyhow::Result<Vec<Fact>> {
+                Ok(Vec::new())
+            }
+
+            fn committed_page_count(&self) -> u64 {
+                4
+            }
+        }
+
+        struct LogicalOrderIndex;
+        impl CommittedIndexReader for LogicalOrderIndex {
+            fn range_scan_eavt(
+                &self,
+                _: &EavtKey,
+                _: Option<&EavtKey>,
+            ) -> anyhow::Result<Vec<FactRef>> {
+                Ok(Vec::new())
+            }
+
+            fn range_scan_aevt(
+                &self,
+                _: &AevtKey,
+                _: Option<&AevtKey>,
+            ) -> anyhow::Result<Vec<FactRef>> {
+                Ok(vec![
+                    FactRef {
+                        page_id: 3,
+                        slot_index: 0,
+                    },
+                    FactRef {
+                        page_id: 1,
+                        slot_index: 0,
+                    },
+                    FactRef {
+                        page_id: 2,
+                        slot_index: 0,
+                    },
+                ])
+            }
+
+            fn range_scan_avet(
+                &self,
+                _: &AvetKey,
+                _: Option<&AvetKey>,
+            ) -> anyhow::Result<Vec<FactRef>> {
+                Ok(Vec::new())
+            }
+
+            fn range_scan_vaet(
+                &self,
+                _: &VaetKey,
+                _: Option<&VaetKey>,
+            ) -> anyhow::Result<Vec<FactRef>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let storage = FactStorage::new();
+        storage.set_committed_reader(Arc::new(Loader));
+        storage.set_committed_index_reader(Arc::new(LogicalOrderIndex));
+
+        let values: Vec<Value> = storage
+            .get_facts_by_attribute(&":physical".to_string())
+            .expect("attribute lookup should resolve")
+            .into_iter()
+            .map(|fact| fact.value)
+            .collect();
+        assert_eq!(
+            values,
+            vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)],
+            "committed refs should be resolved while each packed page is local"
+        );
     }
 
     #[test]

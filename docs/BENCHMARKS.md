@@ -40,6 +40,28 @@ Cross-machine comparisons between the two environments are indicative only;
 within-table scale-to-scale shape is the evidence, not absolute deltas
 against older i7 rows.
 
+### 1.01M committed attribute scan locality and streaming aggregate
+
+Measured 2026-07-12 on the A0/HAL7800 environment against the same clean
+342 MiB v11 graph containing 1.01M `:cmp/value` integer facts. Each row is a
+fresh release `minigraf --session` process measured with `/usr/bin/time -v`;
+session output is discarded. The before rows are the clean `f7aa6cc` baseline.
+
+| Query | Before wall / max RSS | After wall / max RSS | Change |
+|---|---:|---:|---:|
+| `(count ?v)` over `:cmp/value` | 5.39 s / 563 MiB | 2.01 s / 379 MiB | -62.7% wall, -32.7% RSS |
+| return all 1.01M `?v` values | 5.41 s / 508 MiB | 2.56 s / 506 MiB | -52.7% wall, RSS unchanged |
+
+The time reduction comes from resolving committed AEVT references in physical
+`(page_id, slot_index)` order, so all referenced slots are decoded while their
+packed page remains in the bounded cache. Datalog does not promise implicit
+row ordering, and net-assertion/valid-time selection is order-independent. The
+aggregate memory reduction comes from visiting single-pattern matches into an
+incremental group sink rather than retaining one binding map per fact. Full
+result queries still intentionally materialize their result rows and therefore
+retain the prior approximately 506 MiB RSS shape; a future bounded result cursor
+is required to change that public result boundary.
+
 Benchmarks were run with [Criterion 0.8](https://bheisler.github.io/criterion.rs/book/). Each benchmark group is described below.
 
 ### Evidence contract, milestones, and CI coverage

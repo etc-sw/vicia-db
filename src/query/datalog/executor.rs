@@ -417,6 +417,28 @@ impl DatalogExecutor {
             .read()
             .map_err(|_| anyhow!("functions lock poisoned"))?;
 
+        // A single pattern can feed an aggregate sink directly. This avoids
+        // retaining one HashMap binding per matching fact, while keeping the
+        // same matcher and aggregation semantics used by the general plan.
+        if let [WhereClause::Pattern(pattern)] = query.where_clauses.as_slice()
+            && query
+                .find
+                .iter()
+                .any(|spec| matches!(spec, FindSpec::Aggregate { .. }))
+            && !query
+                .find
+                .iter()
+                .any(|spec| matches!(spec, FindSpec::Window(_)))
+        {
+            let mut sink = AggregationSink::new(&query.find, &query.with_vars, &registry);
+            matcher.try_for_each_pattern_match(pattern, |binding| sink.push(binding))?;
+            let results = project_find_specs(&sink.finish()?, &query.find);
+            return Ok(QueryResult::QueryResults {
+                vars: query.find.iter().map(|spec| spec.display_name()).collect(),
+                results,
+            });
+        }
+
         // Pre-validate UDF predicate names: surface unknown predicates as errors before
         // processing any rows (matches the behaviour of the former apply_expr_clauses post-pass).
         for clause in &query.where_clauses {
@@ -1351,141 +1373,334 @@ fn compute_aggregation(
     with_vars: &[String],
     registry: &FunctionRegistry,
 ) -> Result<Vec<Binding>> {
-    let has_grouping_vars = find_specs
-        .iter()
-        .any(|s| matches!(s, FindSpec::Variable(_)));
-
-    // Special case: zero bindings + all-count specs → one zero row.
-    if bindings.is_empty() {
-        let all_count = !has_grouping_vars
-            && find_specs.iter().all(|s| {
-                matches!(s, FindSpec::Aggregate { func, .. }
-                    if func == "count" || func == "count-distinct")
-            });
-        if all_count {
-            let mut b = Binding::new();
-            for (i, _) in find_specs.iter().enumerate() {
-                b.insert(format!("__agg_{}", i), Value::Integer(0));
-            }
-            return Ok(vec![b]);
-        }
-        return Ok(vec![]);
+    let mut sink = AggregationSink::new(find_specs, with_vars, registry);
+    for binding in bindings {
+        sink.push(binding)?;
     }
+    sink.finish()
+}
 
-    // In a mixed aggregate+window query, :with vars must NOT be added to the
-    // grouping key. The window phase runs after aggregation, so :with vars that
-    // are used only by window specs (var, order_by) would otherwise inflate the
-    // number of groups. Even :with vars used by aggregate specs (e.g. ?e in
-    // count(?e)) should not split groups — the aggregate operates over all rows
-    // in the base group determined by the Variable find specs.
-    let has_windows = find_specs.iter().any(|s| matches!(s, FindSpec::Window(_)));
+enum AggregateAccumulator {
+    Count(i64),
+    CountDistinct(std::collections::BTreeSet<Value>),
+    Sum {
+        integer: i64,
+        floating: f64,
+        saw_float: bool,
+    },
+    SumDistinct(std::collections::BTreeSet<Value>),
+    MinMax {
+        current: Option<Value>,
+        minimum: bool,
+    },
+    Avg {
+        sum: f64,
+        count: usize,
+    },
+    Udf {
+        state: Box<dyn std::any::Any + Send>,
+        count: usize,
+    },
+}
 
-    // Grouping key = Variable find specs (in find order).
-    // In pure-aggregate queries, also include with_vars (Datomic semantics: :with
-    // prevents pre-aggregation de-duplication by adding vars to the group key).
-    let mut group_var_names: Vec<&str> = find_specs
-        .iter()
-        .filter_map(|s| match s {
-            FindSpec::Variable(v) => Some(v.as_str()),
-            _ => None,
+impl AggregateAccumulator {
+    fn new(func: &str, registry: &FunctionRegistry) -> Result<Self> {
+        Ok(match func {
+            "count" => Self::Count(0),
+            "count-distinct" => Self::CountDistinct(Default::default()),
+            "sum" => Self::Sum {
+                integer: 0,
+                floating: 0.0,
+                saw_float: false,
+            },
+            "sum-distinct" => Self::SumDistinct(Default::default()),
+            "min" => Self::MinMax {
+                current: None,
+                minimum: true,
+            },
+            "max" => Self::MinMax {
+                current: None,
+                minimum: false,
+            },
+            "avg" => Self::Avg { sum: 0.0, count: 0 },
+            _ => match registry.get(func) {
+                Some(desc) if !desc.is_builtin => match &desc.impl_ {
+                    AggImpl::Udf(ops) => Self::Udf {
+                        state: (ops.init)(),
+                        count: 0,
+                    },
+                    AggImpl::Builtin(_) => {
+                        return Err(anyhow!("unknown aggregate function: '{}'", func));
+                    }
+                },
+                Some(_) => return Err(anyhow!("unknown aggregate function: '{}'", func)),
+                None => return Err(anyhow!("unknown aggregate function: '{}'", func)),
+            },
         })
-        .collect();
-    if !has_windows {
-        // Pure aggregate: with_vars add to grouping key.
-        group_var_names.extend(with_vars.iter().map(|s| s.as_str()));
     }
 
-    // Group using BTreeMap keyed by group key (O(log g) instead of O(g) per binding).
-    use std::collections::BTreeMap;
-    let mut groups: BTreeMap<Vec<Value>, Vec<Binding>> = BTreeMap::new();
-    for b in bindings {
-        let key: Vec<Value> = group_var_names
-            .iter()
-            .map(|v| b.get(*v).cloned().unwrap_or(Value::Null))
-            .collect();
-        groups.entry(key).or_default().push(b);
-    }
-
-    // Build a position map for Variable specs only (indices 0..n_vars in the key vector).
-    // with_vars occupy key positions n_vars..end and are used only for grouping, not for output.
-    // Map of Variable spec name → its index in the group key Vec.
-    let mut group_key_idx: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
-    {
-        let mut var_pos = 0usize;
-        for spec in find_specs {
-            if let FindSpec::Variable(v) = spec {
-                group_key_idx.insert(v.as_str(), var_pos);
-                var_pos += 1;
+    fn push(
+        &mut self,
+        func: &str,
+        value: Option<&Value>,
+        registry: &FunctionRegistry,
+    ) -> Result<()> {
+        let Some(value) = value.filter(|value| !matches!(value, Value::Null)) else {
+            return Ok(());
+        };
+        match self {
+            Self::Count(count) => *count = count.saturating_add(1),
+            Self::CountDistinct(values) => {
+                values.insert(value.clone());
             }
-        }
-    }
-
-    let mut results: Vec<Binding> = Vec::new();
-    for (key, group_bindings) in groups.iter() {
-        let mut binding = Binding::new();
-        let mut skip = false;
-
-        // Plain variable values from group key.
-        for (v, &idx) in &group_key_idx {
-            if let Some(val) = key.get(idx) {
-                binding.insert((*v).to_string(), val.clone());
+            Self::Sum {
+                integer,
+                floating,
+                saw_float,
+            } => match value {
+                Value::Integer(number) => {
+                    *integer = integer.saturating_add(*number);
+                    *floating += *number as f64;
+                }
+                Value::Float(number) => {
+                    *floating += number;
+                    *saw_float = true;
+                }
+                other => {
+                    return Err(anyhow!(
+                        "sum: expected Integer, Float, or Null, got {}",
+                        super::functions::value_type_name(other)
+                    ));
+                }
+            },
+            Self::SumDistinct(values) => {
+                values.insert(value.clone());
             }
-        }
-
-        // Aggregate values stored under "__agg_{i}".
-        for (i, spec) in find_specs.iter().enumerate() {
-            if let FindSpec::Aggregate { func, var } = spec {
-                let non_null: Vec<&Value> = group_bindings
-                    .iter()
-                    .filter_map(|b| b.get(var.as_str()))
-                    .filter(|v| !matches!(v, Value::Null))
-                    .collect();
-                let agg_val: anyhow::Result<Value> = match registry.get(func.as_str()) {
-                    Some(desc) if desc.is_builtin => {
-                        // Built-in: use batch path which enforces strict type-error semantics.
-                        apply_builtin_aggregate(func, &non_null)
+            Self::MinMax { current, minimum } => {
+                match value {
+                    Value::Integer(_) | Value::Float(_) | Value::String(_) => {}
+                    other => {
+                        return Err(anyhow!(
+                            "{}: expected Integer, Float, String, or Null, got {}",
+                            func,
+                            super::functions::value_type_name(other)
+                        ));
                     }
-                    Some(desc) => {
-                        if let AggImpl::Udf(ops) = &desc.impl_ {
-                            if non_null.is_empty() {
-                                Ok(Value::Null)
-                            } else {
-                                let mut acc = (ops.init)();
-                                for v in &non_null {
-                                    (ops.step)(&mut acc, v);
-                                }
-                                Ok((ops.finalise)(&acc, non_null.len()))
-                            }
-                        } else {
-                            // AggImpl::Builtin with is_builtin=false shouldn't happen
-                            apply_builtin_aggregate(func, &non_null)
-                        }
+                }
+                if let Some(existing) = current.as_ref() {
+                    if std::mem::discriminant(existing) != std::mem::discriminant(value) {
+                        return Err(anyhow!(
+                            "{}: cannot compare {} and {} values",
+                            func,
+                            super::functions::value_type_name(existing),
+                            super::functions::value_type_name(value)
+                        ));
                     }
-                    None => Err(anyhow::anyhow!("unknown aggregate function: '{}'", func)),
+                    let ordering = value_cmp(value, existing);
+                    if (*minimum && ordering.is_lt()) || (!*minimum && ordering.is_gt()) {
+                        *current = Some(value.clone());
+                    }
+                } else {
+                    *current = Some(value.clone());
+                }
+            }
+            Self::Avg { sum, count } => match value {
+                Value::Integer(number) => {
+                    *sum += *number as f64;
+                    *count = count.saturating_add(1);
+                }
+                Value::Float(number) => {
+                    *sum += number;
+                    *count = count.saturating_add(1);
+                }
+                _ => {}
+            },
+            Self::Udf { state, count } => {
+                let desc = registry
+                    .get(func)
+                    .ok_or_else(|| anyhow!("unknown aggregate function: '{}'", func))?;
+                let AggImpl::Udf(ops) = &desc.impl_ else {
+                    return Err(anyhow!("unknown aggregate function: '{}'", func));
                 };
-                match agg_val {
-                    Ok(v) => {
-                        binding.insert(format!("__agg_{}", i), v);
+                (ops.step)(state, value);
+                *count = count.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self, func: &str, registry: &FunctionRegistry) -> Result<Option<Value>> {
+        Ok(match self {
+            Self::Count(count) => Some(Value::Integer(count)),
+            Self::CountDistinct(values) => Some(Value::Integer(
+                i64::try_from(values.len()).unwrap_or(i64::MAX),
+            )),
+            Self::Sum {
+                integer,
+                floating,
+                saw_float,
+            } => Some(if saw_float {
+                Value::Float(floating)
+            } else {
+                Value::Integer(integer)
+            }),
+            Self::SumDistinct(values) => {
+                let refs: Vec<&Value> = values.iter().collect();
+                Some(apply_builtin_aggregate("sum-distinct", &refs)?)
+            }
+            Self::MinMax { current, .. } => current,
+            Self::Avg { sum, count } => Some(if count == 0 {
+                Value::Null
+            } else {
+                Value::Float(sum / count as f64)
+            }),
+            Self::Udf { state, count } => {
+                if count == 0 {
+                    Some(Value::Null)
+                } else {
+                    let desc = registry
+                        .get(func)
+                        .ok_or_else(|| anyhow!("unknown aggregate function: '{}'", func))?;
+                    let AggImpl::Udf(ops) = &desc.impl_ else {
+                        return Err(anyhow!("unknown aggregate function: '{}'", func));
+                    };
+                    Some((ops.finalise)(&state, count))
+                }
+            }
+        })
+    }
+}
+
+struct AggregateGroup {
+    accumulators: Vec<(usize, String, AggregateAccumulator)>,
+}
+
+struct AggregationSink<'a> {
+    find_specs: &'a [FindSpec],
+    registry: &'a FunctionRegistry,
+    group_var_names: Vec<&'a str>,
+    groups: std::collections::BTreeMap<Vec<Value>, AggregateGroup>,
+    saw_binding: bool,
+}
+
+impl<'a> AggregationSink<'a> {
+    fn new(
+        find_specs: &'a [FindSpec],
+        with_vars: &'a [String],
+        registry: &'a FunctionRegistry,
+    ) -> Self {
+        let has_windows = find_specs
+            .iter()
+            .any(|spec| matches!(spec, FindSpec::Window(_)));
+        let mut group_var_names: Vec<&str> = find_specs
+            .iter()
+            .filter_map(|spec| match spec {
+                FindSpec::Variable(var) => Some(var.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !has_windows {
+            group_var_names.extend(with_vars.iter().map(String::as_str));
+        }
+        Self {
+            find_specs,
+            registry,
+            group_var_names,
+            groups: Default::default(),
+            saw_binding: false,
+        }
+    }
+
+    fn push(&mut self, binding: Binding) -> Result<()> {
+        self.saw_binding = true;
+        let key: Vec<Value> = self
+            .group_var_names
+            .iter()
+            .map(|var| binding.get(*var).cloned().unwrap_or(Value::Null))
+            .collect();
+        if !self.groups.contains_key(&key) {
+            let accumulators = self
+                .find_specs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, spec)| match spec {
+                    FindSpec::Aggregate { func, .. } => Some((
+                        index,
+                        func.clone(),
+                        AggregateAccumulator::new(func, self.registry),
+                    )),
+                    _ => None,
+                })
+                .map(|(index, func, accumulator)| {
+                    accumulator.map(|accumulator| (index, func, accumulator))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.groups
+                .insert(key.clone(), AggregateGroup { accumulators });
+        }
+        let Some(group) = self.groups.get_mut(&key) else {
+            return Err(anyhow!("internal: aggregate group insertion failed"));
+        };
+        for (index, func, accumulator) in &mut group.accumulators {
+            let Some(FindSpec::Aggregate { var, .. }) = self.find_specs.get(*index) else {
+                continue;
+            };
+            accumulator.push(func, binding.get(var), self.registry)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Vec<Binding>> {
+        let has_grouping_vars = self
+            .find_specs
+            .iter()
+            .any(|spec| matches!(spec, FindSpec::Variable(_)));
+        if !self.saw_binding {
+            let all_count = !has_grouping_vars && self.find_specs.iter().all(|spec| matches!(spec, FindSpec::Aggregate { func, .. } if func == "count" || func == "count-distinct"));
+            if all_count {
+                let mut binding = Binding::new();
+                for (index, _) in self.find_specs.iter().enumerate() {
+                    binding.insert(format!("__agg_{}", index), Value::Integer(0));
+                }
+                return Ok(vec![binding]);
+            }
+            return Ok(Vec::new());
+        }
+
+        let variable_names: Vec<&str> = self
+            .find_specs
+            .iter()
+            .filter_map(|spec| match spec {
+                FindSpec::Variable(var) => Some(var.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut results = Vec::with_capacity(self.groups.len());
+        for (key, group) in self.groups {
+            let mut binding = Binding::new();
+            for (index, variable) in variable_names.iter().enumerate() {
+                if let Some(value) = key.get(index) {
+                    binding.insert((*variable).to_owned(), value.clone());
+                }
+            }
+            let mut skip = false;
+            for (index, func, accumulator) in group.accumulators {
+                match accumulator.finish(&func, self.registry)? {
+                    Some(value) => {
+                        binding.insert(format!("__agg_{}", index), value);
                     }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("no non-null values in group") {
-                            skip = true;
-                            break;
-                        }
-                        return Err(e);
+                    None => {
+                        skip = true;
+                        break;
                     }
                 }
             }
+            if !skip {
+                results.push(binding);
+            }
         }
-
-        if !skip {
-            results.push(binding);
-        }
+        Ok(results)
     }
-
-    Ok(results)
 }
 
 /// Compute window function values for each row and store under `"__win_{i}"`.

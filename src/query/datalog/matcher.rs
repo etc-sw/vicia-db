@@ -92,6 +92,25 @@ impl PatternMatcher {
         results
     }
 
+    /// Visit matches one at a time without retaining a `Vec<Bindings>`.
+    ///
+    /// This is the matcher-side boundary for streaming consumers such as
+    /// aggregate sinks. Join execution still uses the materialized methods
+    /// below because later patterns need the preceding bindings as seeds.
+    pub(crate) fn try_for_each_pattern_match<E>(
+        &self,
+        pattern: &Pattern,
+        mut visit: impl FnMut(Bindings) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let facts = self.get_facts();
+        for fact in &*facts {
+            if let Some(bindings) = self.match_fact_against_pattern(fact, pattern) {
+                visit(bindings)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Try to match a single fact against a pattern
     /// Returns Some(bindings) if successful, None otherwise
     fn match_fact_against_pattern(&self, fact: &Fact, pattern: &Pattern) -> Option<Bindings> {
@@ -104,12 +123,9 @@ impl PatternMatcher {
 
         match &pattern.attribute {
             AttributeSpec::Real(attr_edn) => {
-                // Match attribute
-                if !self.match_component(
-                    attr_edn,
-                    &Value::Keyword(fact.attribute.clone()),
-                    &mut bindings,
-                ) {
+                // Compare constant attributes by reference. Only variable
+                // attributes need an owned Value in the output binding.
+                if !self.match_attribute_component(attr_edn, &fact.attribute, &mut bindings) {
                     return None;
                 }
                 // Match value
@@ -150,6 +166,27 @@ impl PatternMatcher {
         }
 
         Some(bindings)
+    }
+
+    fn match_attribute_component(
+        &self,
+        pattern_component: &EdnValue,
+        fact_attribute: &str,
+        bindings: &mut Bindings,
+    ) -> bool {
+        match pattern_component {
+            EdnValue::Symbol(var) if var == "_" || var.starts_with("?_") => true,
+            EdnValue::Symbol(var) if var.starts_with('?') => {
+                if let Some(existing) = bindings.get(var) {
+                    matches!(existing, Value::Keyword(value) if value == fact_attribute)
+                } else {
+                    bindings.insert(var.clone(), Value::Keyword(fact_attribute.to_owned()));
+                    true
+                }
+            }
+            EdnValue::Keyword(expected) => expected == fact_attribute,
+            _ => false,
+        }
     }
 
     /// Match a pattern component (entity, attribute, or value) against a fact value
