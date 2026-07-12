@@ -926,6 +926,10 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     last_checkpointed_tx_count: u64,
     header_manifest_selection: HeaderManifestSlotSelection,
     delta_manifest_selection: PersistedManifestSelection,
+    /// Decoded segments selected by the current manifest. Keep them resident
+    /// for the lifetime of the handle: checkpoint appends one new segment and
+    /// must not reread every previously selected segment from the backend.
+    resident_delta_segments: Vec<DeltaSegment>,
     committed_fact_pages: Arc<AtomicU64>,
     committed_fact_page_start: Arc<AtomicU64>,
     base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
@@ -953,6 +957,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             last_checkpointed_tx_count: 0,
             header_manifest_selection: HeaderManifestSlotSelection::NoDeltaManifest,
             delta_manifest_selection: PersistedManifestSelection::NoDeltaManifest,
+            resident_delta_segments: Vec::new(),
             committed_fact_pages,
             committed_fact_page_start,
             base_integrity: None,
@@ -999,19 +1004,13 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         })
     }
 
-    fn wire_committed_readers(
-        &mut self,
-        header: &FileHeader,
-        delta_segments: Vec<DeltaSegment>,
-    ) -> Result<()> {
+    fn wire_committed_readers(&mut self, header: &FileHeader) -> Result<()> {
+        let delta_segments = self.resident_delta_segments.as_slice();
         let base_loader = self.base_fact_loader();
         let fact_reader: Arc<dyn CommittedFactReader> = if delta_segments.is_empty() {
             base_loader
         } else {
-            Arc::new(LayeredFactLoaderImpl::new(
-                base_loader,
-                delta_segments.as_slice(),
-            ))
+            Arc::new(LayeredFactLoaderImpl::new(base_loader, delta_segments))
         };
         self.storage.set_committed_reader(fact_reader);
 
@@ -1045,7 +1044,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             let mut aevt = Vec::new();
             let mut avet = Vec::new();
             let mut vaet = Vec::new();
-            for segment in &delta_segments {
+            for segment in delta_segments {
                 let payload = segment.payload();
                 eavt.extend(payload.eavt.iter().cloned());
                 aevt.extend(payload.aevt.iter().cloned());
@@ -1060,6 +1059,15 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         };
         self.storage.set_committed_index_reader(index_reader);
         Ok(())
+    }
+
+    fn replace_resident_delta_segments(
+        &mut self,
+        header: &FileHeader,
+        delta_segments: Vec<DeltaSegment>,
+    ) -> Result<()> {
+        self.resident_delta_segments = delta_segments;
+        self.wire_committed_readers(header)
     }
 
     fn load_usable_delta_selection(
@@ -1476,7 +1484,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.last_checkpointed_tx_count = checkpoint_tx_count;
         self.storage.restore_tx_counter_from(checkpoint_tx_count);
         self.dirty = false;
-        self.wire_committed_readers(&header, Vec::new())?;
+        self.replace_resident_delta_segments(&header, Vec::new())?;
         self.storage.post_checkpoint_clear();
         Ok(())
     }
@@ -1700,7 +1708,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.base_integrity = Some(candidate.base_integrity);
         self.last_checkpointed_tx_count = candidate.checkpoint_tx_count;
         self.dirty = false;
-        self.wire_committed_readers(&candidate.header, Vec::new())?;
+        self.replace_resident_delta_segments(&candidate.header, Vec::new())?;
         self.storage.post_checkpoint_clear();
         Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
     }
@@ -2055,7 +2063,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             self.committed_fact_page_start.store(1, Ordering::SeqCst);
             self.base_integrity = Some(integrity.catalog);
 
-            self.wire_committed_readers(&new_header, Vec::new())?;
+            self.replace_resident_delta_segments(&new_header, Vec::new())?;
         } else {
             // No rebuild needed - validate header checksum for v7+ files
             // Re-read header from disk to get any updates from rebuild path
@@ -2075,7 +2083,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
 
             if header.eavt_root_page != 0 {
-                self.wire_committed_readers(&header, selected_delta_segments)?;
+                self.replace_resident_delta_segments(&header, selected_delta_segments)?;
             }
         }
         // else: empty DB — indexes are empty by default, nothing to do.
@@ -2295,20 +2303,19 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             return Ok(None);
         }
 
-        let (base_identity, mut manifest_segments, mut visible_delta_segments) =
-            if let Some(manifest) = selected_delta_manifest.as_ref() {
-                (
-                    manifest.base_identity(),
-                    manifest.segments().to_vec(),
-                    Self::load_delta_segments_from_manifest(&*backend, &curr_header, manifest)?,
-                )
-            } else {
-                (
-                    DeltaBaseIdentity::from_header(&curr_header),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            };
+        let (base_identity, mut manifest_segments) = if let Some(manifest) =
+            selected_delta_manifest.as_ref()
+        {
+            if manifest.segments().len() != self.resident_delta_segments.len() {
+                anyhow::bail!("Resident delta segment count does not match the selected manifest");
+            }
+            (manifest.base_identity(), manifest.segments().to_vec())
+        } else {
+            if !self.resident_delta_segments.is_empty() {
+                anyhow::bail!("Resident delta segments exist without a selected manifest");
+            }
+            (DeltaBaseIdentity::from_header(&curr_header), Vec::new())
+        };
 
         let segment_page_start = curr_header.page_count;
         let segment = DeltaSegment::from_facts(pending_facts.to_vec(), segment_page_start)?;
@@ -2371,8 +2378,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         };
         self.last_checkpointed_tx_count = self.storage.current_tx_count();
         self.dirty = false;
-        visible_delta_segments.push(segment);
-        self.wire_committed_readers(&header, visible_delta_segments)?;
+        self.resident_delta_segments.push(segment);
+        self.wire_committed_readers(&header)?;
         self.storage.post_checkpoint_clear();
         Ok(Some(CheckpointOutcome::DeltaSegment))
     }
@@ -2580,7 +2587,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.dirty = false;
 
         // ── Step F: wire verified committed readers ──────────────────────────────
-        self.wire_committed_readers(&header, Vec::new())?;
+        self.replace_resident_delta_segments(&header, Vec::new())?;
 
         // Clear pending — all data now on disk
         self.storage.post_checkpoint_clear();
@@ -6311,6 +6318,110 @@ mod tests {
             storage.save().unwrap(),
             CheckpointOutcome::DeltaSegment,
             "pending facts on a visible delta should publish through the inactive manifest slot"
+        );
+    }
+
+    #[test]
+    fn repeated_delta_checkpoint_does_not_reread_resident_segments() {
+        struct CountingBackend {
+            inner: MemoryBackend,
+            reads: Arc<AtomicU64>,
+        }
+
+        impl StorageBackend for CountingBackend {
+            fn write_page(&mut self, page_id: u64, data: &[u8]) -> Result<()> {
+                self.inner.write_page(page_id, data)
+            }
+
+            fn read_page(&self, page_id: u64) -> Result<Vec<u8>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                self.inner.read_page(page_id)
+            }
+
+            fn sync(&mut self) -> Result<()> {
+                self.inner.sync()
+            }
+
+            fn page_count(&self) -> Result<u64> {
+                self.inner.page_count()
+            }
+
+            fn has_complete_page_prefix(&self, published_page_count: u64) -> Result<bool> {
+                self.inner.has_complete_page_prefix(published_page_count)
+            }
+
+            fn close(&mut self) -> Result<()> {
+                self.inner.close()
+            }
+
+            fn backend_name(&self) -> &'static str {
+                "counting-memory"
+            }
+
+            fn is_new(&self) -> bool {
+                self.inner.is_new()
+            }
+        }
+
+        let reads = Arc::new(AtomicU64::new(0));
+        let backend = CountingBackend {
+            inner: MemoryBackend::new(),
+            reads: reads.clone(),
+        };
+        let mut storage = PersistentFactStorage::new(backend, 256).unwrap();
+
+        for (index, expected_outcome) in [
+            CheckpointOutcome::FullRebuild,
+            CheckpointOutcome::DeltaSegment,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            storage
+                .storage()
+                .transact(
+                    vec![(
+                        Uuid::from_u128(index as u128 + 1),
+                        ":resident/name".to_string(),
+                        Value::Integer(index as i64),
+                    )],
+                    None,
+                )
+                .unwrap();
+            storage.mark_dirty();
+            assert_eq!(storage.save().unwrap(), expected_outcome);
+        }
+
+        let reads_before_second_delta = reads.load(Ordering::SeqCst);
+        let newest_entity = Uuid::from_u128(3);
+        storage
+            .storage()
+            .transact(
+                vec![(
+                    newest_entity,
+                    ":resident/name".to_string(),
+                    Value::Integer(2),
+                )],
+                None,
+            )
+            .unwrap();
+        storage.mark_dirty();
+        assert_eq!(storage.save().unwrap(), CheckpointOutcome::DeltaSegment);
+
+        assert_eq!(
+            reads.load(Ordering::SeqCst) - reads_before_second_delta,
+            1,
+            "checkpoint should read page 0, not replay older delta pages"
+        );
+        assert_eq!(storage.resident_delta_segments.len(), 2);
+        assert_eq!(
+            storage
+                .storage()
+                .get_facts_by_entity(&newest_entity)
+                .unwrap()
+                .len(),
+            1,
+            "new segment must be query-visible after the resident append"
         );
     }
 
