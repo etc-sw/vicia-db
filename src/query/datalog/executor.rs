@@ -281,14 +281,15 @@ impl DatalogExecutor {
         max_derived_facts: usize,
         max_results: usize,
     ) -> Self {
-        let indexes = storage.pending_indexes_snapshot();
         DatalogExecutor {
             storage,
             facts_override: None,
             read_now_floor: None,
             rules,
             functions,
-            indexes: Arc::new(indexes),
+            // Pending planning statistics are intentionally not cloned into
+            // each executor; execution uses the canonical overlay ranges.
+            indexes: Arc::new(crate::storage::index::Indexes::new()),
             max_derived_facts,
             max_results,
         }

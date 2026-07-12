@@ -1,3 +1,4 @@
+pub(crate) mod pending_overlay;
 pub(crate) mod storage;
 pub(crate) mod types;
 

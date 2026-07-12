@@ -1,25 +1,15 @@
+use crate::graph::pending_overlay::{PendingFactId, PendingOverlay};
 use crate::graph::types::{
     Attribute, EntityId, Fact, RETRACT_ALL_VALID_FROM, TransactOptions, TxId, VALID_TIME_FOREVER,
     Value, tx_id_now,
 };
 use crate::query::datalog::types::AsOf;
-use crate::storage::index::{AevtKey, FactRef, Indexes, encode_value};
-#[cfg(any(test, feature = "bench-internals"))]
-use crate::storage::index::{AvetKey, EavtKey, VaetKey};
+use crate::storage::index::{AevtKey, FactRef, encode_value};
 use anyhow::Result;
-use std::collections::HashSet;
 #[cfg(any(test, feature = "bench-internals"))]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-
-/// Compact key for O(1) duplicate detection in `FactData::pending_keys`.
-///
-/// Mirrors the equality predicate used by `load_fact`:
-/// (entity, attribute, encoded_value, valid_from, valid_to, tx_count, tx_id, asserted).
-/// `encode_value` is used for the value field because `Value` contains `f64`
-/// and therefore cannot implement `Hash` directly.
-type PendingKey = (EntityId, String, Vec<u8>, i64, i64, u64, TxId, bool);
 
 /// Accounted owned memory for one pending in-memory container.
 ///
@@ -86,7 +76,13 @@ pub(crate) enum CurrentValidTime {
 struct CurrentValueState {
     max_unscoped_retract_tx: u64,
     max_scoped_retract_tx: std::collections::HashMap<(i64, i64), u64>,
-    assertions: std::collections::HashMap<(i64, i64), (u64, FactRef)>,
+    assertions: std::collections::HashMap<(i64, i64), (u64, CursorFactRef)>,
+}
+
+#[derive(Clone, Copy)]
+enum CursorFactRef {
+    Pending(PendingFactId),
+    Committed(FactRef),
 }
 
 /// Repository-only counters for one selected-attribute current-view cursor.
@@ -122,7 +118,7 @@ pub struct CurrentAttributeCursorDiagnostics {
 pub(crate) struct CurrentAttributeCursor {
     end: Option<AevtKey>,
     next_start: AevtKey,
-    pending: Vec<(AevtKey, FactRef)>,
+    pending: Vec<PendingFactId>,
     pending_position: usize,
     current_entity: Option<EntityId>,
     values: std::collections::HashMap<Vec<u8>, CurrentValueState>,
@@ -224,42 +220,18 @@ pub(crate) enum CurrentAttributeStep {
     Complete,
 }
 
-fn pending_key(f: &Fact) -> PendingKey {
-    (
-        f.entity,
-        f.attribute.clone(),
-        encode_value(&f.value),
-        f.valid_from,
-        f.valid_to,
-        f.tx_count,
-        f.tx_id,
-        f.asserted,
-    )
-}
-
 #[cfg(any(test, feature = "bench-internals"))]
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
-fn pending_snapshot_bytes(pending: &[(AevtKey, FactRef)]) -> u64 {
-    pending.iter().fold(0_u64, |total, (key, _)| {
-        let entry = std::mem::size_of::<(AevtKey, FactRef)>();
-        let owned = key
-            .attribute
+fn pending_snapshot_bytes(pending: &Vec<PendingFactId>) -> u64 {
+    usize_to_u64(
+        pending
             .capacity()
-            .saturating_add(key.value_bytes.capacity());
-        total.saturating_add(usize_to_u64(entry.saturating_add(owned)))
-    })
-}
-
-#[cfg(any(test, feature = "bench-internals"))]
-fn value_owned_capacity(value: &Value) -> usize {
-    match value {
-        Value::String(value) | Value::Keyword(value) => value.capacity(),
-        Value::Integer(_) | Value::Float(_) | Value::Boolean(_) | Value::Ref(_) | Value::Null => 0,
-    }
+            .saturating_mul(std::mem::size_of::<PendingFactId>()),
+    )
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -304,14 +276,7 @@ fn sum_component_bytes(components: &[PendingMemoryComponent]) -> u64 {
 /// a single `RwLock`. This ensures facts and indexes are always updated together
 /// without needing a second lock.
 struct FactData {
-    facts: Vec<Fact>,
-    /// O(1) duplicate-detection set for `load_fact`.
-    ///
-    /// Maintained in sync with `facts` by every method that appends to `facts`.
-    /// Replaces the O(n) linear scan that made `load_fact` O(n²) for large
-    /// fact sets (e.g. 1M-fact benchmark setup).
-    pending_keys: HashSet<PendingKey>,
-    pending_indexes: Indexes,
+    pending: PendingOverlay,
     /// Resolves committed (on-disk) FactRefs to Fact objects.
     /// None for in-memory databases or before load() is called.
     committed: Option<Arc<dyn crate::storage::CommittedFactReader>>,
@@ -378,9 +343,7 @@ impl FactStorage {
     pub(crate) fn new() -> Self {
         FactStorage {
             data: Arc::new(RwLock::new(FactData {
-                facts: Vec::new(),
-                pending_keys: HashSet::new(),
-                pending_indexes: Indexes::new(),
+                pending: PendingOverlay::new(),
                 committed: None,
                 committed_index_reader: None,
                 publication_generation: 0,
@@ -432,17 +395,8 @@ impl FactStorage {
             .data
             .write()
             .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
-        for (slot, fact) in (u16::try_from(d.facts.len()).unwrap_or(u16::MAX)..).zip(facts.iter()) {
-            d.pending_keys.insert(pending_key(fact));
-            d.pending_indexes.insert(
-                fact,
-                FactRef {
-                    page_id: 0,
-                    slot_index: slot,
-                },
-            );
-        }
-        d.facts.extend(facts);
+        d.pending.insert_batch(facts, false)?;
+        d.publication_generation = d.publication_generation.saturating_add(1);
 
         Ok(tx_id)
     }
@@ -491,17 +445,8 @@ impl FactStorage {
             .data
             .write()
             .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
-        for (slot, fact) in (u16::try_from(d.facts.len()).unwrap_or(u16::MAX)..).zip(facts.iter()) {
-            d.pending_keys.insert(pending_key(fact));
-            d.pending_indexes.insert(
-                fact,
-                FactRef {
-                    page_id: 0,
-                    slot_index: slot,
-                },
-            );
-        }
-        d.facts.extend(facts);
+        d.pending.insert_batch(facts, false)?;
+        d.publication_generation = d.publication_generation.saturating_add(1);
 
         Ok((tx_id, tx_count))
     }
@@ -571,19 +516,8 @@ impl FactStorage {
             .data
             .write()
             .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
-        for (slot, fact) in
-            (u16::try_from(d.facts.len()).unwrap_or(u16::MAX)..).zip(retractions.iter())
-        {
-            d.pending_keys.insert(pending_key(fact));
-            d.pending_indexes.insert(
-                fact,
-                FactRef {
-                    page_id: 0,
-                    slot_index: slot,
-                },
-            );
-        }
-        d.facts.extend(retractions);
+        d.pending.insert_batch(retractions, false)?;
+        d.publication_generation = d.publication_generation.saturating_add(1);
 
         Ok((tx_id, tx_count))
     }
@@ -602,24 +536,11 @@ impl FactStorage {
             .write()
             .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
 
-        // O(1) duplicate check via the pending_keys HashSet.
-        // Previously this was an O(n) linear scan over d.facts, causing O(n²)
-        // total complexity when loading n facts (e.g. 1M-fact benchmarks).
-        let key = pending_key(&fact);
-        if !d.pending_keys.insert(key) {
-            return Ok(false); // Already exists, not loaded
+        let inserted = d.pending.insert_batch(vec![fact], true)? == 1;
+        if inserted {
+            d.publication_generation = d.publication_generation.saturating_add(1);
         }
-
-        let slot = u16::try_from(d.facts.len()).unwrap_or(u16::MAX);
-        d.pending_indexes.insert(
-            &fact,
-            FactRef {
-                page_id: 0,
-                slot_index: slot,
-            },
-        );
-        d.facts.push(fact);
-        Ok(true)
+        Ok(inserted)
     }
 
     /// Set tx_counter to max(tx_count) across all loaded facts.
@@ -631,7 +552,12 @@ impl FactStorage {
             .data
             .read()
             .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
-        let max = d.facts.iter().map(|f| f.tx_count).max().unwrap_or(0);
+        let max = d
+            .pending
+            .records()
+            .map(|fact| fact.tx_count)
+            .max()
+            .unwrap_or(0);
         self.tx_counter.store(max, Ordering::SeqCst);
         Ok(())
     }
@@ -669,7 +595,7 @@ impl FactStorage {
             all.extend(loader.stream_all()?);
         }
         // Then pending facts (post-checkpoint, in memory)
-        all.extend(d.facts.iter().cloned());
+        all.extend(d.pending.facts());
         Ok(all)
     }
 
@@ -683,7 +609,7 @@ impl FactStorage {
         if let Some(loader) = &d.committed {
             loader.for_each_fact(&mut visit)?;
         }
-        for fact in d.facts.iter().cloned() {
+        for fact in d.pending.facts() {
             visit(fact)?;
         }
         Ok(())
@@ -707,9 +633,9 @@ impl FactStorage {
         if let Some(loader) = &d.committed {
             loader.for_each_fact_since(since_tx_count, &mut visit)?;
         }
-        for fact in d.facts.iter() {
+        for fact in d.pending.records() {
             if fact.tx_count > since_tx_count {
-                visit(fact.clone())?;
+                visit(fact.to_fact())?;
             }
         }
         Ok(())
@@ -730,9 +656,7 @@ impl FactStorage {
             .data
             .write()
             .map_err(|_| anyhow::anyhow!("data lock poisoned"))?;
-        d.facts.clear();
-        d.pending_keys.clear();
-        d.pending_indexes = Indexes::new();
+        d.pending.clear();
         d.committed = None;
         d.committed_index_reader = None;
         d.publication_generation = d.publication_generation.saturating_add(1);
@@ -740,49 +664,22 @@ impl FactStorage {
         Ok(())
     }
 
-    /// Replace the pending in-memory indexes with a freshly rebuilt set.
-    ///
-    /// Used by `PersistentFactStorage` after detecting an index checksum
-    /// mismatch (e.g. after crash recovery).
-    #[allow(dead_code)]
-    pub(crate) fn replace_pending_indexes(&self, indexes: Indexes) {
-        let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
-        d.pending_indexes = indexes;
-        d.publication_generation = d.publication_generation.saturating_add(1);
-    }
-
     /// Return the pending (uncommitted) facts held in memory.
     pub(crate) fn get_pending_facts(&self) -> Vec<Fact> {
         let d = self.data.read().unwrap_or_else(|e| e.into_inner());
-        d.facts.clone()
+        d.pending.facts().collect()
     }
 
     /// Clear pending facts and pending indexes after a successful checkpoint.
     pub(crate) fn post_checkpoint_clear(&self) {
         let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
-        d.facts.clear();
-        d.pending_keys.clear();
-        d.pending_indexes = Indexes::new();
+        d.pending.clear();
         d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
     /// Set the tx_counter to `max` (used on load to restore from persisted state).
     pub(crate) fn restore_tx_counter_from(&self, max: u64) {
         self.tx_counter.store(max, Ordering::SeqCst);
-    }
-
-    /// Return a snapshot (clone) of the current pending in-memory indexes.
-    ///
-    /// Used by `PersistentFactStorage::save()` to write index B+tree pages.
-    /// Clones the BTreeMaps — acceptable since `save()` is not on the hot path.
-    pub(crate) fn pending_indexes_snapshot(&self) -> Indexes {
-        let d = self.data.read().unwrap_or_else(|e| e.into_inner());
-        Indexes {
-            eavt: d.pending_indexes.eavt.clone(),
-            aevt: d.pending_indexes.aevt.clone(),
-            avet: d.pending_indexes.avet.clone(),
-            vaet: d.pending_indexes.vaet.clone(),
-        }
     }
 
     /// Set the committed fact reader. Called by PersistentFactStorage::load() after
@@ -820,9 +717,7 @@ impl FactStorage {
         let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
         d.committed = Some(fact_reader);
         d.committed_index_reader = index_reader;
-        d.facts.clear();
-        d.pending_keys.clear();
-        d.pending_indexes = Indexes::new();
+        d.pending.clear();
         d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
@@ -831,9 +726,7 @@ impl FactStorage {
     pub(crate) fn publish_incremental_committed(&self, extend: impl FnOnce()) {
         let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
         extend();
-        d.facts.clear();
-        d.pending_keys.clear();
-        d.pending_indexes = Indexes::new();
+        d.pending.clear();
         d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
@@ -842,7 +735,7 @@ impl FactStorage {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn pending_fact_count(&self) -> usize {
         let d = self.data.read().unwrap_or_else(|e| e.into_inner());
-        d.facts.len()
+        d.pending.len()
     }
 
     /// Account live ownership in the pending fact log, duplicate set, and
@@ -850,141 +743,49 @@ impl FactStorage {
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn pending_memory_diagnostics(&self) -> PendingMemoryDiagnostics {
         let d = self.data.read().unwrap_or_else(|error| error.into_inner());
-
+        let shape = d.pending.memory_shape();
         let facts = memory_component(
-            d.facts.len(),
-            d.facts.capacity(),
-            d.facts
-                .capacity()
-                .saturating_mul(std::mem::size_of::<Fact>()),
-            d.facts.iter().fold(0_usize, |total, fact| {
-                total.saturating_add(fact.attribute.capacity())
-            }),
-            d.facts
-                .iter()
-                .filter(|fact| fact.attribute.capacity() > 0)
-                .count(),
-            d.facts.iter().fold(0_usize, |total, fact| {
-                total.saturating_add(value_owned_capacity(&fact.value))
-            }),
-            d.facts
-                .iter()
-                .filter(|fact| value_owned_capacity(&fact.value) > 0)
-                .count(),
+            shape.records_len,
+            shape.records_capacity,
+            shape.records_capacity.saturating_mul(std::mem::size_of::<
+                crate::graph::pending_overlay::PendingFactRecord,
+            >()),
+            shape.attribute_bytes,
+            shape.attribute_allocations,
+            shape.value_bytes,
+            shape.value_allocations,
         );
-
         let duplicate_keys = memory_component(
-            d.pending_keys.len(),
-            d.pending_keys.capacity(),
-            d.pending_keys
-                .capacity()
-                .saturating_mul(std::mem::size_of::<PendingKey>()),
-            d.pending_keys
-                .iter()
-                .fold(0_usize, |total, key| total.saturating_add(key.1.capacity())),
-            d.pending_keys
-                .iter()
-                .filter(|key| key.1.capacity() > 0)
-                .count(),
-            d.pending_keys
-                .iter()
-                .fold(0_usize, |total, key| total.saturating_add(key.2.capacity())),
-            d.pending_keys
-                .iter()
-                .filter(|key| key.2.capacity() > 0)
-                .count(),
-        );
-
-        let eavt = memory_component(
-            d.pending_indexes.eavt.len(),
-            d.pending_indexes.eavt.len(),
-            d.pending_indexes
-                .eavt
-                .len()
-                .saturating_mul(std::mem::size_of::<(EavtKey, FactRef)>()),
-            d.pending_indexes.eavt.keys().fold(0_usize, |total, key| {
-                total.saturating_add(key.attribute.capacity())
-            }),
-            d.pending_indexes
-                .eavt
-                .keys()
-                .filter(|key| key.attribute.capacity() > 0)
-                .count(),
-            d.pending_indexes.eavt.keys().fold(0_usize, |total, key| {
-                total.saturating_add(key.value_bytes.capacity())
-            }),
-            d.pending_indexes
-                .eavt
-                .keys()
-                .filter(|key| key.value_bytes.capacity() > 0)
-                .count(),
-        );
-        let aevt = memory_component(
-            d.pending_indexes.aevt.len(),
-            d.pending_indexes.aevt.len(),
-            d.pending_indexes
-                .aevt
-                .len()
-                .saturating_mul(std::mem::size_of::<(AevtKey, FactRef)>()),
-            d.pending_indexes.aevt.keys().fold(0_usize, |total, key| {
-                total.saturating_add(key.attribute.capacity())
-            }),
-            d.pending_indexes
-                .aevt
-                .keys()
-                .filter(|key| key.attribute.capacity() > 0)
-                .count(),
-            d.pending_indexes.aevt.keys().fold(0_usize, |total, key| {
-                total.saturating_add(key.value_bytes.capacity())
-            }),
-            d.pending_indexes
-                .aevt
-                .keys()
-                .filter(|key| key.value_bytes.capacity() > 0)
-                .count(),
-        );
-        let avet = memory_component(
-            d.pending_indexes.avet.len(),
-            d.pending_indexes.avet.len(),
-            d.pending_indexes
-                .avet
-                .len()
-                .saturating_mul(std::mem::size_of::<(AvetKey, FactRef)>()),
-            d.pending_indexes.avet.keys().fold(0_usize, |total, key| {
-                total.saturating_add(key.attribute.capacity())
-            }),
-            d.pending_indexes
-                .avet
-                .keys()
-                .filter(|key| key.attribute.capacity() > 0)
-                .count(),
-            d.pending_indexes.avet.keys().fold(0_usize, |total, key| {
-                total.saturating_add(key.value_bytes.capacity())
-            }),
-            d.pending_indexes
-                .avet
-                .keys()
-                .filter(|key| key.value_bytes.capacity() > 0)
-                .count(),
-        );
-        let vaet = memory_component(
-            d.pending_indexes.vaet.len(),
-            d.pending_indexes.vaet.len(),
-            d.pending_indexes
-                .vaet
-                .len()
-                .saturating_mul(std::mem::size_of::<(VaetKey, FactRef)>()),
-            d.pending_indexes.vaet.keys().fold(0_usize, |total, key| {
-                total.saturating_add(key.attribute.capacity())
-            }),
-            d.pending_indexes
-                .vaet
-                .keys()
-                .filter(|key| key.attribute.capacity() > 0)
-                .count(),
+            shape.duplicate_buckets,
+            shape.duplicate_capacity,
+            shape
+                .duplicate_capacity
+                .saturating_mul(std::mem::size_of::<(u64, usize)>())
+                .saturating_add(
+                    shape
+                        .duplicate_ids
+                        .saturating_mul(std::mem::size_of::<PendingFactId>()),
+                ),
+            0,
+            0,
             0,
             0,
         );
+        let index_component = |(entries, capacity)| {
+            memory_component(
+                entries,
+                capacity,
+                capacity.saturating_mul(std::mem::size_of::<PendingFactId>()),
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        let eavt = index_component(shape.eavt);
+        let aevt = index_component(shape.aevt);
+        let avet = index_component(shape.avet);
+        let vaet = index_component(shape.vaet);
         PendingMemoryDiagnostics {
             facts,
             duplicate_keys,
@@ -1028,10 +829,10 @@ impl FactStorage {
     pub(crate) fn pending_index_counts(&self) -> (usize, usize, usize, usize) {
         let d = self.data.read().unwrap_or_else(|e| e.into_inner());
         (
-            d.pending_indexes.eavt.len(),
-            d.pending_indexes.aevt.len(),
-            d.pending_indexes.avet.len(),
-            d.pending_indexes.vaet.len(),
+            d.pending.index_counts().0,
+            d.pending.index_counts().1,
+            d.pending.index_counts().2,
+            d.pending.index_counts().3,
         )
     }
 }
@@ -1221,18 +1022,14 @@ pub(crate) fn net_asserted_facts(facts: Vec<Fact>) -> Vec<Fact> {
 /// `get_facts_by_attribute`).
 fn resolve_fact_ref(d: &FactData, fr: FactRef) -> Result<Fact> {
     if fr.page_id == 0 {
-        d.facts
-            .get(fr.slot_index as usize)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("pending fact index {} out of bounds", fr.slot_index))
-    } else {
-        match &d.committed {
-            Some(loader) => loader.resolve(fr),
-            None => anyhow::bail!(
-                "no CommittedFactReader but got committed FactRef (page_id={})",
-                fr.page_id
-            ),
-        }
+        anyhow::bail!("pending facts must use PendingFactId, not on-disk FactRef")
+    }
+    match &d.committed {
+        Some(loader) => loader.resolve(fr),
+        None => anyhow::bail!(
+            "no CommittedFactReader but got committed FactRef (page_id={})",
+            fr.page_id
+        ),
     }
 }
 
@@ -1242,20 +1039,11 @@ fn resolve_fact_ref(d: &FactData, fr: FactRef) -> Result<Fact> {
 fn resolve_cursor_fact(
     d: &FactData,
     cursor: &CurrentAttributeCursor,
-    fact_ref: FactRef,
+    fact_ref: CursorFactRef,
 ) -> Result<Fact> {
-    if fact_ref.page_id == 0 {
-        d.facts
-            .get(usize::from(fact_ref.slot_index))
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "pending fact index {} out of bounds for cursor snapshot",
-                    fact_ref.slot_index
-                )
-            })
-    } else {
-        cursor
+    match fact_ref {
+        CursorFactRef::Pending(id) => Ok(d.pending.get(id)?.to_fact()),
+        CursorFactRef::Committed(fact_ref) => cursor
             .committed_fact_reader
             .as_ref()
             .ok_or_else(|| {
@@ -1264,7 +1052,7 @@ fn resolve_cursor_fact(
                     fact_ref.page_id
                 )
             })?
-            .resolve(fact_ref)
+            .resolve(fact_ref),
     }
 }
 
@@ -1315,20 +1103,20 @@ impl FactStorage {
         };
 
         // Fallback: no indexes built yet
-        if d.pending_indexes.eavt.is_empty() && d.committed_index_reader.is_none() {
+        if d.pending.is_empty() && d.committed_index_reader.is_none() {
             if d.committed.is_none() {
                 return Ok(d
-                    .facts
-                    .iter()
+                    .pending
+                    .records()
                     .filter(|f| &f.entity == entity_id)
-                    .cloned()
+                    .map(|fact| fact.to_fact())
                     .collect());
             }
             let mut result: Vec<Fact> = d
-                .facts
-                .iter()
+                .pending
+                .records()
                 .filter(|f| &f.entity == entity_id)
-                .cloned()
+                .map(|fact| fact.to_fact())
                 .collect();
             if let Some(loader) = &d.committed {
                 for fact in loader.stream_all()? {
@@ -1342,12 +1130,9 @@ impl FactStorage {
 
         let mut facts = Vec::new();
 
-        // Pending: in-memory BTreeMap bounded range.
-        for (key, &fr) in d.pending_indexes.eavt.range(start.clone()..end.clone()) {
-            if key.entity != *entity_id {
-                break;
-            }
-            facts.push(resolve_fact_ref(&d, fr)?);
+        // Pending: canonical arena plus bounded sorted-ID runs.
+        for id in d.pending.range_eavt(&start, &end) {
+            facts.push(d.pending.get(id)?.to_fact());
         }
 
         // Committed: on-disk B+tree range scan
@@ -1388,7 +1173,7 @@ impl FactStorage {
         let d = self.data.read().unwrap_or_else(|e| e.into_inner());
 
         // Fallback: no index
-        if d.pending_indexes.aevt.is_empty() && d.committed_index_reader.is_none() {
+        if d.pending.is_empty() && d.committed_index_reader.is_none() {
             drop(d);
             return Ok(self
                 .get_all_facts()?
@@ -1421,24 +1206,8 @@ impl FactStorage {
         let mut facts = Vec::new();
 
         // Pending
-        let pending_range: Vec<FactRef> = match &end_opt {
-            Some(end) => d
-                .pending_indexes
-                .aevt
-                .range(start.clone()..end.clone())
-                .filter(|(k, _)| k.attribute == *attribute)
-                .map(|(_, &r)| r)
-                .collect(),
-            None => d
-                .pending_indexes
-                .aevt
-                .range(start.clone()..)
-                .take_while(|(k, _)| k.attribute == *attribute)
-                .map(|(_, &r)| r)
-                .collect(),
-        };
-        for fr in pending_range {
-            facts.push(resolve_fact_ref(&d, fr)?);
+        for id in d.pending.range_aevt(&start, end_opt.as_ref()) {
+            facts.push(d.pending.get(id)?.to_fact());
         }
 
         // Committed
@@ -1487,21 +1256,7 @@ impl FactStorage {
             asserted: false,
         });
         let d = self.data.read().unwrap_or_else(|error| error.into_inner());
-        let pending: Vec<(AevtKey, FactRef)> = match &end {
-            Some(end) => d
-                .pending_indexes
-                .aevt
-                .range(start.clone()..end.clone())
-                .map(|(key, fact_ref)| (key.clone(), *fact_ref))
-                .collect(),
-            None => d
-                .pending_indexes
-                .aevt
-                .range(start.clone()..)
-                .take_while(|(key, _)| key.attribute == *attribute)
-                .map(|(key, fact_ref)| (key.clone(), *fact_ref))
-                .collect(),
-        };
+        let pending = d.pending.range_aevt(&start, end.as_ref());
         #[cfg(any(test, feature = "bench-internals"))]
         let diagnostics = CurrentAttributeCursorDiagnostics {
             selected_pending_entries: usize_to_u64(pending.len()),
@@ -1622,11 +1377,14 @@ impl FactStorage {
 
         let accept = |cursor: &mut CurrentAttributeCursor,
                       key: &AevtKey,
-                      fact_ref: FactRef,
+                      fact_ref: CursorFactRef,
+                      committed: bool,
                       visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>|
          -> Result<()> {
             if !entry_visible_as_of(key, cursor.as_of.as_ref()) {
-                cursor.last_key = Some(key.clone());
+                if committed {
+                    cursor.last_key = Some(key.clone());
+                }
                 return Ok(());
             }
             if cursor
@@ -1641,7 +1399,9 @@ impl FactStorage {
             cursor.note_reducer_shape(added_window);
             #[cfg(not(any(test, feature = "bench-internals")))]
             let _ = added_window;
-            cursor.last_key = Some(key.clone());
+            if committed {
+                cursor.last_key = Some(key.clone());
+            }
             Ok(())
         };
 
@@ -1659,16 +1419,26 @@ impl FactStorage {
                         && cursor
                             .pending
                             .get(cursor.pending_position)
-                            .is_some_and(|(pending_key, _)| pending_key < key)
+                            .is_some_and(|id| {
+                                d.pending
+                                    .compare_aevt_key(*id, key)
+                                    .is_ok_and(|order| order.is_lt())
+                            })
                     {
-                        let (pending_key, pending_ref) = cursor
+                        let pending_id = *cursor
                             .pending
                             .get(cursor.pending_position)
-                            .cloned()
                             .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+                        let pending_key = d.pending.get(pending_id)?.to_aevt_key();
                         #[cfg(any(test, feature = "bench-internals"))]
                         cursor.note_pending_entry();
-                        accept(cursor, &pending_key, pending_ref, visit)?;
+                        accept(
+                            cursor,
+                            &pending_key,
+                            CursorFactRef::Pending(pending_id),
+                            false,
+                            visit,
+                        )?;
                         cursor.pending_position += 1;
                         processed += 1;
                         if processed >= max_entries {
@@ -1677,7 +1447,7 @@ impl FactStorage {
                     }
                     #[cfg(any(test, feature = "bench-internals"))]
                     cursor.note_committed_entry();
-                    accept(cursor, key, fact_ref, visit)?;
+                    accept(cursor, key, CursorFactRef::Committed(fact_ref), true, visit)?;
                     processed += 1;
                     Ok(processed < max_entries)
                 })
@@ -1693,14 +1463,20 @@ impl FactStorage {
         }
 
         while cursor.pending_position < cursor.pending.len() && processed < max_entries {
-            let (key, fact_ref) = cursor
+            let pending_id = *cursor
                 .pending
                 .get(cursor.pending_position)
-                .cloned()
                 .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+            let key = d.pending.get(pending_id)?.to_aevt_key();
             #[cfg(any(test, feature = "bench-internals"))]
             cursor.note_pending_entry();
-            accept(cursor, &key, fact_ref, visit)?;
+            accept(
+                cursor,
+                &key,
+                CursorFactRef::Pending(pending_id),
+                false,
+                visit,
+            )?;
             cursor.pending_position += 1;
             processed += 1;
         }
@@ -1748,7 +1524,7 @@ fn entry_visible_as_of(key: &AevtKey, as_of: Option<&AsOf>) -> bool {
 fn reduce_current_entry(
     values: &mut std::collections::HashMap<Vec<u8>, CurrentValueState>,
     key: &AevtKey,
-    fact_ref: FactRef,
+    fact_ref: CursorFactRef,
 ) -> bool {
     let state = values.entry(key.value_bytes.clone()).or_default();
     let windows_before = state
@@ -1854,7 +1630,7 @@ impl FactStorage {
             .and_then(|l| l.stream_all().ok())
             .map(|v| v.len())
             .unwrap_or(0);
-        committed_count + d.facts.len()
+        committed_count + d.pending.len()
     }
 
     /// Get the count of currently asserted facts. Test use only.
@@ -1865,18 +1641,55 @@ impl FactStorage {
     /// Returns (eavt_len, aevt_len, avet_len, vaet_len). Test use only.
     pub(crate) fn index_counts(&self) -> (usize, usize, usize, usize) {
         let d = self.data.read().unwrap();
-        (
-            d.pending_indexes.eavt.len(),
-            d.pending_indexes.aevt.len(),
-            d.pending_indexes.avet.len(),
-            d.pending_indexes.vaet.len(),
-        )
+        d.pending.index_counts()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::index::{AvetKey, EavtKey, Indexes, VaetKey};
+
+    struct TestIndexReader(Indexes);
+
+    impl crate::storage::CommittedIndexReader for TestIndexReader {
+        fn range_scan_eavt(&self, start: &EavtKey, end: Option<&EavtKey>) -> Result<Vec<FactRef>> {
+            Ok(self
+                .0
+                .eavt
+                .range(start.clone()..)
+                .take_while(|(key, _)| end.is_none_or(|end| *key < end))
+                .map(|(_, value)| *value)
+                .collect())
+        }
+        fn range_scan_aevt(&self, start: &AevtKey, end: Option<&AevtKey>) -> Result<Vec<FactRef>> {
+            Ok(self
+                .0
+                .aevt
+                .range(start.clone()..)
+                .take_while(|(key, _)| end.is_none_or(|end| *key < end))
+                .map(|(_, value)| *value)
+                .collect())
+        }
+        fn range_scan_avet(&self, start: &AvetKey, end: Option<&AvetKey>) -> Result<Vec<FactRef>> {
+            Ok(self
+                .0
+                .avet
+                .range(start.clone()..)
+                .take_while(|(key, _)| end.is_none_or(|end| *key < end))
+                .map(|(_, value)| *value)
+                .collect())
+        }
+        fn range_scan_vaet(&self, start: &VaetKey, end: Option<&VaetKey>) -> Result<Vec<FactRef>> {
+            Ok(self
+                .0
+                .vaet
+                .range(start.clone()..)
+                .take_while(|(key, _)| end.is_none_or(|end| *key < end))
+                .map(|(_, value)| *value)
+                .collect())
+        }
+    }
 
     #[test]
     fn test_fact_storage_transact() {
@@ -2569,7 +2382,7 @@ mod tests {
                 slot_index: 0,
             },
         );
-        storage.replace_pending_indexes(indexes);
+        storage.set_committed_index_reader(Arc::new(TestIndexReader(indexes)));
         storage.set_committed_reader(loader);
 
         // get_facts_by_entity must resolve via CommittedFactReader (EAVT range scan).
@@ -2860,7 +2673,7 @@ mod tests {
                 slot_index: 0,
             },
         );
-        storage.replace_pending_indexes(indexes);
+        storage.set_committed_index_reader(Arc::new(TestIndexReader(indexes)));
         storage.set_committed_reader(loader);
 
         // Restore tx_counter so pending transact gets tx_count = 2
@@ -3391,10 +3204,10 @@ mod tests {
         assert!(diagnostics.facts.owned_attribute_bytes > 0);
         assert_eq!(diagnostics.facts.owned_attribute_allocations, 3);
         assert!(diagnostics.facts.owned_value_bytes > 0);
-        assert_eq!(diagnostics.facts.owned_value_allocations, 1);
-        assert!(diagnostics.duplicate_keys.owned_value_bytes > 0);
-        assert_eq!(diagnostics.duplicate_keys.owned_attribute_allocations, 3);
-        assert_eq!(diagnostics.duplicate_keys.owned_value_allocations, 3);
+        assert_eq!(diagnostics.facts.owned_value_allocations, 4);
+        assert_eq!(diagnostics.duplicate_keys.owned_value_bytes, 0);
+        assert_eq!(diagnostics.duplicate_keys.owned_attribute_allocations, 0);
+        assert_eq!(diagnostics.duplicate_keys.owned_value_allocations, 0);
         assert_eq!(
             diagnostics.total_accounted_bytes,
             diagnostics
@@ -3414,30 +3227,31 @@ mod tests {
         const UNRELATED: u128 = 1_000_000;
         let storage = FactStorage::new();
         {
-            let mut data = storage.data.write().unwrap();
-            for index in 0..UNRELATED {
-                let attribute = if index < UNRELATED / 2 {
-                    ":a/noise"
-                } else {
-                    ":z/noise"
-                };
-                data.pending_indexes.aevt.insert(
-                    AevtKey {
-                        attribute: attribute.to_owned(),
-                        entity: uuid::Uuid::from_u128(index.saturating_add(1)),
-                        valid_from: 0,
-                        valid_to: VALID_TIME_FOREVER,
-                        tx_count: 1,
-                        value_bytes: encode_value(&Value::Integer(1)),
-                        tx_id: 1,
-                        asserted: true,
-                    },
-                    FactRef {
-                        page_id: 0,
-                        slot_index: 0,
-                    },
-                );
-            }
+            let facts = (0..UNRELATED)
+                .map(|index| {
+                    let attribute = if index < UNRELATED / 2 {
+                        ":a/noise"
+                    } else {
+                        ":z/noise"
+                    };
+                    Fact::with_valid_time(
+                        uuid::Uuid::from_u128(index.saturating_add(1)),
+                        attribute.to_owned(),
+                        Value::Integer(1),
+                        1,
+                        1,
+                        0,
+                        VALID_TIME_FOREVER,
+                    )
+                })
+                .collect();
+            storage
+                .data
+                .write()
+                .unwrap()
+                .pending
+                .insert_batch(facts, false)
+                .unwrap();
         }
 
         let mut cursor = storage.current_attribute_cursor(
@@ -3484,11 +3298,9 @@ mod tests {
         );
         let initial = cursor.diagnostics();
         assert_eq!(initial.selected_pending_entries, 10_000);
-        assert!(
-            initial.selected_pending_snapshot_bytes
-                >= 10_000_u64.saturating_mul(
-                    u64::try_from(std::mem::size_of::<(AevtKey, FactRef,)>()).unwrap()
-                )
+        assert_eq!(
+            initial.selected_pending_snapshot_bytes,
+            10_000_u64.saturating_mul(u64::try_from(std::mem::size_of::<PendingFactId>()).unwrap())
         );
 
         let mut emitted = 0_u64;
