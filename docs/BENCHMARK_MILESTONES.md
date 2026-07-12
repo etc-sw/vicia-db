@@ -46,30 +46,14 @@ dedicated-host or real-browser absolute gates close product milestones.
 The native gate exercises distinct system responsibilities:
 
 ```bash
-mkdir -p target/benchmark-receipts
-cargo run --release --example generate_bench_fixture -- \
-  10000 target/benchmark-receipts/base-10k.graph
-
-VICIA_BENCH_TESTBED=local-a0 \
-VICIA_BENCH_BASE_FIXTURE=target/benchmark-receipts/base-10k.graph \
-VICIA_BENCH_RECEIPT=target/benchmark-receipts/vetch-cadence-smoke.json \
-cargo bench --bench vetch_cadence_benchmark -- smoke
-
-VICIA_BENCH_TESTBED=local-a0 \
-VICIA_BENCH_BASE_FIXTURE=target/benchmark-receipts/base-10k.graph \
-VICIA_BENCH_RECEIPT=target/benchmark-receipts/delta-accumulation-smoke.json \
-cargo bench --bench delta_accumulation_benchmark -- smoke
-
-VICIA_BENCH_TESTBED=local-a0 \
-VICIA_BENCH_BASE_FIXTURE=target/benchmark-receipts/base-10k.graph \
-VICIA_BENCH_RECEIPT=target/benchmark-receipts/agent-brief-smoke.json \
-cargo bench --bench agent_brief_read_path_benchmark -- smoke
-
-node scripts/check-benchmark-catalog.mjs
-for receipt in target/benchmark-receipts/*-smoke.json; do
-  node scripts/check-benchmark-receipt.mjs "$receipt"
-done
+VICIA_BENCH_TESTBED=local-a0 ./scripts/run-benchmark-gate.sh smoke
 ```
+
+The script generates one exact shared fixture, runs the three native suites,
+validates every receipt, prints a gate summary, and keeps the JSON/CSV evidence
+under a timestamped directory. Use `full` for all three 1M release profiles or
+`delta-mini` for the bounded 1M pre-optimization delta gate. An optional second
+argument selects a stable output directory for CI or automation.
 
 CI runs this exact family after compiling every benchmark. Smoke receipts may
 pass their budgets but remain `acceptanceEligible: false` by definition.

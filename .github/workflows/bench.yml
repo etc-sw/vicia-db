@@ -7,6 +7,7 @@ on:
       - "benchmarks/**"
       - "benches/**"
       - "scripts/check-benchmark-*.mjs"
+      - "scripts/run-benchmark-gate.sh"
       - "src/**"
   schedule:
     - cron: '0 2 * * *'  # 02:00 UTC nightly
@@ -59,24 +60,7 @@ jobs:
           VICIA_BENCH_TESTBED: ubuntu-latest-shared
           VICIA_BENCH_BASE_FIXTURE: target/benchmark-receipts/base-10k.graph
         run: |
-          mkdir -p target/benchmark-receipts
-          cargo run --release --example generate_bench_fixture -- \
-            10000 target/benchmark-receipts/base-10k.graph
-          VICIA_BENCH_RECEIPT=target/benchmark-receipts/vetch-cadence-smoke.json \
-            cargo bench --bench vetch_cadence_benchmark -- smoke \
-            > target/benchmark-receipts/vetch-cadence-smoke.csv
-          VICIA_BENCH_RECEIPT=target/benchmark-receipts/delta-accumulation-smoke.json \
-            cargo bench --bench delta_accumulation_benchmark -- smoke \
-            > target/benchmark-receipts/delta-accumulation-smoke.csv
-          VICIA_BENCH_RECEIPT=target/benchmark-receipts/agent-brief-smoke.json \
-            cargo bench --bench agent_brief_read_path_benchmark -- smoke \
-            > target/benchmark-receipts/agent-brief-smoke.csv
-          node scripts/check-benchmark-receipt.mjs \
-            target/benchmark-receipts/vetch-cadence-smoke.json
-          node scripts/check-benchmark-receipt.mjs \
-            target/benchmark-receipts/delta-accumulation-smoke.json
-          node scripts/check-benchmark-receipt.mjs \
-            target/benchmark-receipts/agent-brief-smoke.json
+          ./scripts/run-benchmark-gate.sh smoke target/benchmark-receipts
 
       - name: Upload caller-shaped smoke evidence
         if: always()
