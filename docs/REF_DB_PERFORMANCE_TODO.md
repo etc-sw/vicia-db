@@ -25,8 +25,8 @@ Temporary checklist based on the 1M reference DB benchmark.
 ## P3 — Storage and maintenance
 
 - [x] Decompose and reduce WAL-backed pending open RSS. The canonical overlay owns each fact/value once and indexes `PendingFactId` runs; at 1M Integer facts the clean v3 full receipt measures 221.445 MiB live RSS and 171.842 MiB accounted payload. Sequential WAL replay peaks at one 1K-fact batch and leaves only 0.285 MiB retained RSS.
-- [ ] Attribute bytes to fact pages and each EAVT/AEVT/AVET/VAET index.
-- [ ] Record B-tree fill ratio and repeated attribute/entity encoding cost.
+- [x] Attribute bytes to fact pages and each EAVT/AEVT/AVET/VAET index. The clean `vicia.storage-layout.v1` full receipt accounts for every published v11 page; at production fill 75 the 1M fixture is 61.875 MiB facts, 96.551 MiB EAVT, 96.551 MiB AEVT, 97.410 MiB AVET, and 0.004 MiB VAET.
+- [x] Record B-tree fill ratio and repeated attribute/entity encoding cost. The receipt retains exact payload/structural/unused bytes and conservative restart-10/16 prefix estimates for every index and fill candidate.
 - [ ] Reduce the 1M fixture from 338 MiB without changing the public API or v11 format.
 - [ ] Measure `1M base + 1/10/100/1K pending` checkpoint latency and peak RSS.
 

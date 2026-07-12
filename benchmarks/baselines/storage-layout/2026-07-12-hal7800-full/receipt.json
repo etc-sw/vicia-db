@@ -1,0 +1,1332 @@
+{
+  "schema": "vicia.storage-layout.v1",
+  "profile": "full",
+  "facts": 1000000,
+  "repetitions": 20,
+  "generatedAtUnixMs": 1783863952935,
+  "sourceCommit": "33cbc2bca75e41439301985d85467ab46e7bdecf",
+  "trackedClean": true,
+  "selectedFillPercent": null,
+  "candidates": [
+    {
+      "fillPercent": 75,
+      "checkpoint": {
+        "elapsedSamplesMs": [
+          5121.167585,
+          4934.284540000001,
+          5160.624588,
+          4851.902799,
+          4841.726492000001,
+          5227.9337860000005,
+          5659.563471,
+          5180.030065000001,
+          4830.237252,
+          4865.842414000001,
+          4869.372743999999,
+          5510.955188,
+          5427.370014,
+          4936.821704,
+          5012.42838,
+          5009.436269,
+          5162.811405,
+          5350.872103000001,
+          5156.753691,
+          5251.742516
+        ],
+        "baselineRssSamplesBytes": [
+          237051904,
+          237223936,
+          237236224,
+          237076480,
+          237133824,
+          237277184,
+          237432832,
+          237289472,
+          237301760,
+          237338624,
+          237170688,
+          236961792,
+          236867584,
+          236564480,
+          237289472,
+          237346816,
+          237207552,
+          237248512,
+          237445120,
+          237297664
+        ],
+        "peakRssSamplesBytes": [
+          1230708736,
+          1230749696,
+          1230761984,
+          1230733312,
+          1230659584,
+          1230802944,
+          1231089664,
+          1230815232,
+          1230827520,
+          1230864384,
+          1230696448,
+          1230487552,
+          1230393344,
+          1230090240,
+          1230815232,
+          1230741504,
+          1230733312,
+          1230774272,
+          1230839808,
+          1230823424
+        ],
+        "deltaRssSamplesBytes": [
+          993656832,
+          993525760,
+          993525760,
+          993656832,
+          993525760,
+          993525760,
+          993656832,
+          993525760,
+          993525760,
+          993525760,
+          993525760,
+          993525760,
+          993525760,
+          993525760,
+          993525760,
+          993394688,
+          993525760,
+          993525760,
+          993394688,
+          993525760
+        ],
+        "graphBytes": 369876992,
+        "layout": {
+          "formatVersion": 11,
+          "publishedPages": 90302,
+          "publishedBytes": 369876992,
+          "factPageStart": 1,
+          "facts": {
+            "pages": 15840,
+            "entries": 1000000,
+            "payloadBytes": 59864744,
+            "structuralBytes": 4190080,
+            "unusedBytes": 825816
+          },
+          "eavt": {
+            "rootPage": 40557,
+            "height": 4,
+            "leaf": {
+              "pages": 24097,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4289164,
+              "unusedBytes": 25547403
+            },
+            "internal": {
+              "pages": 620,
+              "entries": 24096,
+              "payloadBytes": 1587695,
+              "structuralBytes": 296592,
+              "unusedBytes": 655233
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 109
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 118
+            }
+          },
+          "aevt": {
+            "rootPage": 65274,
+            "height": 4,
+            "leaf": {
+              "pages": 24097,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4289164,
+              "unusedBytes": 25547403
+            },
+            "internal": {
+              "pages": 620,
+              "entries": 24096,
+              "payloadBytes": 1587695,
+              "structuralBytes": 296592,
+              "unusedBytes": 655233
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 11401638
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 12026306
+            }
+          },
+          "avet": {
+            "rootPage": 90211,
+            "height": 4,
+            "leaf": {
+              "pages": 24312,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4291744,
+              "unusedBytes": 26425463
+            },
+            "internal": {
+              "pages": 625,
+              "entries": 24311,
+              "payloadBytes": 1601507,
+              "structuralBytes": 299232,
+              "unusedBytes": 659261
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 16686989
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 17610611
+            }
+          },
+          "vaet": {
+            "rootPage": 90212,
+            "height": 1,
+            "leaf": {
+              "pages": 1,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 12,
+              "unusedBytes": 4084
+            },
+            "internal": {
+              "pages": 0,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 0,
+              "unusedBytes": 0
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 0
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 0
+            }
+          },
+          "headerBytes": 4096,
+          "otherPublishedBytes": 364544
+        }
+      },
+      "query": {
+        "pointSamplesMs": [
+          0.024112,
+          0.018695,
+          0.018296,
+          0.020395999999999997,
+          0.021042,
+          0.018343,
+          0.018115,
+          0.018011,
+          0.018172,
+          0.018267,
+          0.018286,
+          0.017554,
+          0.017535000000000002,
+          0.01763,
+          0.017876999999999997,
+          0.017762999999999998,
+          0.01782,
+          0.018105,
+          0.01859,
+          0.018219
+        ],
+        "aggregateSamplesMs": [
+          513.74456,
+          536.410738,
+          547.011298,
+          519.885346,
+          531.491819,
+          549.124418,
+          512.746339,
+          532.6131290000001,
+          539.4539940000001,
+          521.241866,
+          539.979135,
+          527.209976,
+          524.401983,
+          533.953614,
+          514.737086,
+          532.087379,
+          533.961001,
+          517.1151470000001,
+          529.224072,
+          534.997158
+        ],
+        "count": 1000000,
+        "checksum": 499999500000,
+        "baselineRssBytes": 4321280,
+        "peakRssBytes": 4452352,
+        "deltaRssBytes": 131072
+      }
+    },
+    {
+      "fillPercent": 85,
+      "checkpoint": {
+        "elapsedSamplesMs": [
+          4978.447284,
+          5410.636002,
+          5260.2584480000005,
+          5022.390504999999,
+          5498.884685,
+          4969.41746,
+          4918.978259,
+          5447.6777250000005,
+          5008.985857,
+          4831.733337000001,
+          5036.041047000001,
+          5080.562398,
+          5322.775125,
+          4902.5558040000005,
+          4936.201971,
+          4800.298537,
+          5153.726522,
+          5478.4353169999995,
+          5297.93098,
+          5001.606094
+        ],
+        "baselineRssSamplesBytes": [
+          237244416,
+          236306432,
+          237056000,
+          237305856,
+          237199360,
+          237346816,
+          236982272,
+          237006848,
+          236924928,
+          237469696,
+          236990464,
+          237056000,
+          237084672,
+          237162496,
+          237023232,
+          237096960,
+          237400064,
+          237391872,
+          237318144,
+          236908544
+        ],
+        "peakRssSamplesBytes": [
+          1230639104,
+          1229701120,
+          1230581760,
+          1230700544,
+          1230462976,
+          1230741504,
+          1230508032,
+          1230663680,
+          1230450688,
+          1230864384,
+          1230385152,
+          1230450688,
+          1230610432,
+          1230557184,
+          1230548992,
+          1230491648,
+          1230925824,
+          1230786560,
+          1230712832,
+          1230434304
+        ],
+        "deltaRssSamplesBytes": [
+          993394688,
+          993394688,
+          993525760,
+          993394688,
+          993263616,
+          993394688,
+          993525760,
+          993656832,
+          993525760,
+          993394688,
+          993394688,
+          993394688,
+          993525760,
+          993394688,
+          993525760,
+          993394688,
+          993525760,
+          993394688,
+          993394688,
+          993525760
+        ],
+        "graphBytes": 332390400,
+        "layout": {
+          "formatVersion": 11,
+          "publishedPages": 81150,
+          "publishedBytes": 332390400,
+          "factPageStart": 1,
+          "facts": {
+            "pages": 15840,
+            "entries": 1000000,
+            "payloadBytes": 59864744,
+            "structuralBytes": 4190080,
+            "unusedBytes": 825816
+          },
+          "eavt": {
+            "rootPage": 37602,
+            "height": 4,
+            "leaf": {
+              "pages": 21277,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4255324,
+              "unusedBytes": 14030523
+            },
+            "internal": {
+              "pages": 485,
+              "entries": 21276,
+              "payloadBytes": 1401501,
+              "structuralBytes": 261132,
+              "unusedBytes": 323927
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 115
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 124
+            }
+          },
+          "aevt": {
+            "rootPage": 59364,
+            "height": 4,
+            "leaf": {
+              "pages": 21277,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4255324,
+              "unusedBytes": 14030523
+            },
+            "internal": {
+              "pages": 485,
+              "entries": 21276,
+              "payloadBytes": 1401501,
+              "structuralBytes": 261132,
+              "unusedBytes": 323927
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 11584228
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 12135907
+            }
+          },
+          "avet": {
+            "rootPage": 81068,
+            "height": 4,
+            "leaf": {
+              "pages": 21221,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4254652,
+              "unusedBytes": 13801819
+            },
+            "internal": {
+              "pages": 483,
+              "entries": 21220,
+              "payloadBytes": 1397875,
+              "structuralBytes": 260436,
+              "unusedBytes": 320057
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 16980670
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 17787238
+            }
+          },
+          "vaet": {
+            "rootPage": 81069,
+            "height": 1,
+            "leaf": {
+              "pages": 1,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 12,
+              "unusedBytes": 4084
+            },
+            "internal": {
+              "pages": 0,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 0,
+              "unusedBytes": 0
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 0
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 0
+            }
+          },
+          "headerBytes": 4096,
+          "otherPublishedBytes": 327680
+        }
+      },
+      "query": {
+        "pointSamplesMs": [
+          0.040590999999999995,
+          0.035101999999999994,
+          0.041794,
+          0.034202,
+          0.033462,
+          0.033244,
+          0.033785,
+          0.033661,
+          0.033632,
+          0.033547999999999994,
+          0.033235,
+          0.034865,
+          0.034448,
+          0.033462,
+          0.034230000000000003,
+          0.033879,
+          0.034922,
+          0.041737,
+          0.041017,
+          0.03476
+        ],
+        "aggregateSamplesMs": [
+          545.469682,
+          640.358874,
+          566.198023,
+          538.4506180000001,
+          544.237095,
+          552.1660350000001,
+          610.7507039999999,
+          543.720451,
+          535.199866,
+          522.4334779999999,
+          561.598445,
+          547.3831260000001,
+          543.1126280000001,
+          559.169946,
+          538.95407,
+          556.671704,
+          532.343522,
+          567.196852,
+          541.07421,
+          574.6854500000001
+        ],
+        "count": 1000000,
+        "checksum": 499999500000,
+        "baselineRssBytes": 4284416,
+        "peakRssBytes": 4415488,
+        "deltaRssBytes": 131072
+      }
+    },
+    {
+      "fillPercent": 90,
+      "checkpoint": {
+        "elapsedSamplesMs": [
+          5090.032047000001,
+          6438.178584,
+          5420.937304,
+          5147.175423000001,
+          5797.088875,
+          5018.773182,
+          5165.867276,
+          5097.5002429999995,
+          5030.830787,
+          4984.124870000001,
+          5024.592699000001,
+          5621.5588099999995,
+          5171.788947,
+          4969.402247999999,
+          5031.522443,
+          5358.290291,
+          4872.275159,
+          4966.905016,
+          4886.485322,
+          5037.457365
+        ],
+        "baselineRssSamplesBytes": [
+          237060096,
+          237170688,
+          236937216,
+          237285376,
+          237363200,
+          237309952,
+          236904448,
+          237432832,
+          237174784,
+          237223936,
+          237031424,
+          236949504,
+          237080576,
+          237359104,
+          237158400,
+          237461504,
+          237195264,
+          237297664,
+          237182976,
+          237461504
+        ],
+        "peakRssSamplesBytes": [
+          1230454784,
+          1230303232,
+          1230331904,
+          1230811136,
+          1230757888,
+          1230704640,
+          1230299136,
+          1230827520,
+          1230700544,
+          1230618624,
+          1230426112,
+          1230475264,
+          1230606336,
+          1230753792,
+          1230553088,
+          1230856192,
+          1230589952,
+          1230692352,
+          1230577664,
+          1230856192
+        ],
+        "deltaRssSamplesBytes": [
+          993394688,
+          993132544,
+          993394688,
+          993525760,
+          993394688,
+          993394688,
+          993394688,
+          993394688,
+          993525760,
+          993394688,
+          993394688,
+          993525760,
+          993525760,
+          993394688,
+          993394688,
+          993394688,
+          993394688,
+          993394688,
+          993394688,
+          993394688
+        ],
+        "graphBytes": 316002304,
+        "layout": {
+          "formatVersion": 11,
+          "publishedPages": 77149,
+          "publishedBytes": 316002304,
+          "factPageStart": 1,
+          "facts": {
+            "pages": 15840,
+            "entries": 1000000,
+            "payloadBytes": 59864744,
+            "structuralBytes": 4190080,
+            "unusedBytes": 825816
+          },
+          "eavt": {
+            "rootPage": 36267,
+            "height": 4,
+            "leaf": {
+              "pages": 20000,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4240000,
+              "unusedBytes": 8815255
+            },
+            "internal": {
+              "pages": 427,
+              "entries": 19999,
+              "payloadBytes": 1317398,
+              "structuralBytes": 245112,
+              "unusedBytes": 186482
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 123
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 125
+            }
+          },
+          "aevt": {
+            "rootPage": 56694,
+            "height": 4,
+            "leaf": {
+              "pages": 20000,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4240000,
+              "unusedBytes": 8815255
+            },
+            "internal": {
+              "pages": 427,
+              "entries": 19999,
+              "payloadBytes": 1317398,
+              "structuralBytes": 245112,
+              "unusedBytes": 186482
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 11667086
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 11926271
+            }
+          },
+          "avet": {
+            "rootPage": 77071,
+            "height": 4,
+            "leaf": {
+              "pages": 19951,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4239412,
+              "unusedBytes": 8615139
+            },
+            "internal": {
+              "pages": 426,
+              "entries": 19950,
+              "payloadBytes": 1314210,
+              "structuralBytes": 244512,
+              "unusedBytes": 186174
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 17054242
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 17480447
+            }
+          },
+          "vaet": {
+            "rootPage": 77072,
+            "height": 1,
+            "leaf": {
+              "pages": 1,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 12,
+              "unusedBytes": 4084
+            },
+            "internal": {
+              "pages": 0,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 0,
+              "unusedBytes": 0
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 0
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 0
+            }
+          },
+          "headerBytes": 4096,
+          "otherPublishedBytes": 311296
+        }
+      },
+      "query": {
+        "pointSamplesMs": [
+          0.041896,
+          0.038512,
+          0.030895,
+          0.030580999999999997,
+          0.03002,
+          0.030381,
+          0.034052,
+          0.031095,
+          0.049751,
+          0.034052,
+          0.038597000000000006,
+          0.03021,
+          0.030458,
+          0.030875,
+          0.043475,
+          0.031085,
+          0.0306,
+          0.031113,
+          0.031199,
+          0.030447
+        ],
+        "aggregateSamplesMs": [
+          522.7602099999999,
+          527.121439,
+          524.6064200000001,
+          513.0223080000001,
+          512.080012,
+          513.391911,
+          505.596386,
+          549.653545,
+          510.725175,
+          499.963287,
+          523.2532709999999,
+          509.960454,
+          502.951924,
+          548.540981,
+          512.187148,
+          507.197891,
+          515.023132,
+          518.378862,
+          527.926099,
+          535.764377
+        ],
+        "count": 1000000,
+        "checksum": 499999500000,
+        "baselineRssBytes": 4399104,
+        "peakRssBytes": 4399104,
+        "deltaRssBytes": 0
+      }
+    },
+    {
+      "fillPercent": 95,
+      "checkpoint": {
+        "elapsedSamplesMs": [
+          4878.682794,
+          5017.59858,
+          5131.9349760000005,
+          4890.696424,
+          6069.037364,
+          5477.591567,
+          4613.412831,
+          4708.178352,
+          5043.447587000001,
+          4757.034904,
+          4979.023474,
+          5012.232094,
+          4589.705634,
+          4860.289132,
+          4915.297092999999,
+          4617.0826480000005,
+          4899.296886,
+          5088.9170540000005,
+          4793.90613,
+          4995.237539
+        ],
+        "baselineRssSamplesBytes": [
+          237445120,
+          237326336,
+          237248512,
+          236908544,
+          236855296,
+          236879872,
+          237232128,
+          237211648,
+          236724224,
+          236945408,
+          237191168,
+          237236224,
+          237203456,
+          237334528,
+          237010944,
+          237268992,
+          236826624,
+          236957696,
+          237305856,
+          237187072
+        ],
+        "peakRssSamplesBytes": [
+          1230708736,
+          1230852096,
+          1230643200,
+          1230696448,
+          1230249984,
+          1230405632,
+          1230495744,
+          1230475264,
+          1230249984,
+          1230340096,
+          1230585856,
+          1230630912,
+          1230860288,
+          1230860288,
+          1230405632,
+          1230532608,
+          1230221312,
+          1230483456,
+          1230569472,
+          1230581760
+        ],
+        "deltaRssSamplesBytes": [
+          993263616,
+          993525760,
+          993394688,
+          993787904,
+          993394688,
+          993525760,
+          993263616,
+          993263616,
+          993525760,
+          993394688,
+          993394688,
+          993394688,
+          993656832,
+          993525760,
+          993394688,
+          993263616,
+          993394688,
+          993525760,
+          993263616,
+          993394688
+        ],
+        "graphBytes": 301776896,
+        "layout": {
+          "formatVersion": 11,
+          "publishedPages": 73676,
+          "publishedBytes": 301776896,
+          "factPageStart": 1,
+          "facts": {
+            "pages": 15840,
+            "entries": 1000000,
+            "payloadBytes": 59864744,
+            "structuralBytes": 4190080,
+            "unusedBytes": 825816
+          },
+          "eavt": {
+            "rootPage": 35095,
+            "height": 4,
+            "leaf": {
+              "pages": 18868,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4226416,
+              "unusedBytes": 4192167
+            },
+            "internal": {
+              "pages": 387,
+              "entries": 18867,
+              "payloadBytes": 1242807,
+              "structuralBytes": 231048,
+              "unusedBytes": 111297
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 121
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 120
+            }
+          },
+          "aevt": {
+            "rootPage": 54350,
+            "height": 4,
+            "leaf": {
+              "pages": 18868,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4226416,
+              "unusedBytes": 4192167
+            },
+            "internal": {
+              "pages": 387,
+              "entries": 18867,
+              "payloadBytes": 1242807,
+              "structuralBytes": 231048,
+              "unusedBytes": 111297
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 11495982
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 11985060
+            }
+          },
+          "avet": {
+            "rootPage": 73602,
+            "height": 4,
+            "leaf": {
+              "pages": 18866,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4226392,
+              "unusedBytes": 4183999
+            },
+            "internal": {
+              "pages": 386,
+              "entries": 18865,
+              "payloadBytes": 1242697,
+              "structuralBytes": 231012,
+              "unusedBytes": 107347
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 16845897
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 17562617
+            }
+          },
+          "vaet": {
+            "rootPage": 73603,
+            "height": 1,
+            "leaf": {
+              "pages": 1,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 12,
+              "unusedBytes": 4084
+            },
+            "internal": {
+              "pages": 0,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 0,
+              "unusedBytes": 0
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 0
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 0
+            }
+          },
+          "headerBytes": 4096,
+          "otherPublishedBytes": 294912
+        }
+      },
+      "query": {
+        "pointSamplesMs": [
+          0.037969,
+          0.035459,
+          0.028289,
+          0.028077,
+          0.027432,
+          0.027607,
+          0.02828,
+          0.027662,
+          0.027348,
+          0.027653,
+          0.026998,
+          0.027017,
+          0.027146,
+          0.028132,
+          0.030975,
+          0.027109,
+          0.027376,
+          0.027394,
+          0.029397,
+          0.041438
+        ],
+        "aggregateSamplesMs": [
+          496.852053,
+          513.74802,
+          515.902874,
+          507.6386590000001,
+          507.649543,
+          509.284779,
+          536.520075,
+          489.61582,
+          506.29535,
+          515.86798,
+          525.7617,
+          498.531943,
+          519.483903,
+          519.1116460000001,
+          530.952049,
+          524.8037129999999,
+          589.233477,
+          537.8224,
+          518.511141,
+          562.1559950000001
+        ],
+        "count": 1000000,
+        "checksum": 499999500000,
+        "baselineRssBytes": 4382720,
+        "peakRssBytes": 4382720,
+        "deltaRssBytes": 0
+      }
+    },
+    {
+      "fillPercent": 100,
+      "checkpoint": {
+        "elapsedSamplesMs": [
+          4728.769067,
+          4831.038702,
+          5044.9129219999995,
+          4997.544078,
+          4959.754403,
+          5177.207975,
+          4935.561456,
+          4940.191567,
+          5640.258322000001,
+          4774.647086,
+          5171.799723,
+          5122.772149,
+          4964.7069249999995,
+          4993.058619,
+          5064.927415,
+          5190.413336,
+          7278.637738,
+          5672.733603000001,
+          5098.027803,
+          5045.773461999999
+        ],
+        "baselineRssSamplesBytes": [
+          237154304,
+          237113344,
+          237023232,
+          237330432,
+          237023232,
+          237125632,
+          237314048,
+          237449216,
+          237092864,
+          237195264,
+          237019136,
+          237088768,
+          237264896,
+          237281280,
+          236843008,
+          237252608,
+          236277760,
+          236617728,
+          237031424,
+          237117440
+        ],
+        "peakRssSamplesBytes": [
+          1230548992,
+          1230508032,
+          1230417920,
+          1230594048,
+          1230286848,
+          1230389248,
+          1230839808,
+          1230712832,
+          1230356480,
+          1230589952,
+          1230413824,
+          1230352384,
+          1230659584,
+          1230675968,
+          1230237696,
+          1230385152,
+          1229803520,
+          1230012416,
+          1230295040,
+          1230512128
+        ],
+        "deltaRssSamplesBytes": [
+          993394688,
+          993394688,
+          993394688,
+          993263616,
+          993263616,
+          993263616,
+          993525760,
+          993263616,
+          993263616,
+          993394688,
+          993394688,
+          993263616,
+          993394688,
+          993394688,
+          993394688,
+          993132544,
+          993525760,
+          993394688,
+          993263616,
+          993394688
+        ],
+        "graphBytes": 290168832,
+        "layout": {
+          "formatVersion": 11,
+          "publishedPages": 70842,
+          "publishedBytes": 290168832,
+          "factPageStart": 1,
+          "facts": {
+            "pages": 15840,
+            "entries": 1000000,
+            "payloadBytes": 59864744,
+            "structuralBytes": 4190080,
+            "unusedBytes": 825816
+          },
+          "eavt": {
+            "rootPage": 34061,
+            "height": 4,
+            "leaf": {
+              "pages": 17875,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4214500,
+              "unusedBytes": 136755
+            },
+            "internal": {
+              "pages": 346,
+              "entries": 17874,
+              "payloadBytes": 1177567,
+              "structuralBytes": 218640,
+              "unusedBytes": 21009
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 122
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 119
+            }
+          },
+          "aevt": {
+            "rootPage": 52282,
+            "height": 4,
+            "leaf": {
+              "pages": 17875,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4214500,
+              "unusedBytes": 136755
+            },
+            "internal": {
+              "pages": 346,
+              "entries": 17874,
+              "payloadBytes": 1177567,
+              "structuralBytes": 218640,
+              "unusedBytes": 21009
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 11573167
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 12036646
+            }
+          },
+          "avet": {
+            "rootPage": 70770,
+            "height": 4,
+            "leaf": {
+              "pages": 18138,
+              "entries": 1000000,
+              "payloadBytes": 68864745,
+              "structuralBytes": 4217656,
+              "unusedBytes": 1210847
+            },
+            "internal": {
+              "pages": 350,
+              "entries": 18137,
+              "payloadBytes": 1194777,
+              "structuralBytes": 221844,
+              "unusedBytes": 16979
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 16928723
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 17617842
+            }
+          },
+          "vaet": {
+            "rootPage": 70771,
+            "height": 1,
+            "leaf": {
+              "pages": 1,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 12,
+              "unusedBytes": 4084
+            },
+            "internal": {
+              "pages": 0,
+              "entries": 0,
+              "payloadBytes": 0,
+              "structuralBytes": 0,
+              "unusedBytes": 0
+            },
+            "prefixRestart10": {
+              "restartInterval": 10,
+              "estimatedSavedBytes": 0
+            },
+            "prefixRestart16": {
+              "restartInterval": 16,
+              "estimatedSavedBytes": 0
+            }
+          },
+          "headerBytes": 4096,
+          "otherPublishedBytes": 286720
+        }
+      },
+      "query": {
+        "pointSamplesMs": [
+          0.038182,
+          0.031785999999999995,
+          0.026192,
+          0.0257,
+          0.025956,
+          0.025692,
+          0.025161,
+          0.025047,
+          0.024612,
+          0.025493,
+          0.025521,
+          0.025663,
+          0.02535,
+          0.025227,
+          0.02536,
+          0.025464,
+          0.027167,
+          0.027356,
+          0.024697,
+          0.024839
+        ],
+        "aggregateSamplesMs": [
+          516.884352,
+          528.7071119999999,
+          550.7706810000001,
+          524.649942,
+          538.217639,
+          523.524808,
+          540.631916,
+          526.207955,
+          516.3534440000001,
+          528.767346,
+          517.2191,
+          545.295077,
+          542.764908,
+          536.9601769999999,
+          557.927059,
+          535.9324869999999,
+          552.062076,
+          543.413597,
+          501.821002,
+          509.83382200000005
+        ],
+        "count": 1000000,
+        "checksum": 499999500000,
+        "baselineRssBytes": 4374528,
+        "peakRssBytes": 4374528,
+        "deltaRssBytes": 0
+      }
+    }
+  ]
+}

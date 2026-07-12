@@ -38,6 +38,7 @@ pub(crate) struct BtreeBuildOptions {
 }
 
 impl BtreeBuildOptions {
+    #[cfg_attr(not(any(test, feature = "bench-internals")), allow(dead_code))]
     pub(crate) fn new(fill_percent: u8) -> Result<Self> {
         if !(50..=100).contains(&fill_percent) {
             anyhow::bail!("B-tree fill percent must be between 50 and 100")

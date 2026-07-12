@@ -1503,6 +1503,34 @@ just pending-isolation-smoke
 just pending-isolation-full
 ```
 
+### v11 storage layout and B-tree fill isolation
+
+`vicia.storage-layout.v1` walks the published v11 image page by page and
+attributes exact payload, structural, and unused bytes to fact pages and each
+EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
+estimates at restart intervals 10 and 16. The diagnostic API and fill override
+exist only under `bench-internals`; the public API and file format are unchanged.
+
+The clean 1M full run used 20 fresh checkpoint builds and 20 post-warmup point
+and aggregate samples per fill candidate. Fill 100 reduced the fixture from
+352.742 MiB to 276.727 MiB (-21.6%) and index unused bytes from 75.811 MiB to
+1.476 MiB. Its checkpoint p50 improved from 5,156.8 ms to 5,045.8 ms and
+aggregate p50 changed from 532.1 ms to 535.9 ms. It was not adopted: checkpoint
+p95 was 7,278.6 ms, 144% of its p50 and 28.6% above the fill-75 p95, so it
+failed the tail-latency gate. Production remains at fill 75.
+
+At fill 75, the exact allocation is 61.875 MiB fact pages, 96.551 MiB EAVT,
+96.551 MiB AEVT, 97.410 MiB AVET, 0.004 MiB VAET, and 0.348 MiB of published
+header/catalog pages. Restart-16 prefix encoding is estimated to save 28.264
+MiB before any page-repacking effects; this is evidence for a future format
+study, not a v11 saving claim. Raw samples and page accounting are preserved in
+`benchmarks/baselines/storage-layout/2026-07-12-hal7800-full/receipt.json`.
+
+```bash
+just storage-layout-smoke
+just storage-layout-full
+```
+
 ---
 
 ## Reproducing
