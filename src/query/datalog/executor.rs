@@ -103,6 +103,68 @@ pub struct DatalogExecutor {
     max_results: usize,
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub(crate) struct OwnedAttributeAggregateSession {
+    storage: FactStorage,
+    cursor: crate::graph::storage::CurrentAttributeCursor,
+    sink: Option<AggregationSink>,
+    find: Vec<FindSpec>,
+    entity_var: Option<String>,
+    value_var: Option<String>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub(crate) enum OwnedAggregateStep {
+    Yielded { entries: usize },
+    Complete(QueryResult),
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+impl OwnedAttributeAggregateSession {
+    pub(crate) fn step(&mut self, max_entries: usize) -> Result<OwnedAggregateStep> {
+        let sink = self
+            .sink
+            .as_mut()
+            .ok_or_else(|| anyhow!("aggregate session already completed"))?;
+        let entity_var = self.entity_var.as_deref();
+        let value_var = self.value_var.as_deref();
+        let step = self.storage.step_current_attribute_cursor(
+            &mut self.cursor,
+            max_entries,
+            &mut |entity, value| {
+                if entity_var == value_var && Value::Ref(entity) != *value {
+                    return Ok(());
+                }
+                sink.push_values(|var| {
+                    if Some(var) == entity_var {
+                        Some(Value::Ref(entity))
+                    } else if Some(var) == value_var {
+                        Some(value.clone())
+                    } else {
+                        None
+                    }
+                })
+            },
+        )?;
+        match step {
+            crate::graph::storage::CurrentAttributeStep::Yielded { entries } => {
+                Ok(OwnedAggregateStep::Yielded { entries })
+            }
+            crate::graph::storage::CurrentAttributeStep::Complete => {
+                let sink = self
+                    .sink
+                    .take()
+                    .ok_or_else(|| anyhow!("aggregate session already completed"))?;
+                let results = project_find_specs(&sink.finish()?, &self.find);
+                Ok(OwnedAggregateStep::Complete(QueryResult::QueryResults {
+                    vars: self.find.iter().map(FindSpec::display_name).collect(),
+                    results,
+                }))
+            }
+        }
+    }
+}
+
 impl DatalogExecutor {
     #[allow(dead_code)]
     pub fn new(storage: FactStorage) -> Self {
@@ -136,6 +198,45 @@ impl DatalogExecutor {
             max_derived_facts: crate::query::datalog::evaluator::DEFAULT_MAX_DERIVED_FACTS,
             max_results: crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS,
         }
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    pub(crate) fn owned_attribute_aggregate_session(
+        &self,
+        query: &DatalogQuery,
+    ) -> Result<Option<OwnedAttributeAggregateSession>> {
+        let Some((attribute, entity_var, value_var)) = owned_attribute_aggregate(query) else {
+            return Ok(None);
+        };
+        let registry = self
+            .functions
+            .read()
+            .map_err(|_| anyhow!("functions lock poisoned"))?;
+        let now = self.read_now();
+        let valid_time = match query.valid_at {
+            Some(ValidAt::AnyValidTime) => CurrentValidTime::Any,
+            Some(ValidAt::Timestamp(timestamp)) => CurrentValidTime::At(timestamp),
+            None => CurrentValidTime::At(now),
+            Some(ValidAt::Slot(_)) => {
+                return Err(anyhow!("internal: unsubstituted :valid-at bind slot"));
+            }
+        };
+        Ok(Some(OwnedAttributeAggregateSession {
+            storage: self.storage.clone(),
+            cursor: self.storage.current_attribute_cursor(
+                attribute,
+                query.as_of.as_ref(),
+                valid_time,
+            ),
+            sink: Some(AggregationSink::new(
+                &query.find,
+                &query.with_vars,
+                &registry,
+            )),
+            find: query.find.clone(),
+            entity_var: entity_var.map(str::to_owned),
+            value_var: value_var.map(str::to_owned),
+        }))
     }
 
     /// Create a `DatalogExecutor` over a merged fact slice while sharing rules and functions.
@@ -1636,37 +1737,33 @@ struct AggregateGroup {
     accumulators: Vec<(usize, String, AggregateAccumulator)>,
 }
 
-struct AggregationSink<'a> {
-    find_specs: &'a [FindSpec],
-    registry: &'a FunctionRegistry,
-    group_var_names: Vec<&'a str>,
+struct AggregationSink {
+    find_specs: Vec<FindSpec>,
+    registry: FunctionRegistry,
+    group_var_names: Vec<String>,
     groups: std::collections::BTreeMap<Vec<Value>, AggregateGroup>,
     global_group: Option<AggregateGroup>,
     saw_binding: bool,
 }
 
-impl<'a> AggregationSink<'a> {
-    fn new(
-        find_specs: &'a [FindSpec],
-        with_vars: &'a [String],
-        registry: &'a FunctionRegistry,
-    ) -> Self {
+impl AggregationSink {
+    fn new(find_specs: &[FindSpec], with_vars: &[String], registry: &FunctionRegistry) -> Self {
         let has_windows = find_specs
             .iter()
             .any(|spec| matches!(spec, FindSpec::Window(_)));
-        let mut group_var_names: Vec<&str> = find_specs
+        let mut group_var_names: Vec<String> = find_specs
             .iter()
             .filter_map(|spec| match spec {
-                FindSpec::Variable(var) => Some(var.as_str()),
+                FindSpec::Variable(var) => Some(var.clone()),
                 _ => None,
             })
             .collect();
         if !has_windows {
-            group_var_names.extend(with_vars.iter().map(String::as_str));
+            group_var_names.extend(with_vars.iter().cloned());
         }
         Self {
-            find_specs,
-            registry,
+            find_specs: find_specs.to_vec(),
+            registry: registry.clone(),
             group_var_names,
             groups: Default::default(),
             global_group: None,
@@ -1694,7 +1791,7 @@ impl<'a> AggregationSink<'a> {
                     FindSpec::Aggregate { func, .. } => Some((
                         index,
                         func.clone(),
-                        AggregateAccumulator::new(func, self.registry),
+                        AggregateAccumulator::new(func, &self.registry),
                     )),
                     _ => None,
                 })
@@ -1724,7 +1821,7 @@ impl<'a> AggregationSink<'a> {
                 continue;
             };
             let value = value_for(var);
-            accumulator.push(func, value.as_ref(), self.registry)?;
+            accumulator.push(func, value.as_ref(), &self.registry)?;
         }
         Ok(())
     }
@@ -1768,7 +1865,7 @@ impl<'a> AggregationSink<'a> {
             }
             let mut skip = false;
             for (index, func, accumulator) in group.accumulators {
-                match accumulator.finish(&func, self.registry)? {
+                match accumulator.finish(&func, &self.registry)? {
                     Some(value) => {
                         binding.insert(format!("__agg_{}", index), value);
                     }

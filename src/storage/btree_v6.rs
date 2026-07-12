@@ -609,8 +609,8 @@ fn visit_range_entries<K>(
     end: Option<&K>,
     backend: &dyn StorageBackend,
     cache: &PageCache,
-    visit: &mut dyn FnMut(&K, FactRef) -> Result<()>,
-) -> Result<()>
+    visit: &mut dyn FnMut(&K, FactRef) -> Result<bool>,
+) -> Result<bool>
 where
     K: Serialize + for<'de> Deserialize<'de> + Ord,
 {
@@ -628,14 +628,16 @@ where
             if end.is_some_and(|end| key >= *end) {
                 break 'outer;
             }
-            visit(&key, fact_ref)?;
+            if !visit(&key, fact_ref)? {
+                return Ok(false);
+            }
         }
         if next_leaf == 0 {
             break;
         }
         leaf_id = next_leaf;
     }
-    Ok(())
+    Ok(true)
 }
 
 // ─── MutexStorageBackend ──────────────────────────────────────────────────────
@@ -811,10 +813,10 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         visit: &mut dyn FnMut(
             &crate::storage::index::AevtKey,
             crate::storage::index::FactRef,
-        ) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
         if self.aevt_root == 0 {
-            return Ok(());
+            return Ok(true);
         }
         visit_range_entries(
             self.aevt_root,
@@ -915,10 +917,10 @@ impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
         visit: &mut dyn FnMut(
             &crate::storage::index::AevtKey,
             crate::storage::index::FactRef,
-        ) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
         if self.aevt_root == 0 {
-            return Ok(());
+            return Ok(true);
         }
         visit_range_entries(
             self.aevt_root,

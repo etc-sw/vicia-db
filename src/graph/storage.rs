@@ -30,6 +30,31 @@ struct CurrentValueState {
     assertions: std::collections::HashMap<(i64, i64), (u64, FactRef)>,
 }
 
+pub(crate) struct CurrentAttributeCursor {
+    end: Option<AevtKey>,
+    next_start: AevtKey,
+    pending: Vec<(AevtKey, FactRef)>,
+    pending_position: usize,
+    current_entity: Option<EntityId>,
+    values: std::collections::HashMap<Vec<u8>, CurrentValueState>,
+    as_of: Option<AsOf>,
+    valid_time: CurrentValidTime,
+    last_key: Option<AevtKey>,
+    committed_complete: bool,
+    complete: bool,
+}
+
+pub(crate) enum CurrentAttributeStep {
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", feature = "browser")),
+        allow(dead_code)
+    )]
+    Yielded {
+        entries: usize,
+    },
+    Complete,
+}
+
 fn pending_key(f: &Fact) -> PendingKey {
     (
         f.entity,
@@ -990,18 +1015,12 @@ impl FactStorage {
         Ok(facts)
     }
 
-    /// Visit the net-asserted current view for one attribute without building
-    /// an attribute-sized `Vec<Fact>`. AEVT keeps all history for one entity
-    /// adjacent, so reducer memory is bounded by that entity's distinct
-    /// values/windows rather than total matching entities.
-    pub(crate) fn visit_current_attribute_values(
+    pub(crate) fn current_attribute_cursor(
         &self,
         attribute: &Attribute,
         as_of: Option<&AsOf>,
         valid_time: CurrentValidTime,
-        visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
-    ) -> Result<()> {
-        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+    ) -> CurrentAttributeCursor {
         let start = AevtKey {
             attribute: attribute.clone(),
             entity: uuid::Uuid::nil(),
@@ -1022,7 +1041,8 @@ impl FactStorage {
             tx_id: 0,
             asserted: false,
         });
-        let pending: Vec<(AevtKey, FactRef)> = match &end {
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        let pending = match &end {
             Some(end) => d
                 .pending_indexes
                 .aevt
@@ -1037,88 +1057,171 @@ impl FactStorage {
                 .map(|(key, fact_ref)| (key.clone(), *fact_ref))
                 .collect(),
         };
-        let mut pending = pending.into_iter().peekable();
-        let mut current_entity = None;
-        let mut values = std::collections::HashMap::<Vec<u8>, CurrentValueState>::new();
+        CurrentAttributeCursor {
+            end,
+            next_start: start,
+            pending,
+            pending_position: 0,
+            current_entity: None,
+            values: Default::default(),
+            as_of: as_of.cloned(),
+            valid_time,
+            last_key: None,
+            committed_complete: false,
+            complete: false,
+        }
+    }
 
-        let mut flush = |entity: Option<EntityId>,
-                         values: &mut std::collections::HashMap<Vec<u8>, CurrentValueState>|
+    pub(crate) fn step_current_attribute_cursor(
+        &self,
+        cursor: &mut CurrentAttributeCursor,
+        max_entries: usize,
+        visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
+    ) -> Result<CurrentAttributeStep> {
+        if cursor.complete {
+            return Ok(CurrentAttributeStep::Complete);
+        }
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        let mut processed = 0usize;
+
+        let flush_entity = |cursor: &mut CurrentAttributeCursor,
+                            visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>|
          -> Result<()> {
-            let Some(entity) = entity else { return Ok(()) };
-            for (encoded, state) in values.drain() {
-                for ((valid_from, valid_to), (assert_tx, fact_ref)) in state.assertions {
+            let Some(entity) = cursor.current_entity else {
+                return Ok(());
+            };
+            let mut output = Vec::new();
+            for (encoded, state) in &cursor.values {
+                for ((valid_from, valid_to), (assert_tx, fact_ref)) in &state.assertions {
                     let scoped_retract = state
                         .max_scoped_retract_tx
-                        .get(&(valid_from, valid_to))
+                        .get(&(*valid_from, *valid_to))
                         .copied()
                         .unwrap_or(0);
-                    if assert_tx <= state.max_unscoped_retract_tx.max(scoped_retract) {
-                        continue;
-                    }
-                    if matches!(valid_time, CurrentValidTime::At(at) if !(valid_from <= at && at < valid_to))
+                    if *assert_tx <= state.max_unscoped_retract_tx.max(scoped_retract)
+                        || matches!(cursor.valid_time, CurrentValidTime::At(at) if !(*valid_from <= at && at < *valid_to))
                     {
                         continue;
                     }
                     let value = if encoded.first() == Some(&0x03) {
-                        resolve_fact_ref(&d, fact_ref)?.value
+                        resolve_fact_ref(&d, *fact_ref)?.value
                     } else {
-                        decode_index_value(&encoded)?
+                        decode_index_value(encoded)?
                     };
-                    visit(entity, &value)?;
+                    output.push(value);
                 }
             }
+            for value in &output {
+                visit(entity, value)?;
+            }
+            cursor.values.clear();
+            cursor.current_entity = None;
             Ok(())
         };
 
-        let mut accept = |key: &AevtKey, fact_ref: FactRef| -> Result<()> {
-            if !entry_visible_as_of(key, as_of) {
+        let accept = |cursor: &mut CurrentAttributeCursor,
+                      key: &AevtKey,
+                      fact_ref: FactRef,
+                      visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>|
+         -> Result<()> {
+            if !entry_visible_as_of(key, cursor.as_of.as_ref()) {
+                cursor.last_key = Some(key.clone());
                 return Ok(());
             }
-            if current_entity.is_some_and(|entity| entity != key.entity) {
-                flush(current_entity.take(), &mut values)?;
-            }
-            current_entity = Some(key.entity);
-            let state = values.entry(key.value_bytes.clone()).or_default();
-            if key.asserted {
-                state
-                    .assertions
-                    .entry((key.valid_from, key.valid_to))
-                    .and_modify(|winner| {
-                        if key.tx_count > winner.0 {
-                            *winner = (key.tx_count, fact_ref);
-                        }
-                    })
-                    .or_insert((key.tx_count, fact_ref));
-            } else if key.valid_from == RETRACT_ALL_VALID_FROM && key.valid_to == VALID_TIME_FOREVER
+            if cursor
+                .current_entity
+                .is_some_and(|entity| entity != key.entity)
             {
-                state.max_unscoped_retract_tx = state.max_unscoped_retract_tx.max(key.tx_count);
-            } else {
-                state
-                    .max_scoped_retract_tx
-                    .entry((key.valid_from, key.valid_to))
-                    .and_modify(|tx| *tx = (*tx).max(key.tx_count))
-                    .or_insert(key.tx_count);
+                flush_entity(cursor, visit)?;
             }
+            cursor.current_entity = Some(key.entity);
+            reduce_current_entry(&mut cursor.values, key, fact_ref);
+            cursor.last_key = Some(key.clone());
             Ok(())
         };
 
-        if let Some(reader) = &d.committed_index_reader {
-            reader.visit_aevt_entries(&start, end.as_ref(), &mut |key, fact_ref| {
-                while pending
-                    .peek()
-                    .is_some_and(|(pending_key, _)| pending_key < key)
-                {
-                    if let Some((pending_key, pending_ref)) = pending.next() {
-                        accept(&pending_key, pending_ref)?;
-                    }
-                }
-                accept(key, fact_ref)
-            })?;
+        if !cursor.committed_complete {
+            let last_key = cursor.last_key.clone();
+            let next_start = cursor.next_start.clone();
+            let end = cursor.end.clone();
+            let complete = d
+                .committed_index_reader
+                .as_ref()
+                .map_or(Ok(true), |reader| {
+                    reader.visit_aevt_entries(&next_start, end.as_ref(), &mut |key, fact_ref| {
+                        if last_key.as_ref().is_some_and(|last| key <= last) {
+                            return Ok(true);
+                        }
+                        while cursor.pending_position < cursor.pending.len()
+                            && cursor
+                                .pending
+                                .get(cursor.pending_position)
+                                .is_some_and(|(pending_key, _)| pending_key < key)
+                        {
+                            let (pending_key, pending_ref) = cursor
+                                .pending
+                                .get(cursor.pending_position)
+                                .cloned()
+                                .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+                            accept(cursor, &pending_key, pending_ref, visit)?;
+                            cursor.pending_position += 1;
+                            processed += 1;
+                            if processed >= max_entries {
+                                return Ok(false);
+                            }
+                        }
+                        accept(cursor, key, fact_ref, visit)?;
+                        processed += 1;
+                        Ok(processed < max_entries)
+                    })
+                })?;
+            cursor.committed_complete = complete;
+            if let Some(last) = &cursor.last_key {
+                cursor.next_start = last.clone();
+            }
+            if !complete {
+                return Ok(CurrentAttributeStep::Yielded { entries: processed });
+            }
         }
-        for (key, fact_ref) in pending {
-            accept(&key, fact_ref)?;
+
+        while cursor.pending_position < cursor.pending.len() && processed < max_entries {
+            let (key, fact_ref) = cursor
+                .pending
+                .get(cursor.pending_position)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+            accept(cursor, &key, fact_ref, visit)?;
+            cursor.pending_position += 1;
+            processed += 1;
         }
-        flush(current_entity, &mut values)
+        if cursor.pending_position < cursor.pending.len() {
+            return Ok(CurrentAttributeStep::Yielded { entries: processed });
+        }
+        flush_entity(cursor, visit)?;
+        cursor.complete = true;
+        Ok(CurrentAttributeStep::Complete)
+    }
+
+    /// Visit the net-asserted current view for one attribute without building
+    /// an attribute-sized `Vec<Fact>`. AEVT keeps all history for one entity
+    /// adjacent, so reducer memory is bounded by that entity's distinct
+    /// values/windows rather than total matching entities.
+    pub(crate) fn visit_current_attribute_values(
+        &self,
+        attribute: &Attribute,
+        as_of: Option<&AsOf>,
+        valid_time: CurrentValidTime,
+        visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
+    ) -> Result<()> {
+        let mut cursor = self.current_attribute_cursor(attribute, as_of, valid_time);
+        loop {
+            if matches!(
+                self.step_current_attribute_cursor(&mut cursor, usize::MAX, visit)?,
+                CurrentAttributeStep::Complete
+            ) {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -1128,6 +1231,33 @@ fn entry_visible_as_of(key: &AevtKey, as_of: Option<&AsOf>) -> bool {
         Some(AsOf::Counter(counter)) => key.tx_count <= *counter,
         Some(AsOf::Timestamp(timestamp)) => key.tx_id <= u64::try_from(*timestamp).unwrap_or(0),
         Some(AsOf::Slot(_)) => false,
+    }
+}
+
+fn reduce_current_entry(
+    values: &mut std::collections::HashMap<Vec<u8>, CurrentValueState>,
+    key: &AevtKey,
+    fact_ref: FactRef,
+) {
+    let state = values.entry(key.value_bytes.clone()).or_default();
+    if key.asserted {
+        state
+            .assertions
+            .entry((key.valid_from, key.valid_to))
+            .and_modify(|winner| {
+                if key.tx_count > winner.0 {
+                    *winner = (key.tx_count, fact_ref);
+                }
+            })
+            .or_insert((key.tx_count, fact_ref));
+    } else if key.valid_from == RETRACT_ALL_VALID_FROM && key.valid_to == VALID_TIME_FOREVER {
+        state.max_unscoped_retract_tx = state.max_unscoped_retract_tx.max(key.tx_count);
+    } else {
+        state
+            .max_scoped_retract_tx
+            .entry((key.valid_from, key.valid_to))
+            .and_modify(|tx| *tx = (*tx).max(key.tx_count))
+            .or_insert(key.tx_count);
     }
 }
 

@@ -449,8 +449,8 @@ pub trait CommittedIndexReader: Send + Sync {
         _visit: &mut dyn FnMut(
             &crate::storage::index::AevtKey,
             crate::storage::index::FactRef,
-        ) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
         anyhow::bail!("committed index reader does not expose keyed AEVT visitation")
     }
 

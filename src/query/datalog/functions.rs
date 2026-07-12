@@ -22,6 +22,7 @@ pub enum AggState {
 }
 
 /// Incremental operations for window-compatible aggregate functions.
+#[derive(Clone)]
 pub struct WindowOps {
     pub init: fn() -> AggState,
     pub step: fn(&mut AggState, &Value),
@@ -36,6 +37,7 @@ pub type UdfFinaliseFn = Arc<dyn Fn(&Box<dyn Any + Send>, usize) -> Value + Send
 
 /// Closure-based aggregate ops for UDFs.
 /// The accumulator is type-erased as `Box<dyn Any + Send>`.
+#[derive(Clone)]
 pub struct UdfOps {
     pub init: Arc<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>,
     pub step: UdfStepFn,
@@ -43,6 +45,7 @@ pub struct UdfOps {
 }
 
 /// Implementation discriminator for aggregate functions.
+#[derive(Clone)]
 pub enum AggImpl {
     /// Built-in: uses `fn()` function pointers and `AggState`.
     Builtin(WindowOps),
@@ -51,12 +54,14 @@ pub enum AggImpl {
 }
 
 /// Descriptor for a registered predicate function.
+#[derive(Clone)]
 pub struct PredicateDesc {
     pub f: Arc<dyn Fn(&Value) -> bool + Send + Sync>,
     pub is_builtin: bool,
 }
 
 /// Descriptor for one registered aggregate function.
+#[derive(Clone)]
 pub struct AggregateDesc {
     pub impl_: AggImpl,
     /// True for built-in functions handled by `apply_builtin_aggregate`.
@@ -67,6 +72,7 @@ pub struct AggregateDesc {
 ///
 /// In 7.7a this holds only built-ins. Phase 7.7b adds
 /// `register_aggregate_desc` / `register_predicate_desc` public methods.
+#[derive(Clone)]
 pub struct FunctionRegistry {
     aggregates: HashMap<String, AggregateDesc>,
     /// Registered filter predicates, including built-in name sentinels.

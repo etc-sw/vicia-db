@@ -21,12 +21,14 @@ pub(crate) trait KeyedIndexReader: Send + Sync {
         &self,
         start: &AevtKey,
         end: Option<&AevtKey>,
-        visit: &mut dyn FnMut(&AevtKey, FactRef) -> Result<()>,
-    ) -> Result<()> {
+        visit: &mut dyn FnMut(&AevtKey, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
         for (key, fact_ref) in self.range_scan_aevt_entries(start, end)? {
-            visit(&key, fact_ref)?;
+            if !visit(&key, fact_ref)? {
+                return Ok(false);
+            }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn range_scan_avet_entries(
@@ -126,30 +128,38 @@ impl CommittedIndexReader for LayeredIndexReader {
         &self,
         start: &AevtKey,
         end: Option<&AevtKey>,
-        visit: &mut dyn FnMut(&AevtKey, FactRef) -> Result<()>,
-    ) -> Result<()> {
+        visit: &mut dyn FnMut(&AevtKey, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
         // Resident delta segments are bounded by checkpoint policy. Buffer the
         // delta only; stream the immutable base and interleave delta entries.
         let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
         let mut delta = range_delta_entries(&delta.aevt, start, end)
             .into_iter()
             .peekable();
-        self.base
-            .visit_aevt_entries(start, end, &mut |base_key, base_ref| {
-                while delta
-                    .peek()
-                    .is_some_and(|(delta_key, _)| delta_key < base_key)
-                {
-                    if let Some((key, fact_ref)) = delta.next() {
-                        visit(&key, fact_ref)?;
+        let base_complete =
+            self.base
+                .visit_aevt_entries(start, end, &mut |base_key, base_ref| {
+                    while delta
+                        .peek()
+                        .is_some_and(|(delta_key, _)| delta_key < base_key)
+                    {
+                        if let Some((key, fact_ref)) = delta.next()
+                            && !visit(&key, fact_ref)?
+                        {
+                            return Ok(false);
+                        }
                     }
-                }
-                visit(base_key, base_ref)
-            })?;
-        for (key, fact_ref) in delta {
-            visit(&key, fact_ref)?;
+                    visit(base_key, base_ref)
+                })?;
+        if !base_complete {
+            return Ok(false);
         }
-        Ok(())
+        for (key, fact_ref) in delta {
+            if !visit(&key, fact_ref)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn range_scan_avet(&self, start: &AvetKey, end: Option<&AvetKey>) -> Result<Vec<FactRef>> {

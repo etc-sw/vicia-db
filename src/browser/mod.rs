@@ -15,7 +15,7 @@ use crate::browser::indexeddb::IndexedDbBackend;
 use crate::graph::FactStorage;
 use crate::json_value::to_tagged_json;
 use crate::query::datalog::access_plan::QueryAccessPlan;
-use crate::query::datalog::executor::{DatalogExecutor, QueryResult};
+use crate::query::datalog::executor::{DatalogExecutor, OwnedAggregateStep, QueryResult};
 use crate::query::datalog::functions::FunctionRegistry;
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
@@ -29,6 +29,28 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
+
+const BROWSER_AGGREGATE_ENTRY_BUDGET: usize = 4_096;
+const BROWSER_AGGREGATE_RESIDENT_PAGE_LIMIT: usize = 192;
+
+async fn yield_browser_task() -> Result<(), JsValue> {
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let Some(window) = web_sys::window() else {
+            let _ = reject.call1(
+                &JsValue::UNDEFINED,
+                &JsValue::from_str("window unavailable"),
+            );
+            return;
+        };
+        if let Err(error) =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0)
+        {
+            let _ = reject.call1(&JsValue::UNDEFINED, &error);
+        }
+    });
+    JsFuture::from(promise).await.map(|_| ())
+}
 
 /// Internal state shared by all `BrowserDb` clones.
 struct BrowserDbInner {
@@ -860,9 +882,38 @@ impl BrowserDb {
             _ => 1,
         };
 
+        let mut aggregate_session = match &command {
+            DatalogCommand::Query(query) => {
+                let inner = self.inner.borrow();
+                DatalogExecutor::new_with_rules_and_functions(
+                    inner.fact_storage.clone(),
+                    inner.rules.clone(),
+                    inner.functions.clone(),
+                )
+                .owned_attribute_aggregate_session(query)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?
+            }
+            _ => None,
+        };
+
         let mut requested = HashSet::new();
         loop {
-            let result = {
+            let result = if let Some(session) = aggregate_session.as_mut() {
+                match session.step(BROWSER_AGGREGATE_ENTRY_BUDGET) {
+                    Ok(OwnedAggregateStep::Complete(result)) => return Ok(result),
+                    Ok(OwnedAggregateStep::Yielded { entries }) => {
+                        if entries == 0 {
+                            return Err(JsValue::from_str(
+                                "aggregate cursor yielded without advancing",
+                            ));
+                        }
+                        self.evict_aggregate_staging();
+                        yield_browser_task().await?;
+                        continue;
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
                 let inner = self.inner.borrow();
                 DatalogExecutor::new_with_rules_and_functions(
                     inner.fact_storage.clone(),
@@ -875,13 +926,16 @@ impl BrowserDb {
                 Ok(result) => return Ok(result),
                 Err(error) => match page_not_resident_id(&error) {
                     Some(page_id) => {
-                        if !requested.insert(page_id) {
+                        if aggregate_session.is_none() && !requested.insert(page_id) {
                             return Err(JsValue::from_str(&format!(
                                 "paged query requested page {page_id} again after it was staged"
                             )));
                         }
                         self.fetch_and_stage_page_window(page_id, demand_batch_pages)
                             .await?;
+                        if aggregate_session.is_some() {
+                            self.evict_aggregate_staging();
+                        }
                     }
                     None => return Err(JsValue::from_str(&error.to_string())),
                 },
@@ -1016,6 +1070,15 @@ impl BrowserDb {
             inner
                 .pfs
                 .with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
+        }
+    }
+
+    fn evict_aggregate_staging(&self) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.paged {
+            inner.pfs.with_backend_mut(|backend| {
+                backend.evict_clean_unpinned_to(BROWSER_AGGREGATE_RESIDENT_PAGE_LIMIT);
+            });
         }
     }
 
@@ -1804,6 +1867,45 @@ mod tests {
                 backend.resident_page_count(),
                 backend.pinned_page_count(),
                 "operation staging pages must be released after the query"
+            );
+        });
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_attribute_aggregate_resumes_and_releases_staging() {
+        let fact_count = 12_000usize;
+        let bytes = build_sparse_v11_fixture(fact_count).await;
+        let db_name = format!("vicia-paged-aggregate-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open aggregate seed IDB");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed aggregate fixture");
+        idb.reset_read_counters_for_test();
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open aggregate fixture");
+
+        let encoded = db
+            .execute("(query [:find (count ?v) (sum ?v) :where [?e :sparse/value ?v]])".to_string())
+            .await
+            .expect("execute resumable aggregate");
+        let result: serde_json::Value = serde_json::from_str(&encoded).expect("aggregate JSON");
+        let expected_sum = i64::try_from(fact_count * (fact_count - 1) / 2).unwrap();
+        assert_eq!(
+            result["results"],
+            serde_json::json!([[fact_count, expected_sum]])
+        );
+        let counters = idb.read_counters_for_test();
+        assert_eq!(counters.full_store_reads, 0);
+        assert!(counters.pages_returned > 0);
+        let inner = db.inner.borrow();
+        inner.pfs.with_backend(|backend| {
+            assert_eq!(
+                backend.resident_page_count(),
+                backend.pinned_page_count(),
+                "completed aggregate must release staging pages"
             );
         });
     }
