@@ -32,10 +32,10 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Regression gates
 
-- [x] Preserve 1M point-read latency near the current 0.24 ms baseline. Current final run: 0.239 ms.
+- [x] Preserve 1M point-read latency with repeated evidence. The clean v4 full run records 20 post-warmup samples: p50 `0.011 ms`, p95/max `0.019 ms` (raw samples retained in the Vicia receipt).
 - [x] Preserve open baseline RSS near 12 MiB. Current baseline: 12.164 MiB.
 - [x] Require exact count `1,000,000` and checksum `499999500000` for every run.
-- [x] Keep engine aggregate and KV owned-scan results in separate comparison groups. The v3 summarizer separates `engineAggregate` from `ownedResultScan` and treats redb/Fjall as storage floors.
+- [x] Keep engine aggregate and KV owned-scan results in separate comparison groups. The v4 summary has no flat `rows`; JSON stores distinct `groups.engineAggregate` and `groups.ownedResultScan` arrays, and Markdown emits separate workload and memory tables.
 
 ## Next task
 

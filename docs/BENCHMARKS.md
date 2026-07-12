@@ -1417,6 +1417,16 @@ The clean production-path reference rerun at source `aaf32a9` also measured a
 are in
 `benchmarks/baselines/ref-db/2026-07-12-hal7800-v3-pending-isolation-full/`.
 
+The review-driven v4 rerun at clean source `7cedc1b` replaces that single point
+observation with one excluded warmup plus 20 retained samples per engine. On
+the 1M Vicia graph, point-read p50 was `0.011 ms` and p95/max was `0.019 ms`;
+aggregate p50/p95 was `320.751/341.448 ms`, with exact count/checksum. The v4
+summary removes the flat `rows` collection: `groups.engineAggregate` contains
+Vicia/Grafeo/Turso/Cozo, while `groups.ownedResultScan` contains only the redb
+and Fjall storage floors. Markdown likewise renders separate workload and
+memory tables. The retained evidence is under
+`benchmarks/baselines/ref-db/2026-07-12-hal7800-v4-review-full/`.
+
 ## Unrelated Pending Aggregate Isolation and Ownership (2026-07-12)
 
 The clean `vicia.pending-isolation.v3` rerun at source `e4ec312` replaces the
