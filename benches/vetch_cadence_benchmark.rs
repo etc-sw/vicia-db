@@ -69,8 +69,14 @@ fn main() -> Result<()> {
     let root = tempfile::tempdir()?;
     let path = root.path().join("vetch-cadence.graph");
 
-    build_checkpointed_base(&path, config.base_facts)?;
+    let fixture_source = receipt::install_base_fixture_if_configured(&path)?;
+    if fixture_source.is_some() {
+        verify_base_fact_count(&path, config.base_facts)?;
+    } else {
+        build_checkpointed_base(&path, config.base_facts)?;
+    }
     let base_file_bytes = file_len(&path)?;
+    let base_fixture_sha256 = receipt::sha256_file(&path)?;
 
     let samples = run_cadence(&path, config)?;
     let final_file_bytes = file_len(&path)?;
@@ -85,6 +91,8 @@ fn main() -> Result<()> {
         &samples,
         base_file_bytes,
         final_file_bytes,
+        &base_fixture_sha256,
+        fixture_source.as_deref(),
     )?;
     Ok(())
 }
@@ -191,6 +199,15 @@ fn build_checkpointed_base(path: &Path, base_facts: usize) -> Result<()> {
         db.execute(&command).map_err(db_error)?;
     }
     db.checkpoint().map_err(db_error)?;
+    Ok(())
+}
+
+fn verify_base_fact_count(path: &Path, expected: usize) -> Result<()> {
+    let db = open_no_auto_checkpoint(path)?;
+    let actual = db.export_fact_log().map_err(db_error)?.len();
+    if actual != expected {
+        bail!("provided base fixture fact count does not match benchmark profile");
+    }
     Ok(())
 }
 
@@ -319,6 +336,8 @@ fn write_receipt(
     samples: &OpSamples,
     base_file_bytes: u64,
     final_file_bytes: u64,
+    base_fixture_sha256: &str,
+    fixture_source: Option<&Path>,
 ) -> Result<()> {
     let metrics = [
         ("capture", &samples.capture),
@@ -336,20 +355,31 @@ fn write_receipt(
         ))
     })
     .collect::<Result<BTreeMap<_, _>>>()?;
+    let mut metrics = metrics;
+    metrics.insert(
+        "file_growth_mib".to_owned(),
+        receipt::MetricSeries::from_values(
+            "MiB",
+            vec![final_file_bytes.saturating_sub(base_file_bytes) as f64 / (1024.0 * 1024.0)],
+        )?,
+    );
 
     receipt::write_if_requested(receipt::ReceiptInput {
         suite: "vetch-cadence".to_owned(),
-        acceptance_eligible: config.label == "full",
+        profile: config.label.to_owned(),
         started_at,
         configuration: json!({
             "mode": config.label,
             "baseFacts": config.base_facts,
             "slices": config.slices,
             "receiptFactsPerSlice": RECEIPT_FACTS_PER_SLICE,
-            "coldWarmPolicy": "fresh-base-single-process-cadence"
+            "coldWarmPolicy": "checkpointed-base-single-process-cadence",
+            "fixtureOrigin": if fixture_source.is_some() { "provided" } else { "generated" },
+            "fixtureSource": fixture_source.map(|path| path.display().to_string())
         }),
         metrics,
         files: json!({
+            "baseFixtureSha256": base_fixture_sha256,
             "baseBytes": base_file_bytes,
             "finalBytes": final_file_bytes,
             "growthBytes": final_file_bytes.saturating_sub(base_file_bytes),
@@ -358,14 +388,21 @@ fn write_receipt(
                 .div_ceil(PAGE_SIZE_BYTES)
         }),
         correctness_checks: vec![
-            receipt::CorrectnessCheck {
-                name: "current brief read cardinality".to_owned(),
-                passed: true,
-            },
-            receipt::CorrectnessCheck {
-                name: "historical brief read cardinality".to_owned(),
-                passed: true,
-            },
+            receipt::CorrectnessCheck::equal(
+                "current brief read cardinality",
+                json!(config.slices),
+                json!(samples.brief_current.len()),
+            ),
+            receipt::CorrectnessCheck::equal(
+                "historical brief read cardinality",
+                json!(config.slices),
+                json!(samples.brief_as_of.len()),
+            ),
+            receipt::CorrectnessCheck::equal(
+                "checkpoint sample cardinality",
+                json!(config.slices),
+                json!(samples.checkpoint.len()),
+            ),
         ],
     })?;
     Ok(())

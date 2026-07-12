@@ -258,7 +258,7 @@ See [ROADMAP.md](ROADMAP.md) for the full phase plan, current status, and releas
 
 ## Performance
 
-Benchmarks on Intel Core i7-1065G7 @ 1.30GHz, 16 GB RAM, Rust 1.92.0. See [BENCHMARKS.md](docs/BENCHMARKS.md) for full tables.
+Benchmarks on Intel Core i7-1065G7 @ 1.30GHz, 16 GB RAM, Rust 1.92.0. See [BENCHMARKS.md](docs/BENCHMARKS.md) for full tables and [BENCHMARK_MILESTONES.md](docs/BENCHMARK_MILESTONES.md) for the machine-checked development and release gates.
 
 | Metric | Result |
 |---|---|

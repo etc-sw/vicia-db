@@ -2,9 +2,14 @@
 
 use anyhow::{Result, bail};
 use minigraf::{BindValue, Minigraf, OpenOptions, QueryResult};
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
+
+#[path = "helpers/receipt.rs"]
+mod receipt;
 
 const FULL_BASE_FACTS: usize = 1_000_000;
 const SMOKE_BASE_FACTS: usize = 10_000;
@@ -76,27 +81,36 @@ struct BriefMeasurement {
     final_tx_count: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct DurationStats {
+    samples: Vec<Duration>,
     p50: Duration,
     p95: Duration,
     max: Duration,
 }
 
 fn main() -> Result<()> {
+    let started_at = SystemTime::now();
     let config = selected_config();
     let root = tempfile::tempdir()?;
     let base_path = root
         .path()
         .join(format!("agent-brief-base-{}.graph", config.mode));
-    let base_tx_count = build_checkpointed_base(&base_path, config.base_facts)?;
+    let fixture_source = receipt::install_base_fixture_if_configured(&base_path)?;
+    let base_tx_count = if fixture_source.is_some() {
+        verify_base_fact_count(&base_path, config.base_facts)?
+    } else {
+        build_checkpointed_base(&base_path, config.base_facts)?
+    };
     let base_file_bytes = file_len(&base_path)?;
     let base_pages = file_page_count(&base_path)?;
+    let base_fixture_sha256 = receipt::sha256_file(&base_path)?;
 
     println!(
         "mode,scenario,base_facts,facts_per_checkpoint,checkpoints,delta_facts,probe_count,current_query_p50_ms,current_query_p95_ms,current_query_max_ms,as_of_query_p50_ms,as_of_query_p95_ms,as_of_query_max_ms,prepared_as_of_query_p50_ms,prepared_as_of_query_p95_ms,prepared_as_of_query_max_ms,export_recent_filter_p50_ms,export_recent_filter_p95_ms,export_recent_filter_max_ms,base_file_bytes,final_file_bytes,file_growth_bytes,base_pages,final_pages,page_growth,base_tx_count,final_tx_count"
     );
 
+    let mut measurements = Vec::new();
     for &scenario in config.scenarios {
         let run_path = root.path().join(format!(
             "agent-brief-{}-{}.graph",
@@ -112,8 +126,16 @@ fn main() -> Result<()> {
             base_pages,
         )?;
         print_measurement(&measurement);
+        measurements.push(measurement);
     }
 
+    write_receipt(
+        started_at,
+        config,
+        &measurements,
+        &base_fixture_sha256,
+        fixture_source.as_deref(),
+    )?;
     Ok(())
 }
 
@@ -262,6 +284,15 @@ fn build_checkpointed_base(path: &Path, base_facts: usize) -> Result<u64> {
     Ok(tx_count)
 }
 
+fn verify_base_fact_count(path: &Path, expected: usize) -> Result<u64> {
+    let db = open_no_auto_checkpoint(path)?;
+    let actual = db.export_fact_log().map_err(db_error)?.len();
+    if actual != expected {
+        bail!("provided base fixture fact count does not match benchmark profile");
+    }
+    Ok(db.current_tx_count())
+}
+
 fn add_receipt_batch(
     db: &Minigraf,
     scenario: BriefScenario,
@@ -374,6 +405,7 @@ fn duration_stats(samples: &[Duration]) -> Result<DurationStats> {
     let mut sorted = samples.to_vec();
     sorted.sort();
     Ok(DurationStats {
+        samples: sorted.clone(),
         p50: percentile(&sorted, 50),
         p95: percentile(&sorted, 95),
         max: *sorted
@@ -464,4 +496,87 @@ fn print_measurement(measurement: &BriefMeasurement) {
 
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
+}
+
+fn write_receipt(
+    started_at: SystemTime,
+    config: BenchConfig,
+    measurements: &[BriefMeasurement],
+    base_fixture_sha256: &str,
+    fixture_source: Option<&Path>,
+) -> Result<()> {
+    let mut metrics = BTreeMap::new();
+    let mut files = Vec::new();
+    let mut correctness_checks = vec![receipt::CorrectnessCheck::equal(
+        "scenario matrix cardinality",
+        json!(config.scenarios.len()),
+        json!(measurements.len()),
+    )];
+
+    for measurement in measurements {
+        let prefix = measurement.scenario.label;
+        for (name, stats) in [
+            ("current_query", &measurement.current_query),
+            ("as_of_query", &measurement.as_of_query),
+            ("prepared_as_of_query", &measurement.prepared_as_of_query),
+            ("export_recent_filter", &measurement.export_recent_filter),
+        ] {
+            metrics.insert(
+                format!("{prefix}.{name}"),
+                receipt::MetricSeries::from_durations(&stats.samples)?,
+            );
+        }
+        let growth_bytes = measurement
+            .final_file_bytes
+            .saturating_sub(measurement.base_file_bytes);
+        metrics.insert(
+            format!("{prefix}.file_growth_mib"),
+            receipt::MetricSeries::from_values(
+                "MiB",
+                vec![growth_bytes as f64 / (1024.0 * 1024.0)],
+            )?,
+        );
+        files.push(json!({
+            "scenario": prefix,
+            "baseBytes": measurement.base_file_bytes,
+            "finalBytes": measurement.final_file_bytes,
+            "growthBytes": growth_bytes,
+            "basePages": measurement.base_pages,
+            "finalPages": measurement.final_pages
+        }));
+        correctness_checks.push(receipt::CorrectnessCheck::equal(
+            &format!("{prefix} transaction count"),
+            json!(measurement.base_tx_count.saturating_add(
+                u64::try_from(measurement.scenario.checkpoints).unwrap_or(u64::MAX)
+            )),
+            json!(measurement.final_tx_count),
+        ));
+        correctness_checks.push(receipt::CorrectnessCheck::equal(
+            &format!("{prefix} probe cardinality"),
+            json!(measurement.probe_count),
+            json!(measurement.current_query.samples.len()),
+        ));
+    }
+
+    receipt::write_if_requested(receipt::ReceiptInput {
+        suite: "agent-brief-read-path".to_owned(),
+        profile: config.mode.to_owned(),
+        started_at,
+        configuration: json!({
+            "mode": config.mode,
+            "baseFacts": config.base_facts,
+            "maxProbesPerScenario": config.max_probes,
+            "scenarioCount": config.scenarios.len(),
+            "coldWarmPolicy": "checkpointed-base-per-scenario-single-process",
+            "fixtureOrigin": if fixture_source.is_some() { "provided" } else { "generated" },
+            "fixtureSource": fixture_source.map(|path| path.display().to_string())
+        }),
+        metrics,
+        files: json!({
+            "baseFixtureSha256": base_fixture_sha256,
+            "scenarios": files
+        }),
+        correctness_checks,
+    })?;
+    Ok(())
 }

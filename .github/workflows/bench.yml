@@ -1,6 +1,13 @@
 name: Nightly Benchmarks
 
 on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "benchmarks/**"
+      - "benches/**"
+      - "scripts/check-benchmark-*.mjs"
+      - "src/**"
   schedule:
     - cron: '0 2 * * *'  # 02:00 UTC nightly
   workflow_dispatch:       # allow manual runs
@@ -35,36 +42,53 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-bench-target-${{ hashFiles('**/Cargo.lock', 'benches/**', 'src/**/*.rs') }}
+          key: ${{ runner.os }}-bench-target-${{ hashFiles('**/Cargo.lock', 'benchmarks/**', 'benches/**', 'src/**/*.rs') }}
 
       - name: Compile benchmarks
         run: cargo bench --no-run
 
       - name: Verify nightly benchmark coverage
-        run: node scripts/check-benchmark-coverage.mjs
+        run: |
+          node scripts/check-benchmark-catalog.mjs
+          node scripts/check-benchmark-coverage.mjs
 
-      - name: Produce caller-shaped smoke receipt
+      - name: Produce caller-shaped smoke receipts
         env:
-          VICIA_BENCH_RECEIPT: target/benchmark-receipts/vetch-cadence-smoke.json
           VICIA_BENCH_SOURCE_COMMIT: ${{ github.sha }}
           VICIA_BENCH_SOURCE_DIRTY: "false"
           VICIA_BENCH_TESTBED: ubuntu-latest-shared
+          VICIA_BENCH_BASE_FIXTURE: target/benchmark-receipts/base-10k.graph
         run: |
           mkdir -p target/benchmark-receipts
-          cargo bench --bench vetch_cadence_benchmark -- smoke \
+          cargo run --release --example generate_bench_fixture -- \
+            10000 target/benchmark-receipts/base-10k.graph
+          VICIA_BENCH_RECEIPT=target/benchmark-receipts/vetch-cadence-smoke.json \
+            cargo bench --bench vetch_cadence_benchmark -- smoke \
             > target/benchmark-receipts/vetch-cadence-smoke.csv
+          VICIA_BENCH_RECEIPT=target/benchmark-receipts/delta-accumulation-smoke.json \
+            cargo bench --bench delta_accumulation_benchmark -- smoke \
+            > target/benchmark-receipts/delta-accumulation-smoke.csv
+          VICIA_BENCH_RECEIPT=target/benchmark-receipts/agent-brief-smoke.json \
+            cargo bench --bench agent_brief_read_path_benchmark -- smoke \
+            > target/benchmark-receipts/agent-brief-smoke.csv
           node scripts/check-benchmark-receipt.mjs \
             target/benchmark-receipts/vetch-cadence-smoke.json
+          node scripts/check-benchmark-receipt.mjs \
+            target/benchmark-receipts/delta-accumulation-smoke.json
+          node scripts/check-benchmark-receipt.mjs \
+            target/benchmark-receipts/agent-brief-smoke.json
 
       - name: Upload caller-shaped smoke evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vetch-cadence-smoke-receipt
+          name: native-caller-shaped-smoke-receipts
           path: target/benchmark-receipts/
           if-no-files-found: error
 
   benchmark:
     name: bench / ${{ matrix.name }}
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs: [compile]
     timeout-minutes: 360
@@ -250,7 +274,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target
-          key: ${{ runner.os }}-bench-target-${{ hashFiles('**/Cargo.lock', 'benches/**', 'src/**/*.rs') }}
+          key: ${{ runner.os }}-bench-target-${{ hashFiles('**/Cargo.lock', 'benchmarks/**', 'benches/**', 'src/**/*.rs') }}
 
       - name: Run benchmarks (${{ matrix.name }})
         run: |

@@ -1,0 +1,193 @@
+{
+  "schema": "vicia.benchmark.milestones.v1",
+  "methodology": {
+    "percentile": "nearest-rank",
+    "p95MinimumObservations": 20,
+    "comparisonPolicy": "Compare base and candidate receipts from the same named testbed, profile, fixture shape, and cold/warm policy.",
+    "promotionPolicy": "Only a clean full or release profile with passing correctness and budgets may close a performance milestone."
+  },
+  "suites": [
+    {
+      "id": "criterion",
+      "milestone": "M1-engine-mechanisms",
+      "kind": "longitudinal",
+      "owner": "vicia-core",
+      "decision": "Did an engine mechanism regress relative to its same-testbed history?",
+      "profiles": [
+        {
+          "id": "nightly",
+          "tier": "nightly-shared-runner",
+          "acceptanceEligible": false,
+          "command": "cargo bench --bench minigraf_bench -- <catalogued-filter>",
+          "budgets": []
+        }
+      ]
+    },
+    {
+      "id": "vetch-cadence",
+      "milestone": "M2-vetch-interactive-cadence",
+      "kind": "absolute-acceptance",
+      "owner": "vicia-vetch-boundary",
+      "decision": "Can capture, edit, receipt, point reads, and checkpoint stay interactive on a 1M graph?",
+      "profiles": [
+        {
+          "id": "smoke",
+          "tier": "pull-request-smoke",
+          "acceptanceEligible": false,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<10k.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --bench vetch_cadence_benchmark -- smoke",
+          "budgets": [
+            { "name": "interactive append p95", "metrics": ["capture", "edit", "receipt"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "interactive read p95", "metrics": ["brief_current", "brief_as_of"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "foreground checkpoint p95", "metrics": ["checkpoint"], "statistic": "p95", "comparator": "<=", "limit": 50.0, "unit": "ms" },
+            { "name": "foreground file growth", "metrics": ["file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 64.0, "unit": "MiB" }
+          ]
+        },
+        {
+          "id": "full",
+          "tier": "release-dedicated-host",
+          "acceptanceEligible": true,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<1m.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --bench vetch_cadence_benchmark",
+          "budgets": [
+            { "name": "interactive append p95", "metrics": ["capture", "edit", "receipt"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "interactive read p95", "metrics": ["brief_current", "brief_as_of"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "foreground checkpoint p95", "metrics": ["checkpoint"], "statistic": "p95", "comparator": "<=", "limit": 50.0, "unit": "ms" },
+            { "name": "foreground file growth", "metrics": ["file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 64.0, "unit": "MiB" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "delta-accumulation",
+      "milestone": "M3-delta-growth-and-recovery",
+      "kind": "absolute-acceptance",
+      "owner": "vicia-storage",
+      "decision": "Does repeated receipt checkpointing remain bounded while current/history reads and corrupt-newest fallback stay correct?",
+      "profiles": [
+        {
+          "id": "smoke",
+          "tier": "pull-request-smoke",
+          "acceptanceEligible": false,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<10k.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --bench delta_accumulation_benchmark -- smoke",
+          "budgets": [
+            { "name": "smoke flush max", "metrics": ["1x20.flush", "10x10.flush"], "statistic": "max", "comparator": "<=", "limit": 50.0, "unit": "ms" },
+            { "name": "smoke reopen max", "metrics": ["1x20.reopen", "10x10.reopen"], "statistic": "max", "comparator": "<=", "limit": 100.0, "unit": "ms" },
+            { "name": "smoke read max", "metrics": ["1x20.current_query", "1x20.as_of_query", "10x10.current_query", "10x10.as_of_query"], "statistic": "max", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "smoke file growth", "metrics": ["1x20.file_growth_mib", "10x10.file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 8.0, "unit": "MiB" }
+          ]
+        },
+        {
+          "id": "t8b-mini",
+          "tier": "pre-optimization-gate",
+          "acceptanceEligible": true,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<1m.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --bench delta_accumulation_benchmark -- t8b-mini",
+          "budgets": [
+            { "name": "bounded accumulated flush p95", "metrics": ["1x1000.flush", "10x100.flush"], "statistic": "p95", "comparator": "<=", "limit": 50.0, "unit": "ms" },
+            { "name": "bounded accumulated flush max", "metrics": ["1x1000.flush", "10x100.flush"], "statistic": "max", "comparator": "<=", "limit": 200.0, "unit": "ms" },
+            { "name": "bounded accumulated reopen max", "metrics": ["1x1000.reopen", "10x100.reopen"], "statistic": "max", "comparator": "<=", "limit": 500.0, "unit": "ms" },
+            { "name": "bounded accumulated read max", "metrics": ["1x1000.current_query", "1x1000.as_of_query", "10x100.current_query", "10x100.as_of_query"], "statistic": "max", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "bounded accumulated file growth", "metrics": ["1x1000.file_growth_mib", "10x100.file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 64.0, "unit": "MiB" }
+          ]
+        },
+        {
+          "id": "full",
+          "tier": "release-dedicated-host",
+          "acceptanceEligible": true,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<1m.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --bench delta_accumulation_benchmark",
+          "budgets": [
+            { "name": "short accumulated flush max", "metrics": ["1x10.flush"], "statistic": "max", "comparator": "<=", "limit": 50.0, "unit": "ms" },
+            { "name": "ordinary accumulated flush p95", "metrics": ["1x100.flush", "1x1000.flush", "10x100.flush", "10x1000.flush", "100x100.flush"], "statistic": "p95", "comparator": "<=", "limit": 50.0, "unit": "ms" },
+            { "name": "long-tail characterization ceiling", "metrics": ["1x10000.flush"], "statistic": "p95", "comparator": "<=", "limit": 150.0, "unit": "ms" },
+            { "name": "accumulated flush max", "metrics": ["1x100.flush", "1x1000.flush", "1x10000.flush", "10x100.flush", "10x1000.flush", "100x100.flush"], "statistic": "max", "comparator": "<=", "limit": 200.0, "unit": "ms" },
+            { "name": "accumulated reopen max", "metrics": ["1x10.reopen", "1x100.reopen", "1x1000.reopen", "1x10000.reopen", "10x100.reopen", "10x1000.reopen", "100x100.reopen"], "statistic": "max", "comparator": "<=", "limit": 500.0, "unit": "ms" },
+            { "name": "accumulated selective read max", "metrics": ["1x10.current_query", "1x10.as_of_query", "1x100.current_query", "1x100.as_of_query", "1x1000.current_query", "1x1000.as_of_query", "1x10000.current_query", "1x10000.as_of_query", "10x100.current_query", "10x100.as_of_query", "10x1000.current_query", "10x1000.as_of_query", "100x100.current_query", "100x100.as_of_query"], "statistic": "max", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "ordinary accumulated file growth", "metrics": ["1x10.file_growth_mib", "1x100.file_growth_mib", "1x1000.file_growth_mib", "10x100.file_growth_mib", "10x1000.file_growth_mib", "100x100.file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 64.0, "unit": "MiB" },
+            { "name": "long-tail file-growth ceiling", "metrics": ["1x10000.file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 768.0, "unit": "MiB" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "agent-brief-read-path",
+      "milestone": "M4-agent-brief-selectivity",
+      "kind": "absolute-acceptance",
+      "owner": "vicia-query",
+      "decision": "Can the next agent brief read a just-written receipt without scanning the 1M committed base?",
+      "profiles": [
+        {
+          "id": "smoke",
+          "tier": "pull-request-smoke",
+          "acceptanceEligible": false,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<10k.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --bench agent_brief_read_path_benchmark -- smoke",
+          "budgets": [
+            { "name": "smoke selective read max", "metrics": ["smoke_single_receipt.current_query", "smoke_single_receipt.as_of_query", "smoke_single_receipt.prepared_as_of_query", "smoke_receipt_stream_10.current_query", "smoke_receipt_stream_10.as_of_query", "smoke_receipt_stream_10.prepared_as_of_query"], "statistic": "max", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "smoke export proxy max", "metrics": ["smoke_single_receipt.export_recent_filter", "smoke_receipt_stream_10.export_recent_filter"], "statistic": "max", "comparator": "<=", "limit": 100.0, "unit": "ms" },
+            { "name": "smoke file growth", "metrics": ["smoke_single_receipt.file_growth_mib", "smoke_receipt_stream_10.file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 8.0, "unit": "MiB" }
+          ]
+        },
+        {
+          "id": "full",
+          "tier": "release-dedicated-host",
+          "acceptanceEligible": true,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<1m.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --bench agent_brief_read_path_benchmark",
+          "budgets": [
+            { "name": "full selective read max", "metrics": ["single_receipt.current_query", "single_receipt.as_of_query", "single_receipt.prepared_as_of_query", "receipt_stream_100.current_query", "receipt_stream_100.as_of_query", "receipt_stream_100.prepared_as_of_query", "batched_receipts_1000.current_query", "batched_receipts_1000.as_of_query", "batched_receipts_1000.prepared_as_of_query"], "statistic": "max", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "full export proxy max", "metrics": ["single_receipt.export_recent_filter", "receipt_stream_100.export_recent_filter", "batched_receipts_1000.export_recent_filter"], "statistic": "max", "comparator": "<=", "limit": 500.0, "unit": "ms" },
+            { "name": "full file growth", "metrics": ["single_receipt.file_growth_mib", "receipt_stream_100.file_growth_mib", "batched_receipts_1000.file_growth_mib"], "statistic": "max", "comparator": "<=", "limit": 64.0, "unit": "MiB" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "browser-paged-matrix",
+      "milestone": "M5-browser-bounded-lifecycle",
+      "kind": "external-absolute-acceptance",
+      "owner": "vicia-browser",
+      "decision": "Does the 1M browser path keep foreground open, selective reads, writes, and reopens bounded while O(total) phases remain disposable-worker work?",
+      "profiles": [
+        {
+          "id": "full",
+          "tier": "release-real-chrome",
+          "acceptanceEligible": true,
+          "command": "node examples/browser/bench-driver.cjs paged-matrix <1m-fixture> 5 1024",
+          "budgets": [
+            { "name": "foreground paged open max", "metrics": ["open_paged"], "statistic": "max", "comparator": "<=", "limit": 500.0, "unit": "ms" },
+            { "name": "foreground write p95", "metrics": ["write"], "statistic": "p95", "comparator": "<=", "limit": 20.0, "unit": "ms" },
+            { "name": "threshold reopen max", "metrics": ["pre_maintenance_reopen"], "statistic": "max", "comparator": "<=", "limit": 500.0, "unit": "ms" },
+            { "name": "foreground PSS peak", "metrics": ["foreground_pss_growth"], "statistic": "max", "comparator": "<=", "limit": 512.0, "unit": "MiB" },
+            { "name": "disposable maintenance time", "metrics": ["maintenance"], "statistic": "max", "comparator": "<=", "limit": 60000.0, "unit": "ms" },
+            { "name": "disposable maintenance PSS", "metrics": ["maintenance_pss_growth"], "statistic": "max", "comparator": "<=", "limit": 3072.0, "unit": "MiB" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vetch-gate-d-exact-trace",
+      "milestone": "M6-vetch-product-acceptance",
+      "kind": "external-absolute-acceptance",
+      "owner": "vetch-quiet-surface",
+      "decision": "Does the exact Vetch product trace preserve query shape, persistence fingerprints, foreground cadence, memory, growth, maintenance, and reopen behavior?",
+      "profiles": [
+        {
+          "id": "full",
+          "tier": "release-vetch-integration",
+          "acceptanceEligible": true,
+          "command": "node apps/quiet-surface/scripts/bench-vicia-gate-d-exact-trace.mjs --full",
+          "budgets": [
+            { "name": "append p95", "metrics": ["append"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "checkpoint p95", "metrics": ["checkpoint"], "statistic": "p95", "comparator": "<=", "limit": 50.0, "unit": "ms" },
+            { "name": "selective current p95", "metrics": ["selective_current"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "historical p95", "metrics": ["historical"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" },
+            { "name": "agent brief p95", "metrics": ["agent_brief"], "statistic": "p95", "comparator": "<=", "limit": 100.0, "unit": "ms" },
+            { "name": "current-space rebuild max", "metrics": ["current_space_rebuild"], "statistic": "max", "comparator": "<=", "limit": 250.0, "unit": "ms" },
+            { "name": "reopen max", "metrics": ["reopen"], "statistic": "max", "comparator": "<=", "limit": 500.0, "unit": "ms" },
+            { "name": "foreground RSS", "metrics": ["foreground_rss"], "statistic": "max", "comparator": "<=", "limit": 512.0, "unit": "MiB" },
+            { "name": "foreground growth", "metrics": ["foreground_growth"], "statistic": "max", "comparator": "<=", "limit": 64.0, "unit": "MiB" },
+            { "name": "maintenance time", "metrics": ["maintenance"], "statistic": "max", "comparator": "<=", "limit": 60000.0, "unit": "ms" },
+            { "name": "maintenance RSS", "metrics": ["maintenance_rss"], "statistic": "max", "comparator": "<=", "limit": 3072.0, "unit": "MiB" },
+            { "name": "post-maintenance file ratio", "metrics": ["post_maintenance_file_ratio"], "statistic": "max", "comparator": "<=", "limit": 2.25, "unit": "ratio" }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -42,7 +42,13 @@ against older i7 rows.
 
 Benchmarks were run with [Criterion 0.8](https://bheisler.github.io/criterion.rs/book/). Each benchmark group is described below.
 
-### Evidence contract and CI coverage
+### Evidence contract, milestones, and CI coverage
+
+The operational development gate is
+[`BENCHMARK_MILESTONES.md`](BENCHMARK_MILESTONES.md). Its machine-readable
+authority is `benchmarks/milestones.json`, which owns milestone ids, profiles,
+commands, decision questions, and absolute budgets for native, browser, and
+Vetch product evidence.
 
 Nightly CI treats `benches/minigraf_bench.rs` as the Criterion group source of
 truth. `node scripts/check-benchmark-coverage.mjs` verifies both directions:
@@ -50,9 +56,8 @@ every literal Criterion group must match a nightly workflow filter, and every
 workflow filter must match at least one group. This prevents a newly added group
 from compiling successfully while remaining absent from longitudinal tracking.
 
-Caller-shaped harnesses retain their existing human-readable output and may
-also emit `vicia.benchmark.receipt.v1` JSON. The first adopter is the Vetch
-cadence harness:
+All native caller-shaped harnesses retain their existing human-readable output
+and can also emit `vicia.benchmark.receipt.v1` JSON. For example:
 
 ```bash
 VICIA_BENCH_RECEIPT=target/vetch-cadence-smoke.json \
@@ -61,15 +66,16 @@ cargo bench --bench vetch_cadence_benchmark -- smoke
 node scripts/check-benchmark-receipt.mjs target/vetch-cadence-smoke.json
 ```
 
-The receipt records source and executable provenance, testbed identity,
-configuration, sorted raw latency samples, nearest-rank p50/p95/max, file
-growth, and correctness checks. A series with fewer than 20 observations keeps
-its p95 value for inspection but marks its sample count ineligible. Smoke mode
-receipts are never acceptance-eligible, and a full receipt is eligible only
-when every series has enough observations and the source checkout is clean.
-Absolute performance budgets remain caller-owned; this first receipt slice does
-not reinterpret the existing Bencher prediction thresholds as
-percentage-regression allowances.
+The receipt records milestone ownership, source and executable provenance,
+testbed/host identity, executable and fixture SHA-256, configuration, sorted raw
+latency samples, quantiles through p99, mean, standard deviation, MAD, CV, file
+growth, expected/actual correctness, and catalog-derived budget checks. Receipt
+validation recomputes the summaries, correctness verdict, budgets, failures,
+and acceptance eligibility. Smoke receipts are never
+acceptance-eligible; full receipts additionally require a clean source checkout
+and sufficient observations for each p95-gated metric. Bencher prediction
+thresholds remain longitudinal signals rather than percentage-regression
+allowances.
 
 ### How to read these numbers
 

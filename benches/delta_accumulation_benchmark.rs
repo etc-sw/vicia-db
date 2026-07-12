@@ -1,13 +1,26 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use anyhow::{Result, bail};
+//! Repeated receipt-checkpoint growth and recovery benchmark.
+//!
+//! Modes (argv[1] or MINIGRAF_DELTA_ACCUMULATION_MODE):
+//!   full     — 1M-fact base, seven accumulated-delta shapes
+//!   t8b-mini — 1M-fact base, bounded pre-optimization gate
+//!   smoke    — 10K-fact base, two quick correctness/growth shapes
+
+use anyhow::{Context, Result, bail};
 use minigraf::{Minigraf, OpenOptions, QueryResult};
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
-const BASE_FACTS: usize = 1_000_000;
+#[path = "helpers/receipt.rs"]
+mod receipt;
+
+const FULL_BASE_FACTS: usize = 1_000_000;
+const SMOKE_BASE_FACTS: usize = 10_000;
 const BASE_BATCH_SIZE: usize = 1_000;
 const PAGE_SIZE_BYTES: u64 = 4096;
 const DELTA_SEGMENT_MAGIC: &[u8] = b"MGDSG001";
@@ -15,6 +28,7 @@ const CORRUPTION_SCAN_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 const SEGMENT_COUNT_SCAN_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_QUERY_PROBES_PER_SCENARIO: usize = 32;
 const T8B_MINI_MODE: &str = "t8b-mini";
+const SMOKE_MODE: &str = "smoke";
 const FULL_SCENARIOS: &[AccumulationScenario] = &[
     AccumulationScenario {
         facts_per_checkpoint: 1,
@@ -55,11 +69,28 @@ const T8B_MINI_SCENARIOS: &[AccumulationScenario] = &[
         checkpoints: 100,
     },
 ];
+const SMOKE_SCENARIOS: &[AccumulationScenario] = &[
+    AccumulationScenario {
+        facts_per_checkpoint: 1,
+        checkpoints: 20,
+    },
+    AccumulationScenario {
+        facts_per_checkpoint: 10,
+        checkpoints: 10,
+    },
+];
 
 #[derive(Clone, Copy, Debug)]
 struct AccumulationScenario {
     facts_per_checkpoint: usize,
     checkpoints: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AccumulationConfig {
+    mode: &'static str,
+    base_facts: usize,
+    scenarios: &'static [AccumulationScenario],
 }
 
 #[derive(Debug)]
@@ -81,53 +112,91 @@ struct AccumulationMeasurement {
     corrupt_latest_fallback: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct DurationStats {
+    samples: Vec<Duration>,
     p50: Duration,
     p95: Duration,
     max: Duration,
 }
 
 fn main() -> Result<()> {
-    let scenarios = selected_scenarios();
+    let started_at = SystemTime::now();
+    let config = selected_config();
     let root = tempfile::tempdir()?;
-    let base_path = root.path().join("base-1m.graph");
-    build_checkpointed_base(&base_path)?;
+    let base_path = root.path().join(format!("base-{}.graph", config.mode));
+    let fixture_source = receipt::install_base_fixture_if_configured(&base_path)?;
+    if fixture_source.is_some() {
+        verify_base_fact_count(&base_path, config.base_facts)?;
+    } else {
+        build_checkpointed_base(&base_path, config.base_facts)?;
+    }
     let base_file_bytes = file_len(&base_path)?;
     let base_pages = file_page_count(&base_path)?;
+    let base_fixture_sha256 = receipt::sha256_file(&base_path)?;
 
     println!(
         "facts_per_checkpoint,checkpoints,accumulated_delta_facts,query_probe_count,flush_p50_ms,flush_p95_ms,flush_max_ms,reopen_p50_ms,reopen_p95_ms,reopen_max_ms,current_query_p50_ms,current_query_p95_ms,current_query_max_ms,as_of_query_p50_ms,as_of_query_p95_ms,as_of_query_max_ms,base_file_bytes,final_file_bytes,file_growth_bytes,base_pages,final_pages,page_growth,actual_delta_facts,segment_count,corrupt_latest_fallback"
     );
 
     let mut measurements = Vec::new();
-    for &scenario in scenarios {
+    for &scenario in config.scenarios {
         let run_path = root.path().join(format!(
             "accum-{}x{}.graph",
             scenario.facts_per_checkpoint, scenario.checkpoints
         ));
         copy_checkpointed_base(&base_path, &run_path)?;
-        let measurement = measure_accumulation(&run_path, base_file_bytes, base_pages, scenario)?;
+        let measurement = measure_accumulation(
+            &run_path,
+            config.base_facts,
+            base_file_bytes,
+            base_pages,
+            scenario,
+        )?;
         print_measurement(&measurement);
         measurements.push(measurement);
     }
 
-    assert_matrix_complete(&measurements, scenarios)?;
+    assert_matrix_complete(&measurements, config.scenarios)?;
+    write_receipt(
+        started_at,
+        config,
+        &measurements,
+        &base_fixture_sha256,
+        fixture_source.as_deref(),
+    )?;
     Ok(())
 }
 
-fn selected_scenarios() -> &'static [AccumulationScenario] {
+fn selected_config() -> AccumulationConfig {
     let arg_mode = std::env::args().nth(1);
     let env_mode = std::env::var("MINIGRAF_DELTA_ACCUMULATION_MODE").ok();
-    if arg_mode.as_deref() == Some(T8B_MINI_MODE) || env_mode.as_deref() == Some(T8B_MINI_MODE) {
-        T8B_MINI_SCENARIOS
+    if arg_mode.as_deref() == Some(SMOKE_MODE) || env_mode.as_deref() == Some(SMOKE_MODE) {
+        AccumulationConfig {
+            mode: SMOKE_MODE,
+            base_facts: SMOKE_BASE_FACTS,
+            scenarios: SMOKE_SCENARIOS,
+        }
+    } else if arg_mode.as_deref() == Some(T8B_MINI_MODE)
+        || env_mode.as_deref() == Some(T8B_MINI_MODE)
+    {
+        AccumulationConfig {
+            mode: T8B_MINI_MODE,
+            base_facts: FULL_BASE_FACTS,
+            scenarios: T8B_MINI_SCENARIOS,
+        }
     } else {
-        FULL_SCENARIOS
+        AccumulationConfig {
+            mode: "full",
+            base_facts: FULL_BASE_FACTS,
+            scenarios: FULL_SCENARIOS,
+        }
     }
 }
 
 fn measure_accumulation(
     path: &Path,
+    base_facts: usize,
     base_file_bytes: u64,
     base_pages: u64,
     scenario: AccumulationScenario,
@@ -190,7 +259,7 @@ fn measure_accumulation(
     let records = db.export_fact_log().map_err(db_error)?;
     let actual_delta_facts = records
         .len()
-        .checked_sub(BASE_FACTS)
+        .checked_sub(base_facts)
         .ok_or_else(|| anyhow::anyhow!("exported fact log is smaller than base fixture"))?;
     drop(db);
 
@@ -218,10 +287,10 @@ fn measure_accumulation(
     })
 }
 
-fn build_checkpointed_base(path: &Path) -> Result<()> {
+fn build_checkpointed_base(path: &Path, base_facts: usize) -> Result<()> {
     let db = open_no_auto_checkpoint(path)?;
-    for batch_start in (0..BASE_FACTS).step_by(BASE_BATCH_SIZE) {
-        let batch_end = (batch_start + BASE_BATCH_SIZE).min(BASE_FACTS);
+    for batch_start in (0..base_facts).step_by(BASE_BATCH_SIZE) {
+        let batch_end = (batch_start + BASE_BATCH_SIZE).min(base_facts);
         let mut command = String::from("(transact [");
         for index in batch_start..batch_end {
             push_base_fact(&mut command, index);
@@ -231,6 +300,15 @@ fn build_checkpointed_base(path: &Path) -> Result<()> {
     }
     db.checkpoint().map_err(db_error)?;
     drop(db);
+    Ok(())
+}
+
+fn verify_base_fact_count(path: &Path, expected: usize) -> Result<()> {
+    let db = open_no_auto_checkpoint(path)?;
+    let actual = db.export_fact_log().map_err(db_error)?.len();
+    if actual != expected {
+        bail!("provided base fixture fact count does not match benchmark profile");
+    }
     Ok(())
 }
 
@@ -307,7 +385,11 @@ fn count_delta_segments(path: &Path) -> Result<usize> {
 
         let mut chunk = Vec::with_capacity(carry.len().saturating_add(read));
         chunk.extend_from_slice(&carry);
-        chunk.extend_from_slice(&buffer[..read]);
+        chunk.extend_from_slice(
+            buffer
+                .get(..read)
+                .context("segment scan read exceeded buffer length")?,
+        );
         count = count.saturating_add(
             chunk
                 .windows(DELTA_SEGMENT_MAGIC.len())
@@ -318,7 +400,11 @@ fn count_delta_segments(path: &Path) -> Result<usize> {
         let keep = DELTA_SEGMENT_MAGIC.len().saturating_sub(1).min(chunk.len());
         carry.clear();
         if keep > 0 {
-            carry.extend_from_slice(&chunk[chunk.len().saturating_sub(keep)..]);
+            carry.extend_from_slice(
+                chunk
+                    .get(chunk.len().saturating_sub(keep)..)
+                    .context("segment scan carry range is invalid")?,
+            );
         }
     }
 
@@ -339,7 +425,8 @@ fn find_last_delta_segment_marker(file: &mut std::fs::File, file_len: u64) -> Re
         } else {
             search_end.saturating_add(overlap).min(file_len)
         };
-        let read_len = read_end.saturating_sub(chunk_start) as usize;
+        let read_len = usize::try_from(read_end.saturating_sub(chunk_start))
+            .context("delta marker scan chunk does not fit usize")?;
         let mut buffer = vec![0u8; read_len];
         file.seek(SeekFrom::Start(chunk_start))?;
         file.read_exact(&mut buffer)?;
@@ -449,6 +536,7 @@ fn duration_stats(samples: &[Duration]) -> Result<DurationStats> {
     let mut sorted = samples.to_vec();
     sorted.sort();
     Ok(DurationStats {
+        samples: sorted.clone(),
         p50: percentile(&sorted, 50),
         p95: percentile(&sorted, 95),
         max: *sorted
@@ -459,7 +547,10 @@ fn duration_stats(samples: &[Duration]) -> Result<DurationStats> {
 
 fn percentile(sorted: &[Duration], percentile: usize) -> Duration {
     let rank = sorted.len().saturating_mul(percentile).saturating_add(99) / 100;
-    sorted[rank.saturating_sub(1).min(sorted.len().saturating_sub(1))]
+    sorted
+        .get(rank.saturating_sub(1).min(sorted.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or_default()
 }
 
 fn probe_points(checkpoints: usize) -> Vec<usize> {
@@ -547,5 +638,100 @@ fn assert_matrix_complete(
             bail!("accumulation benchmark scenario is missing");
         }
     }
+    Ok(())
+}
+
+fn write_receipt(
+    started_at: SystemTime,
+    config: AccumulationConfig,
+    measurements: &[AccumulationMeasurement],
+    base_fixture_sha256: &str,
+    fixture_source: Option<&Path>,
+) -> Result<()> {
+    let mut metrics = BTreeMap::new();
+    let mut files = Vec::new();
+    let mut correctness_checks = vec![receipt::CorrectnessCheck::equal(
+        "scenario matrix cardinality",
+        json!(config.scenarios.len()),
+        json!(measurements.len()),
+    )];
+
+    for measurement in measurements {
+        let prefix = format!(
+            "{}x{}",
+            measurement.facts_per_checkpoint, measurement.checkpoints
+        );
+        for (name, stats) in [
+            ("flush", &measurement.flush),
+            ("reopen", &measurement.reopen),
+            ("current_query", &measurement.current_query),
+            ("as_of_query", &measurement.as_of_query),
+        ] {
+            metrics.insert(
+                format!("{prefix}.{name}"),
+                receipt::MetricSeries::from_durations(&stats.samples)?,
+            );
+        }
+        let growth_bytes = measurement
+            .final_file_bytes
+            .saturating_sub(measurement.base_file_bytes);
+        metrics.insert(
+            format!("{prefix}.file_growth_mib"),
+            receipt::MetricSeries::from_values(
+                "MiB",
+                vec![growth_bytes as f64 / (1024.0 * 1024.0)],
+            )?,
+        );
+        files.push(json!({
+            "scenario": prefix,
+            "baseBytes": measurement.base_file_bytes,
+            "finalBytes": measurement.final_file_bytes,
+            "growthBytes": growth_bytes,
+            "basePages": measurement.base_pages,
+            "finalPages": measurement.final_pages,
+            "segmentCount": measurement.segment_count
+        }));
+        correctness_checks.push(receipt::CorrectnessCheck::equal(
+            &format!("{prefix} exported delta fact count"),
+            json!(measurement.accumulated_delta_facts),
+            json!(measurement.actual_delta_facts),
+        ));
+        correctness_checks.push(receipt::CorrectnessCheck::equal(
+            &format!("{prefix} visible segment count"),
+            json!(measurement.checkpoints),
+            json!(measurement.segment_count),
+        ));
+        correctness_checks.push(receipt::CorrectnessCheck::equal(
+            &format!("{prefix} corrupt-newest fallback"),
+            json!(true),
+            json!(measurement.corrupt_latest_fallback),
+        ));
+        correctness_checks.push(receipt::CorrectnessCheck::equal(
+            &format!("{prefix} query probe count"),
+            json!(measurement.query_probe_count),
+            json!(measurement.current_query.samples.len()),
+        ));
+    }
+
+    receipt::write_if_requested(receipt::ReceiptInput {
+        suite: "delta-accumulation".to_owned(),
+        profile: config.mode.to_owned(),
+        started_at,
+        configuration: json!({
+            "mode": config.mode,
+            "baseFacts": config.base_facts,
+            "maxQueryProbesPerScenario": MAX_QUERY_PROBES_PER_SCENARIO,
+            "scenarioCount": config.scenarios.len(),
+            "coldWarmPolicy": "checkpointed-base-copy-per-scenario-reopen-at-probes",
+            "fixtureOrigin": if fixture_source.is_some() { "provided" } else { "generated" },
+            "fixtureSource": fixture_source.map(|path| path.display().to_string())
+        }),
+        metrics,
+        files: json!({
+            "baseFixtureSha256": base_fixture_sha256,
+            "scenarios": files
+        }),
+        correctness_checks,
+    })?;
     Ok(())
 }
