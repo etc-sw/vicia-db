@@ -187,6 +187,7 @@ fn build_base(path: &Path, facts: u64) -> Result<()> {
 fn measure_sample(base: &Path, path: &Path, base_facts: u64, pending: u64) -> Result<Sample> {
     remove_graph(path);
     fs::copy(base, path)?;
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
     let db = Minigraf::open_with_options(
         path,
         OpenOptions {
