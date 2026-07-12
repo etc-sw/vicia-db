@@ -81,7 +81,7 @@ struct Receipt {
     execution_boundary: &'static str,
     facts: u64,
     build_ms: f64,
-    read_ms: f64,
+    point_read_samples_ms: Vec<f64>,
     aggregate_samples_ms: Vec<f64>,
     count: u64,
     checksum: i128,
@@ -177,7 +177,7 @@ fn receipt(
     dir: &Path,
     facts: u64,
     build_ms: f64,
-    read_ms: f64,
+    point_read_samples_ms: Vec<f64>,
     samples: Vec<f64>,
     count: u64,
     checksum: i128,
@@ -197,13 +197,13 @@ fn receipt(
         );
     }
     Ok(Receipt {
-        schema: "vicia.ref-db-bench.v3",
+        schema: "vicia.ref-db-bench.v4",
         engine: engine.id(),
         role: engine.role(),
         execution_boundary: engine.boundary(),
         facts,
         build_ms,
-        read_ms,
+        point_read_samples_ms,
         aggregate_samples_ms: samples,
         count,
         checksum,
@@ -244,13 +244,13 @@ fn run_vicia(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
     }
     db.checkpoint()?;
     let build_ms = elapsed(started);
-    let read = Instant::now();
-    let result = db.execute(&format!(
+    let point_query = format!(
         "(query [:find ?v :where [:cmp/e{} :cmp/value ?v]])",
         facts / 2
-    ))?;
-    validate_vicia_point(result, facts / 2)?;
-    let read_ms = elapsed(read);
+    );
+    let point_read_samples_ms = measure_point(repetitions, || {
+        validate_vicia_point(db.execute(&point_query)?, facts / 2)
+    })?;
     let mut samples = Vec::with_capacity(repetitions);
     let mut final_pair = (0, 0);
     for _ in 0..repetitions {
@@ -264,7 +264,7 @@ fn run_vicia(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
         dir,
         facts,
         build_ms,
-        read_ms,
+        point_read_samples_ms,
         samples,
         final_pair.0,
         final_pair.1,
@@ -317,16 +317,15 @@ fn run_redb(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
         tx.commit()?;
     }
     let build_ms = elapsed(started);
-    let read = Instant::now();
-    let tx = db.begin_read()?;
-    let table = tx.open_table(REDB_FACTS)?;
-    let value = table.get(facts / 2)?.context("redb point missing")?.value();
-    if value != i64::try_from(facts / 2)? {
-        bail!("redb point mismatch");
-    }
-    let read_ms = elapsed(read);
-    drop(table);
-    drop(tx);
+    let point_read_samples_ms = measure_point(repetitions, || {
+        let tx = db.begin_read()?;
+        let table = tx.open_table(REDB_FACTS)?;
+        let value = table.get(facts / 2)?.context("redb point missing")?.value();
+        if value != i64::try_from(facts / 2)? {
+            bail!("redb point mismatch");
+        }
+        Ok(())
+    })?;
     let mut samples = Vec::with_capacity(repetitions);
     let mut final_pair = (0, 0);
     for _ in 0..repetitions {
@@ -349,7 +348,7 @@ fn run_redb(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
         dir,
         facts,
         build_ms,
-        read_ms,
+        point_read_samples_ms,
         samples,
         final_pair.0,
         final_pair.1,
@@ -372,14 +371,15 @@ fn run_fjall(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
         batch.commit()?;
     }
     let build_ms = elapsed(started);
-    let read = Instant::now();
-    let value = items
-        .get(key_bytes(facts / 2))?
-        .context("fjall point missing")?;
-    if value.as_ref() != key_bytes(facts / 2) {
-        bail!("fjall point mismatch");
-    }
-    let read_ms = elapsed(read);
+    let point_read_samples_ms = measure_point(repetitions, || {
+        let value = items
+            .get(key_bytes(facts / 2))?
+            .context("fjall point missing")?;
+        if value.as_ref() != key_bytes(facts / 2) {
+            bail!("fjall point mismatch");
+        }
+        Ok(())
+    })?;
     let mut samples = Vec::with_capacity(repetitions);
     let mut final_pair = (0, 0);
     for _ in 0..repetitions {
@@ -402,7 +402,7 @@ fn run_fjall(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
         dir,
         facts,
         build_ms,
-        read_ms,
+        point_read_samples_ms,
         samples,
         final_pair.0,
         final_pair.1,
@@ -419,16 +419,17 @@ fn run_grafeo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Res
     }
     let build_ms = elapsed(started);
     let session = db.session();
-    let read = Instant::now();
     let query = format!(
         "MATCH (n:Fact) WHERE n.entity = {} RETURN n.value",
         facts / 2
     );
-    let value: i64 = session.execute(&query)?.scalar()?;
-    if value != i64::try_from(facts / 2)? {
-        bail!("Grafeo point mismatch");
-    }
-    let read_ms = elapsed(read);
+    let point_read_samples_ms = measure_point(repetitions, || {
+        let value: i64 = session.execute(&query)?.scalar()?;
+        if value != i64::try_from(facts / 2)? {
+            bail!("Grafeo point mismatch");
+        }
+        Ok(())
+    })?;
     let mut samples = Vec::with_capacity(repetitions);
     let mut final_pair = (0, 0);
     for _ in 0..repetitions {
@@ -456,7 +457,7 @@ fn run_grafeo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Res
         dir,
         facts,
         build_ms,
-        read_ms,
+        point_read_samples_ms,
         samples,
         final_pair.0,
         final_pair.1,
@@ -490,27 +491,28 @@ fn run_cozo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     }
     let build_ms = elapsed(started);
-    let read = Instant::now();
-    let point = db
-        .run_script(
-            "?[value] := *facts{entity: $id, value}",
-            BTreeMap::from([(
-                "id".to_string(),
-                DataValue::Num(Num::Int((facts / 2) as i64)),
-            )]),
-            ScriptMutability::Immutable,
-        )
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let value = point
-        .rows
-        .first()
-        .and_then(|r| r.first())
-        .and_then(data_i64)
-        .context("Cozo point missing")?;
-    if value != i64::try_from(facts / 2)? {
-        bail!("Cozo point mismatch");
-    }
-    let read_ms = elapsed(read);
+    let point_read_samples_ms = measure_point(repetitions, || {
+        let point = db
+            .run_script(
+                "?[value] := *facts{entity: $id, value}",
+                BTreeMap::from([(
+                    "id".to_string(),
+                    DataValue::Num(Num::Int((facts / 2) as i64)),
+                )]),
+                ScriptMutability::Immutable,
+            )
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let value = point
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(data_i64)
+            .context("Cozo point missing")?;
+        if value != i64::try_from(facts / 2)? {
+            bail!("Cozo point mismatch");
+        }
+        Ok(())
+    })?;
     let mut samples = Vec::with_capacity(repetitions);
     let mut final_pair = (0, 0);
     for _ in 0..repetitions {
@@ -539,7 +541,7 @@ fn run_cozo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
         dir,
         facts,
         build_ms,
-        read_ms,
+        point_read_samples_ms,
         samples,
         final_pair.0,
         final_pair.1,
@@ -585,19 +587,24 @@ async fn run_turso(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -
         conn.execute("COMMIT", ()).await?;
     }
     let build_ms = elapsed(started);
-    let read = Instant::now();
-    let mut rows = conn
-        .query(
-            "SELECT value FROM facts WHERE entity = ?1",
-            [i64::try_from(facts / 2)?],
-        )
-        .await?;
-    let row = rows.next().await?.context("Turso point missing")?;
-    let value = row.get::<i64>(0)?;
-    if value != i64::try_from(facts / 2)? {
-        bail!("Turso point mismatch");
+    let mut point_read_samples_ms = Vec::with_capacity(repetitions);
+    for sample in 0..=repetitions {
+        let started = Instant::now();
+        let mut rows = conn
+            .query(
+                "SELECT value FROM facts WHERE entity = ?1",
+                [i64::try_from(facts / 2)?],
+            )
+            .await?;
+        let row = rows.next().await?.context("Turso point missing")?;
+        let value = row.get::<i64>(0)?;
+        if value != i64::try_from(facts / 2)? {
+            bail!("Turso point mismatch");
+        }
+        if sample > 0 {
+            point_read_samples_ms.push(elapsed(started));
+        }
     }
-    let read_ms = elapsed(read);
     let mut samples = Vec::with_capacity(repetitions);
     let mut final_pair = (0, 0);
     for _ in 0..repetitions {
@@ -612,8 +619,6 @@ async fn run_turso(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -
         );
         samples.push(elapsed(started));
     }
-    drop(row);
-    drop(rows);
     drop(conn);
     drop(db);
     receipt(
@@ -621,7 +626,7 @@ async fn run_turso(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -
         dir,
         facts,
         build_ms,
-        read_ms,
+        point_read_samples_ms,
         samples,
         final_pair.0,
         final_pair.1,
@@ -781,6 +786,17 @@ fn finish_memory_measurement_with_baseline(
         retained_breakdown,
         retained_delta_breakdown: retained_breakdown.saturating_sub(baseline_breakdown),
     })
+}
+
+fn measure_point(repetitions: usize, mut query: impl FnMut() -> Result<()>) -> Result<Vec<f64>> {
+    query()?;
+    let mut samples = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        query()?;
+        samples.push(elapsed(started));
+    }
+    Ok(samples)
 }
 
 fn elapsed(started: Instant) -> f64 {

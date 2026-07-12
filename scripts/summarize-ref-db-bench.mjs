@@ -19,10 +19,12 @@ const expectedChecksum = facts * (facts - 1) / 2;
 
 for (const receipt of receipts) {
   if (
-    receipt.schema !== "vicia.ref-db-bench.v3" ||
+    receipt.schema !== "vicia.ref-db-bench.v4" ||
     receipt.facts !== facts ||
     receipt.count !== facts ||
     receipt.checksum !== expectedChecksum ||
+    !Array.isArray(receipt.pointReadSamplesMs) ||
+    receipt.pointReadSamplesMs.length !== (profile === "full" ? 20 : 5) ||
     !Array.isArray(receipt.memory?.aggregateSamplesMs) ||
     receipt.memory.aggregateSamplesMs.length !== (profile === "full" ? 20 : 5) ||
     receipt.memory.count !== facts ||
@@ -43,12 +45,15 @@ sourceCommits.vicia = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "ut
 
 const rows = receipts.map((receipt) => {
   const samples = [...receipt.memory.aggregateSamplesMs].sort((a, b) => a - b);
+  const pointSamples = [...receipt.pointReadSamplesMs].sort((a, b) => a - b);
   return {
     engine: receipt.engine,
     role: receipt.role,
     boundary: receipt.executionBoundary,
     buildMs: round(receipt.buildMs),
-    pointReadMs: round(receipt.readMs),
+    pointReadP50Ms: round(percentile(pointSamples, 50)),
+    pointReadP95Ms: round(percentile(pointSamples, 95)),
+    pointReadMaxMs: round(pointSamples.at(-1)),
     p50Ms: round(percentile(samples, 50)),
     p95Ms: round(percentile(samples, 95)),
     maxMs: round(samples.at(-1)),
@@ -69,7 +74,7 @@ const rows = receipts.map((receipt) => {
 });
 
 const report = {
-  schema: "vicia.ref-db-bench.summary.v3",
+  schema: "vicia.ref-db-bench.summary.v4",
   profile,
   facts,
   repetitions: profile === "full" ? 20 : 5,
@@ -82,28 +87,51 @@ const report = {
     memory: "Baseline is VmRSS after open. Delta is VmHWM minus baseline. Retained is final VmRSS minus baseline. smaps separates anonymous, file-backed, [heap], and mappings whose path is inside the database directory.",
     kernelPageCache: "Not reported: Linux does not attribute buffered file-page cache to one process. databaseMappedRss covers only database files actually mmaped into this process.",
   },
-  rows,
+  groups: {
+    engineAggregate: rows.filter((row) => row.boundary === "engineAggregate"),
+    ownedResultScan: rows.filter((row) => row.boundary === "ownedResultScan"),
+  },
 };
 writeFileSync(join(outputDir, "summary.json"), `${JSON.stringify(report, null, 2)}\n`);
 
-const header = ["engine", "role", "boundary", "build ms", "point read ms", "aggregate/scan p50 ms", "p95 ms", "open baseline RSS MiB", "workload delta RSS MiB", "peak RSS MiB", "retained RSS MiB", "storage MiB", "correct"];
-const tableRows = rows.map((row) => [row.engine, row.role, row.boundary, row.buildMs, row.pointReadMs, row.p50Ms, row.p95Ms, row.baselineRssMiB, row.deltaRssMiB, row.peakRssMiB, row.retainedRssMiB, row.storageMiB, "yes"]);
+const header = ["engine", "role", "build ms", "point p50 ms", "point p95 ms", "point max ms", "workload p50 ms", "workload p95 ms", "open baseline RSS MiB", "workload delta RSS MiB", "peak RSS MiB", "retained RSS MiB", "storage MiB", "correct"];
+const table = (group) => {
+  const tableRows = group.map((row) => [row.engine, row.role, row.buildMs, row.pointReadP50Ms, row.pointReadP95Ms, row.pointReadMaxMs, row.p50Ms, row.p95Ms, row.baselineRssMiB, row.deltaRssMiB, row.peakRssMiB, row.retainedRssMiB, row.storageMiB, "yes"]);
+  return [
+    `| ${header.join(" | ")} |`,
+    `| ${header.map(() => "---").join(" | ")} |`,
+    ...tableRows.map((row) => `| ${row.join(" | ")} |`),
+  ];
+};
 const memoryHeader = ["engine", "baseline anonymous MiB", "baseline file-backed MiB", "retained anonymous delta MiB", "retained file-backed delta MiB", "retained [heap] delta MiB", "retained DB mmap delta MiB"];
-const memoryRows = rows.map((row) => [row.engine, row.baselineAnonymousMiB, row.baselineFileBackedMiB, row.retainedAnonymousDeltaMiB, row.retainedFileBackedDeltaMiB, row.retainedHeapMappingDeltaMiB, row.retainedDatabaseMappedDeltaMiB]);
+const memoryTable = (group) => {
+  const memoryRows = group.map((row) => [row.engine, row.baselineAnonymousMiB, row.baselineFileBackedMiB, row.retainedAnonymousDeltaMiB, row.retainedFileBackedDeltaMiB, row.retainedHeapMappingDeltaMiB, row.retainedDatabaseMappedDeltaMiB]);
+  return [
+    `| ${memoryHeader.join(" | ")} |`,
+    `| ${memoryHeader.map(() => "---").join(" | ")} |`,
+    ...memoryRows.map((row) => `| ${row.join(" | ")} |`),
+  ];
+};
 const markdown = [
   `# Vicia reference DB comparison (${profile})`,
   "",
   `Facts: ${facts}; repetitions: ${report.repetitions}`,
   "",
-  `| ${header.join(" | ")} |`,
-  `| ${header.map(() => "---").join(" | ")} |`,
-  ...tableRows.map((row) => `| ${row.join(" | ")} |`),
+  "## Engine aggregate",
   "",
-  "## Memory breakdown",
+  ...table(report.groups.engineAggregate),
   "",
-  `| ${memoryHeader.join(" | ")} |`,
-  `| ${memoryHeader.map(() => "---").join(" | ")} |`,
-  ...memoryRows.map((row) => `| ${row.join(" | ")} |`),
+  "## Owned result scan storage floors",
+  "",
+  ...table(report.groups.ownedResultScan),
+  "",
+  "## Engine aggregate memory breakdown",
+  "",
+  ...memoryTable(report.groups.engineAggregate),
+  "",
+  "## Owned result scan memory breakdown",
+  "",
+  ...memoryTable(report.groups.ownedResultScan),
   "",
   "`engineAggregate` and `ownedResultScan` are separate contracts. redb and Fjall are storage floors, not graph/query-engine peers.",
   "Memory columns come from the fresh aggregate/scan child, so build high-water memory does not contaminate them.",
