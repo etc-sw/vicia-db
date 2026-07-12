@@ -1,0 +1,110 @@
+{
+  "schema": "vicia.cross-db-stress.summary.v2",
+  "profile": "full",
+  "sourceCommit": "42a92748defb52bb2fce8ba2ea07a45de150bfb4",
+  "sourceDirty": false,
+  "host": {
+    "testbed": "hal7800-wsl2",
+    "os": "linux",
+    "arch": "x86_64",
+    "logicalCpus": 16,
+    "cpuModel": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "memoryBytes": 33655283712
+  },
+  "acceptanceEligible": true,
+  "comparisonPolicy": {
+    "semanticPeers": [
+      "vicia",
+      "cozo"
+    ],
+    "relationalBaseline": [
+      "sqlite"
+    ],
+    "storageFloor": [
+      "redb"
+    ],
+    "warning": "Do not rank redb as a graph or Datalog engine; it measures the key-value storage floor only.",
+    "durability": "Each append sample is one durable transaction; SQLite uses WAL plus synchronous=FULL.",
+    "memory": "Peak resident set is Linux /proc VmHWM for one isolated engine process.",
+    "scanWorkloads": {
+      "engineAggregate": "The query engine computes count and sum and returns one scalar row. redb is N/A because it has no query engine.",
+      "materializedScan": "Every engine produces one owned Vec<i64> containing all values, then the same Rust host loop computes count and checksum.",
+      "isolation": "Each scan workload runs in a fresh child process. Its RSS excludes build, checkpoint, append, and the other scan workload."
+    },
+    "stability": "Every cycle closes and reopens the database, then a continuous writer is killed with SIGKILL. Recovery must retain the announced committed prefix and match its exact arithmetic checksum."
+  },
+  "rows": [
+    {
+      "engine": "vicia",
+      "classification": "product-bi-temporal-datalog",
+      "buildMs": 12802.67,
+      "appendP95Ms": 11.597,
+      "readP95Ms": 0.029,
+      "reopenP95Ms": 11.703,
+      "engineAggregateMs": 1567.572,
+      "engineAggregateRssMiB": 386.137,
+      "materializedScanMs": 1815.529,
+      "materializedScanRssMiB": 513.512,
+      "stressProcessRssMiB": 2054.535,
+      "storageMiB": 341.465,
+      "bytesPerFact": 354.507,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "wal-replay-open-and-full-scan",
+      "correctness": true
+    },
+    {
+      "engine": "cozo",
+      "classification": "peer-embedded-datalog-graph",
+      "buildMs": 6843.248,
+      "appendP95Ms": 3.848,
+      "readP95Ms": 0.108,
+      "reopenP95Ms": 0.23,
+      "engineAggregateMs": 324.975,
+      "engineAggregateRssMiB": 17,
+      "materializedScanMs": 1016.835,
+      "materializedScanRssMiB": 553.625,
+      "stressProcessRssMiB": 18.629,
+      "storageMiB": 78.984,
+      "bytesPerFact": 82.001,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "transactional-open-and-full-scan",
+      "correctness": true
+    },
+    {
+      "engine": "sqlite",
+      "classification": "baseline-embedded-relational-eav",
+      "buildMs": 895.548,
+      "appendP95Ms": 2.441,
+      "readP95Ms": 0.009,
+      "reopenP95Ms": 0.239,
+      "engineAggregateMs": 25.335,
+      "engineAggregateRssMiB": 12.25,
+      "materializedScanMs": 47.903,
+      "materializedScanRssMiB": 20,
+      "stressProcessRssMiB": 12.258,
+      "storageMiB": 11.594,
+      "bytesPerFact": 12.037,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "ok",
+      "correctness": true
+    },
+    {
+      "engine": "redb",
+      "classification": "floor-embedded-key-value",
+      "buildMs": 1586.375,
+      "appendP95Ms": 1.252,
+      "readP95Ms": 0.004,
+      "reopenP95Ms": 0.475,
+      "engineAggregateMs": null,
+      "engineAggregateRssMiB": null,
+      "materializedScanMs": 89.171,
+      "materializedScanRssMiB": 49.625,
+      "stressProcessRssMiB": 24.625,
+      "storageMiB": 54.754,
+      "bytesPerFact": 56.845,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "transactional-open-and-full-scan",
+      "correctness": true
+    }
+  ]
+}
