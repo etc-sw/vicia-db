@@ -1,6 +1,6 @@
 [workspace]
 members = ["."]
-exclude = ["fuzz"]
+exclude = ["fuzz", "tools/cross-db-bench"]
 resolver = "2"
 
 [package]

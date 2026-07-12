@@ -15,9 +15,11 @@ This document explains how to use that authority during development.
 | M4 agent-brief selectivity | Can a just-written receipt be read without a committed-base scan? | Native smoke + dedicated full | Vicia query |
 | M5 browser bounded lifecycle | Do 1M foreground browser operations stay bounded while O(total) work remains disposable? | Real-Chrome paged matrix | Vicia browser |
 | M6 Vetch product acceptance | Does the exact product trace preserve cadence, memory, growth, query shape, fingerprints, maintenance, and reopen? | Vetch Gate D full | Vetch quiet surface |
+| M7 cross-engine characterization | Where does Vicia spend time, memory, and bytes relative to classified embedded peers, and do all survive kill-9? | Weekly smoke + dedicated full | Vicia performance |
 
 M1 is longitudinal evidence and does not by itself close a product milestone.
-M2-M6 are absolute acceptance boundaries. A storage or query optimization must
+M2-M6 are absolute acceptance boundaries. M7 is comparative evidence and does
+not define an overall winner or a release budget. A storage or query optimization must
 name the affected milestone before implementation; otherwise it has no honest
 performance completion condition.
 

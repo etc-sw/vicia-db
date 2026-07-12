@@ -258,7 +258,7 @@ See [ROADMAP.md](ROADMAP.md) for the full phase plan, current status, and releas
 
 ## Performance
 
-Benchmarks on Intel Core i7-1065G7 @ 1.30GHz, 16 GB RAM, Rust 1.92.0. See [BENCHMARKS.md](docs/BENCHMARKS.md) for full tables and [BENCHMARK_MILESTONES.md](docs/BENCHMARK_MILESTONES.md) for the machine-checked development and release gates.
+Benchmarks on Intel Core i7-1065G7 @ 1.30GHz, 16 GB RAM, Rust 1.92.0. See [BENCHMARKS.md](docs/BENCHMARKS.md) for full tables, [BENCHMARK_MILESTONES.md](docs/BENCHMARK_MILESTONES.md) for the machine-checked development and release gates, and [CROSS_DB_STRESS_BENCHMARK.md](docs/CROSS_DB_STRESS_BENCHMARK.md) for the classified Vicia/CozoDB/SQLite/redb speed, memory, storage, reopen, and kill-9 comparison.
 
 | Metric | Result |
 |---|---|

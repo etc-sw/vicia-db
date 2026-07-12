@@ -188,6 +188,29 @@
           ]
         }
       ]
+    },
+    {
+      "id": "cross-db-stress",
+      "milestone": "M7-cross-engine-characterization",
+      "kind": "comparative-characterization",
+      "owner": "vicia-performance",
+      "decision": "How do Vicia speed, peak RSS, storage amplification, reopen behavior, and kill-9 recovery compare with classified embedded peers on one exact EAV workload?",
+      "profiles": [
+        {
+          "id": "smoke",
+          "tier": "weekly-classified-comparison",
+          "acceptanceEligible": false,
+          "command": "./scripts/run-cross-db-stress.sh smoke",
+          "budgets": []
+        },
+        {
+          "id": "full",
+          "tier": "manual-dedicated-host-comparison",
+          "acceptanceEligible": false,
+          "command": "./scripts/run-cross-db-stress.sh full",
+          "budgets": []
+        }
+      ]
     }
   ]
 }

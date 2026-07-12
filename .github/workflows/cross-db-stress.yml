@@ -1,0 +1,48 @@
+name: Cross-DB Stress Comparison
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Comparison profile
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PROFILE: ${{ inputs.profile || 'smoke' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/cross-db-bench/target
+          key: ${{ runner.os }}-cross-db-${{ hashFiles('Cargo.lock', 'tools/cross-db-bench/Cargo.lock', 'tools/cross-db-bench/**/*.rs') }}
+
+      - name: Run classified comparison
+        run: ./scripts/run-cross-db-stress.sh "$PROFILE" target/cross-db-stress/current
+
+      - name: Upload receipts and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-db-stress-${{ env.PROFILE }}
+          path: target/cross-db-stress/current/
+          if-no-files-found: error
