@@ -632,7 +632,7 @@ mod tests {
         assert!(eavt.windows(2).all(|pair| {
             compare_ids(&overlay.records, IndexOrder::Eavt, pair[0], pair[1]).is_le()
         }));
-        assert!(overlay.run_counts().0 <= 7);
+        assert!(overlay.memory_shape().eavt.2 <= 7);
     }
 
     #[test]

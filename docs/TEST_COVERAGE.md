@@ -5,7 +5,7 @@
 ## Test Summary
 
 **Total Tests**: 1303 ✅ (1291 passing, 12 ignored)
-- ✅ 877 unit tests (lib — includes Wave 1 hash-join and selective-lookup test modules, bounded 128-entity selective planning/execution regressions, fact-metadata bundle planning and expression-boundary regressions, resident-delta no-reread/incremental-reader checkpoint regression, Wave 3 fault-injection unit tests, per-query limits #288, magic sets #289, ledger identity index regressions #287, scoped retract parser/storage regressions, v1–v9 duplicate/window-preserving COW migration gates, v10 delta manifest/segment/header migration gates, v11 descriptor/catalog codec and lazy fact/index corruption gates, bounded-open page-id accounting, fail-closed legacy migration, selected-delta base verification, sparse browser bootstrap planning/fallback/range-isolation gates, full-save/backup anti-blessing guards, T9C-B recompact base-start publish guards, T9C-C idle maintenance policy guards, Q2-B recompact input streaming guards, Q3-A public idle maintenance API guards, A5-4 compact-copy identity/watermark guard, A5-5 tagged/native-browser/corruption corpus consumers, A9 backup identity/linearization/conflict/symlink/watermark guards, A7 FileLock crash-robustness guards, A2 since-tail page-probe/no-full-scan guards, A8 forget parser plus short-WAL recovery guards, pending-isolation cursor/WAL-drop/fail-closed aggregate guards, and exact pending/WAL ownership accounting guards)
+- ✅ 880 unit tests (lib — includes canonical pending ownership, `PendingFactId` overflow, tiered sorted-run ordering, pending-isolation cursor/WAL-drop/fail-closed aggregate guards, and exact pending/WAL ownership accounting guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -45,7 +45,7 @@
 - ✅ 1 delta manifest recovery test (integration, Vetch delta storage — manifest recovery gate)
 - ✅ 1 header extension gate test (integration, Vetch delta storage — v10 extension module gate)
 - ✅ Agent-brief read-path benchmark harness (bench, Vetch Q1-A — current/as-of/prepared/export receipt-read surfaces; not counted as a test)
-- ✅ `vicia.pending-isolation.v2` benchmark harness (bench — v1 cursor isolation plus live `Vec`/duplicate-set/EAVT/AEVT/AVET/VAET ownership, owned-buffer counts, decoded-WAL overlap, allocator-trim and post-drop RSS decomposition in a separate fresh child; not counted as a test)
+- ✅ `vicia.pending-isolation.v3` benchmark harness (bench — ID-only cursor isolation, canonical overlay ownership, per-index sorted-run bounds, peak decoded-WAL batch ownership, allocator trim, and post-drop RSS decomposition in a fresh child; not counted as a test)
 - ✅ Self-checking 1M paged-browser matrix harness (bench, Vetch A5-6d — import, fresh `openPaged` cold/warm probes, verified async export, 1,024-write threshold, maintenance reclaim, and post-maintenance reopen; not counted as a test)
 - ✅ 4 index corruption tests (integration, v11 public API — header/catalog corruption rejects open; exact fact/EAVT pages fail closed on first selective query)
 - ✅ 3 property-based tests (integration, Wave 3 #212/#213/#219 — proptest Datalog correctness vs naive reference evaluator)

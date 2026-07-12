@@ -1419,6 +1419,17 @@ are in
 
 ## Unrelated Pending Aggregate Isolation and Ownership (2026-07-12)
 
+The clean `vicia.pending-isolation.v3` rerun at source `e4ec312` replaces the
+duplicated fact/hash/B-tree ownership with one canonical overlay and streams
+WAL transactions during replay. At 1M unrelated pending facts, live database
+RSS is 221.445 MiB (down from 1,152.316 MiB), accounted payload is 171.842 MiB,
+and replay-retained RSS is 0.285 MiB. Aggregate count/checksum remain exactly
+`1,000,000 / 499999500000`; p50 is 555.508 ms versus 545.916 ms at zero pending,
+p95 is 573.811 ms, and query RSS delta differs by 0.250 MiB. Every unrelated
+cursor records zero selected pending entries/bytes and visits. All four index
+run counts remain at or below the receipt's logarithmic bound of 21. The raw
+clean receipt is generated at `target/pending-isolation/full/receipt.json`.
+
 `vicia.pending-isolation.v2` retains the v1 selected-cursor gate and adds a
 separate fresh-child memory audit. The audit opens the WAL-backed variant,
 accounts live ownership without cloning, samples RSS, calls glibc
