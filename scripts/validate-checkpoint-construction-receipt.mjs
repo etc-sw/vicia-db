@@ -35,5 +35,7 @@ if (profile === "full") {
 }
 console.log(`validated ${receipt.schema} ${profile}`);
 
-function percentile(values, percent) { return values[Math.ceil((values.length - 1) * percent / 100)]; }
+function percentile(values, percent) {
+  return values[Math.max(0, Math.ceil(values.length * percent / 100) - 1)];
+}
 function assert(value, message) { if (!value) throw new Error(message); }
