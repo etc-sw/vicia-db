@@ -2,6 +2,7 @@
 
 ## Status
 
+- Resolution: repaired in `vicia/openpaged-existing-indexeddb-liveness`
 - Priority: P0 reliability and browser adoption blocker
 - Affected API: `BrowserDb.openPaged(database_name)`
 - Observed consumer: Vetch quiet-surface
@@ -33,6 +34,33 @@ valid recoverable image
 invalid, incomplete, cyclic, or unsupported selected image
   -> open rejects in bounded time without modifying IndexedDB
 ```
+
+## Resolution
+
+The preserved authority image is not a deterministic malformed-image case.
+All 34 page hashes remained byte-identical to the captured failing state, yet
+the existing `e60a7c2` package opened it after a full Chrome restart and then
+completed 500 consecutive `openPaged()` calls. Native open also completed.
+The storage plan, manifest ranges, and selected two-segment lineage are bounded.
+
+The process-lifetime defect was in the IndexedDB event bridge. Request and
+transaction callbacks owned themselves through a Rust `Closure` tuple, then
+dropped that tuple from inside the winning callback. That re-entrantly destroyed
+the active wasm-bindgen callback before the browser returned from its event
+frame. The repair detaches both DOM event properties immediately but defers
+destruction of the owned closures to the following microtask.
+
+A sanitized real-browser regression now builds the same relevant authority
+shape from synthetic facts: one v11 base plus two selected delta segments. It
+opens and queries that image eight times, verifies the selected rows, and
+asserts that the complete IndexedDB page map is byte-identical before and after
+the opens. The private Vetch page map is not retained in the repository.
+
+The original process hang was intermittent and could not be made deterministic
+after restarting Chrome, including with the unpatched package. The regression
+therefore protects the exact storage shape and repeated callback lifecycle,
+while the implementation fix removes the independently identified re-entrant
+destruction hazard rather than adding a timeout or weakening recovery.
 
 Returning a better message is not sufficient. The defect is non-termination.
 
