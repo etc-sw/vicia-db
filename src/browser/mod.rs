@@ -1962,6 +1962,70 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn repeated_paged_open_terminates_on_two_segment_v11_lineage_without_rewrite() {
+        // This is the sanitized shape of the Vetch liveness report: one v11
+        // base followed by two selected delta segments. The payload is wholly
+        // synthetic; the regression is the IndexedDB callback lifetime across
+        // the several range requests needed to reopen that lineage.
+        let base = build_sparse_v11_fixture(120).await;
+        let source = BrowserDb::open_in_memory().expect("open liveness fixture source");
+        source
+            .import_graph(js_sys::Uint8Array::from(base.as_slice()))
+            .await
+            .expect("import liveness fixture base");
+        source
+            .execute("(transact [[:liveness/first :value 1]])".to_string())
+            .await
+            .expect("append first liveness segment");
+        source
+            .execute("(transact [[:liveness/second :value 2]])".to_string())
+            .await
+            .expect("append second liveness segment");
+        let bytes = source
+            .export_graph()
+            .expect("export liveness fixture")
+            .to_vec();
+
+        let db_name = format!("vicia-paged-open-liveness-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open liveness fixture IDB");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed liveness fixture");
+        let before = idb
+            .load_all_pages()
+            .await
+            .expect("snapshot liveness fixture before opens");
+
+        for attempt in 0..8 {
+            let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+                .await
+                .expect("two-segment paged open must terminate");
+            let result = db
+                .execute(
+                    "(query [:find ?first ?second :where [:liveness/first :value ?first] [:liveness/second :value ?second]])"
+                        .to_string(),
+                )
+                .await
+                .expect("query selected liveness segments");
+            let result: serde_json::Value =
+                serde_json::from_str(&result).expect("liveness query JSON");
+            assert_eq!(
+                result["results"],
+                serde_json::json!([[1, 2]]),
+                "selected state after paged open attempt {attempt}"
+            );
+        }
+
+        let after = idb
+            .load_all_pages()
+            .await
+            .expect("snapshot liveness fixture after opens");
+        assert_eq!(after, before, "paged opens must not rewrite IndexedDB");
+    }
+
+    #[wasm_bindgen_test]
     async fn paged_failed_write_restores_sparse_authority_without_full_reload() {
         let bytes = build_sparse_v11_fixture(250).await;
         let db_name = format!("vicia-paged-write-abort-{}", js_sys::Date::now());

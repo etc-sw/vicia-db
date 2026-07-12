@@ -40,14 +40,26 @@ type TransactionHandlers = Rc<RefCell<Option<(EventHandler, EventHandler, EventH
 fn release_request_handlers(request: &IdbRequest, handlers: &RequestHandlers) {
     request.set_onsuccess(None);
     request.set_onerror(None);
-    handlers.borrow_mut().take();
+    let owned = handlers.borrow_mut().take();
+    // The winning handler is part of `owned` and is still executing here.
+    // Dropping that wasm-bindgen `Closure` re-entrantly can invalidate the
+    // active JS callback frame. Move destruction to the next microtask so the
+    // browser has returned from the event callback first.
+    wasm_bindgen_futures::spawn_local(async move {
+        drop(owned);
+    });
 }
 
 fn release_transaction_handlers(tx: &IdbTransaction, handlers: &TransactionHandlers) {
     tx.set_oncomplete(None);
     tx.set_onerror(None);
     tx.set_onabort(None);
-    handlers.borrow_mut().take();
+    let owned = handlers.borrow_mut().take();
+    // See `release_request_handlers`: transaction callbacks have the same
+    // self-owned wasm-bindgen closure lifetime.
+    wasm_bindgen_futures::spawn_local(async move {
+        drop(owned);
+    });
 }
 
 /// Converts an `IdbRequest` into a JS `Promise` that resolves with the request result.
