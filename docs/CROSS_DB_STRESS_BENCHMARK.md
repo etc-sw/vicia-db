@@ -9,6 +9,9 @@ a Vicia storage dependency.
 ./scripts/run-cross-db-stress.sh full
 ```
 
+The current clean 1M reference run is
+[`2026-07-12-hal7800-full.md`](../benchmarks/baselines/cross-db/2026-07-12-hal7800-full.md).
+
 Each engine runs in a fresh process and receives the same base fact count,
 durable append batches, deterministic point reads, and close/reopen cadence.
 The receipt records build, append, read, reopen, and full-scan latency; Linux

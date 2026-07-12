@@ -1,0 +1,85 @@
+{
+  "schema": "vicia.cross-db-stress.summary.v1",
+  "profile": "full",
+  "sourceCommit": "616f8bca9f07d01fd9102cc94474758be76a7e90",
+  "sourceDirty": false,
+  "host": {
+    "testbed": "HAL7800-local",
+    "os": "linux",
+    "arch": "x86_64",
+    "logicalCpus": 16,
+    "cpuModel": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "memoryBytes": 33655283712
+  },
+  "comparisonPolicy": {
+    "semanticPeers": ["vicia", "cozo"],
+    "relationalBaseline": ["sqlite"],
+    "storageFloor": ["redb"],
+    "warning": "Do not rank redb as a graph or Datalog engine; it measures the key-value storage floor only.",
+    "durability": "Each append sample is one durable transaction; SQLite uses WAL plus synchronous=FULL.",
+    "memory": "Peak resident set is Linux /proc VmHWM for one isolated engine process.",
+    "stability": "Every cycle closes and reopens the database, then a continuous writer is killed with SIGKILL. Recovery must retain the announced committed prefix and match its exact arithmetic checksum."
+  },
+  "rows": [
+    {
+      "engine": "vicia",
+      "classification": "product-bi-temporal-datalog",
+      "buildMs": 10754.817,
+      "appendP95Ms": 8.513,
+      "readP95Ms": 0.032,
+      "reopenP95Ms": 12.613,
+      "scanMs": 4762.666,
+      "peakRssMiB": 2054.875,
+      "storageMiB": 341.465,
+      "bytesPerFact": 354.507,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "wal-replay-open-and-full-scan",
+      "correctness": true
+    },
+    {
+      "engine": "cozo",
+      "classification": "peer-embedded-datalog-graph",
+      "buildMs": 6786.92,
+      "appendP95Ms": 4.071,
+      "readP95Ms": 0.117,
+      "reopenP95Ms": 0.229,
+      "scanMs": 973.806,
+      "peakRssMiB": 554.23,
+      "storageMiB": 78.984,
+      "bytesPerFact": 82.001,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "transactional-open-and-full-scan",
+      "correctness": true
+    },
+    {
+      "engine": "sqlite",
+      "classification": "baseline-embedded-relational-eav",
+      "buildMs": 1238.843,
+      "appendP95Ms": 11.167,
+      "readP95Ms": 0.006,
+      "reopenP95Ms": 0.242,
+      "scanMs": 24.412,
+      "peakRssMiB": 12.195,
+      "storageMiB": 11.594,
+      "bytesPerFact": 12.037,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "ok",
+      "correctness": true
+    },
+    {
+      "engine": "redb",
+      "classification": "floor-embedded-key-value",
+      "buildMs": 2053.233,
+      "appendP95Ms": 1.292,
+      "readP95Ms": 0.004,
+      "reopenP95Ms": 0.48,
+      "scanMs": 68.079,
+      "peakRssMiB": 42.168,
+      "storageMiB": 54.754,
+      "bytesPerFact": 56.845,
+      "crashRecoveredFacts": 1010500,
+      "crashIntegrity": "transactional-open-and-full-scan",
+      "correctness": true
+    }
+  ]
+}
