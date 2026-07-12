@@ -1,0 +1,2044 @@
+{
+  "schema": "vicia.pending-isolation.v1",
+  "suite": "unrelated pending aggregate isolation",
+  "profile": "full",
+  "generatedAtUnixMs": 1783852331503,
+  "baseFacts": 1000000,
+  "repetitions": 20,
+  "warmupRepetitions": 1,
+  "provenance": {
+    "sourceCommit": "aaf32a9f1d5418bed420190a3e9e92d6cbc2de46",
+    "trackedClean": true,
+    "cleanStateEligible": true,
+    "os": "linux",
+    "arch": "x86_64",
+    "host": "HAL7800",
+    "cpuModel": "AMD Ryzen 7 7800X3D 8-Core Processor"
+  },
+  "acceptancePolicy": {
+    "unrelatedCount": 1000000,
+    "unrelatedChecksum": 499999500000,
+    "rssDeltaToleranceBytes": 2097152,
+    "p50RegressionRatio": 1.1,
+    "p95ToP50Ratio": 1.15,
+    "diagnosticEquality": "all unrelated variants exactly equal unrelated-0"
+  },
+  "baseBuildMs": 15981.251907000002,
+  "variants": [
+    {
+      "label": "unrelated-0",
+      "pendingKind": "unrelated",
+      "pendingFacts": 0,
+      "expectedCount": 1000000,
+      "expectedChecksum": 499999500000,
+      "graphBytes": 382373888,
+      "walBytes": 0,
+      "measurement": {
+        "openElapsedMs": 1.361719,
+        "openBaselineRssBytes": 3284992,
+        "baselineBreakdown": {
+          "anonymousRssBytes": 540672,
+          "fileBackedRssBytes": 2793472,
+          "heapMappingRssBytes": 20480,
+          "databaseMappedRssBytes": 0
+        },
+        "warmup": {
+          "elapsedMs": 547.38279,
+          "rssBytes": 4333568,
+          "peakRssBytes": 4333568,
+          "cursorDiagnostics": {
+            "selectedPendingEntries": 0,
+            "selectedPendingSnapshotBytes": 0,
+            "committedEntriesVisited": 1000000,
+            "pendingEntriesVisited": 0,
+            "exactFactResolutions": 0,
+            "emittedRows": 1000000,
+            "peakEntityValues": 1,
+            "peakEntityWindows": 1,
+            "yieldCount": 0,
+            "resumeCount": 0
+          }
+        },
+        "samples": [
+          {
+            "elapsedMs": 556.1167489999999,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 547.625909,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 539.062591,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 538.076349,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 523.315104,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 543.214471,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 550.486862,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 530.2195509999999,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 520.754998,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 544.757124,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 522.43526,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 533.329893,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 531.229065,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 535.163717,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 521.354754,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 500.9922140000001,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 524.4988050000001,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 527.685675,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 532.116372,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 539.357773,
+            "rssBytes": 4333568,
+            "peakRssBytes": 4333568,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          }
+        ],
+        "elapsedSummaryMs": {
+          "p50": 532.116372,
+          "p95": 550.486862,
+          "max": 556.1167489999999,
+          "mad": 7.6175669999998945
+        },
+        "workloadPeakRssBytes": 4333568,
+        "workloadDeltaRssBytes": 1048576,
+        "processPeakRssBytes": 4333568,
+        "retainedRssBytes": 4333568,
+        "retainedDeltaRssBytes": 1048576,
+        "retainedBreakdown": {
+          "anonymousRssBytes": 1667072,
+          "fileBackedRssBytes": 2859008,
+          "heapMappingRssBytes": 1146880,
+          "databaseMappedRssBytes": 0
+        },
+        "retainedDeltaBreakdown": {
+          "anonymousRssBytes": 1126400,
+          "fileBackedRssBytes": 65536,
+          "heapMappingRssBytes": 1126400,
+          "databaseMappedRssBytes": 0
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      }
+    },
+    {
+      "label": "unrelated-10000",
+      "pendingKind": "unrelated",
+      "pendingFacts": 10000,
+      "expectedCount": 1000000,
+      "expectedChecksum": 499999500000,
+      "graphBytes": 382373888,
+      "walBytes": 661976,
+      "measurement": {
+        "openElapsedMs": 34.468342,
+        "openBaselineRssBytes": 16101376,
+        "baselineBreakdown": {
+          "anonymousRssBytes": 13582336,
+          "fileBackedRssBytes": 2695168,
+          "heapMappingRssBytes": 10219520,
+          "databaseMappedRssBytes": 0
+        },
+        "warmup": {
+          "elapsedMs": 529.956912,
+          "rssBytes": 16232448,
+          "peakRssBytes": 16232448,
+          "cursorDiagnostics": {
+            "selectedPendingEntries": 0,
+            "selectedPendingSnapshotBytes": 0,
+            "committedEntriesVisited": 1000000,
+            "pendingEntriesVisited": 0,
+            "exactFactResolutions": 0,
+            "emittedRows": 1000000,
+            "peakEntityValues": 1,
+            "peakEntityWindows": 1,
+            "yieldCount": 0,
+            "resumeCount": 0
+          }
+        },
+        "samples": [
+          {
+            "elapsedMs": 574.677315,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 534.906525,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 548.378823,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 535.77556,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 549.2529189999999,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 562.0926969999999,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 535.71389,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 551.917483,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 530.766975,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 540.342825,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 519.83116,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 528.311913,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 520.2451930000001,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 529.754832,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 519.29171,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 557.53495,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 535.537018,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 546.400009,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 553.2044520000001,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 555.280904,
+            "rssBytes": 16232448,
+            "peakRssBytes": 16232448,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          }
+        ],
+        "elapsedSummaryMs": {
+          "p50": 535.77556,
+          "p95": 562.0926969999999,
+          "max": 574.677315,
+          "mad": 12.60326299999997
+        },
+        "workloadPeakRssBytes": 16232448,
+        "workloadDeltaRssBytes": 131072,
+        "processPeakRssBytes": 16232448,
+        "retainedRssBytes": 16232448,
+        "retainedDeltaRssBytes": 131072,
+        "retainedBreakdown": {
+          "anonymousRssBytes": 13582336,
+          "fileBackedRssBytes": 2826240,
+          "heapMappingRssBytes": 10219520,
+          "databaseMappedRssBytes": 0
+        },
+        "retainedDeltaBreakdown": {
+          "anonymousRssBytes": 0,
+          "fileBackedRssBytes": 131072,
+          "heapMappingRssBytes": 0,
+          "databaseMappedRssBytes": 0
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      }
+    },
+    {
+      "label": "unrelated-100000",
+      "pendingKind": "unrelated",
+      "pendingFacts": 100000,
+      "expectedCount": 1000000,
+      "expectedChecksum": 499999500000,
+      "graphBytes": 382373888,
+      "walBytes": 6693776,
+      "measurement": {
+        "openElapsedMs": 423.957605,
+        "openBaselineRssBytes": 130437120,
+        "baselineBreakdown": {
+          "anonymousRssBytes": 127778816,
+          "fileBackedRssBytes": 2781184,
+          "heapMappingRssBytes": 102293504,
+          "databaseMappedRssBytes": 0
+        },
+        "warmup": {
+          "elapsedMs": 520.4172649999999,
+          "rssBytes": 130568192,
+          "peakRssBytes": 130568192,
+          "cursorDiagnostics": {
+            "selectedPendingEntries": 0,
+            "selectedPendingSnapshotBytes": 0,
+            "committedEntriesVisited": 1000000,
+            "pendingEntriesVisited": 0,
+            "exactFactResolutions": 0,
+            "emittedRows": 1000000,
+            "peakEntityValues": 1,
+            "peakEntityWindows": 1,
+            "yieldCount": 0,
+            "resumeCount": 0
+          }
+        },
+        "samples": [
+          {
+            "elapsedMs": 546.934256,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 547.554539,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 541.206795,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 528.277657,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 539.933214,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 558.62716,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 516.5328089999999,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 528.955448,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 518.112534,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 528.714691,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 530.129752,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 523.106116,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 517.584841,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 515.265943,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 516.789253,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 525.3249330000001,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 522.31733,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 553.747775,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 521.618484,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 512.251665,
+            "rssBytes": 130568192,
+            "peakRssBytes": 130568192,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          }
+        ],
+        "elapsedSummaryMs": {
+          "p50": 525.3249330000001,
+          "p95": 553.747775,
+          "max": 558.62716,
+          "mad": 7.740092000000118
+        },
+        "workloadPeakRssBytes": 130568192,
+        "workloadDeltaRssBytes": 131072,
+        "processPeakRssBytes": 130568192,
+        "retainedRssBytes": 130568192,
+        "retainedDeltaRssBytes": 131072,
+        "retainedBreakdown": {
+          "anonymousRssBytes": 127778816,
+          "fileBackedRssBytes": 2912256,
+          "heapMappingRssBytes": 102293504,
+          "databaseMappedRssBytes": 0
+        },
+        "retainedDeltaBreakdown": {
+          "anonymousRssBytes": 0,
+          "fileBackedRssBytes": 131072,
+          "heapMappingRssBytes": 0,
+          "databaseMappedRssBytes": 0
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      }
+    },
+    {
+      "label": "unrelated-1000000",
+      "pendingKind": "unrelated",
+      "pendingFacts": 1000000,
+      "expectedCount": 1000000,
+      "expectedChecksum": 499999500000,
+      "graphBytes": 382373888,
+      "walBytes": 67011776,
+      "measurement": {
+        "openElapsedMs": 5743.742108,
+        "openBaselineRssBytes": 1357885440,
+        "baselineBreakdown": {
+          "anonymousRssBytes": 1355276288,
+          "fileBackedRssBytes": 2691072,
+          "heapMappingRssBytes": 1022554112,
+          "databaseMappedRssBytes": 0
+        },
+        "warmup": {
+          "elapsedMs": 572.950372,
+          "rssBytes": 1358016512,
+          "peakRssBytes": 1386688512,
+          "cursorDiagnostics": {
+            "selectedPendingEntries": 0,
+            "selectedPendingSnapshotBytes": 0,
+            "committedEntriesVisited": 1000000,
+            "pendingEntriesVisited": 0,
+            "exactFactResolutions": 0,
+            "emittedRows": 1000000,
+            "peakEntityValues": 1,
+            "peakEntityWindows": 1,
+            "yieldCount": 0,
+            "resumeCount": 0
+          }
+        },
+        "samples": [
+          {
+            "elapsedMs": 572.065389,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 542.11411,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 551.671742,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 572.4285540000001,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 552.03597,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 568.070214,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 563.373192,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 552.603751,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 566.9730920000001,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 572.186611,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 564.447072,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 535.185539,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 573.38423,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 539.816727,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 562.7212350000001,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 555.631459,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 562.298127,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 542.84636,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 534.889278,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 529.771186,
+            "rssBytes": 1358016512,
+            "peakRssBytes": 1386688512,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 0,
+              "selectedPendingSnapshotBytes": 0,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 0,
+              "exactFactResolutions": 0,
+              "emittedRows": 1000000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          }
+        ],
+        "elapsedSummaryMs": {
+          "p50": 555.631459,
+          "p95": 572.4285540000001,
+          "max": 573.38423,
+          "mad": 12.438755000000016
+        },
+        "workloadPeakRssBytes": 1358016512,
+        "workloadDeltaRssBytes": 131072,
+        "processPeakRssBytes": 1386688512,
+        "retainedRssBytes": 1358016512,
+        "retainedDeltaRssBytes": 131072,
+        "retainedBreakdown": {
+          "anonymousRssBytes": 1355280384,
+          "fileBackedRssBytes": 2822144,
+          "heapMappingRssBytes": 1022554112,
+          "databaseMappedRssBytes": 0
+        },
+        "retainedDeltaBreakdown": {
+          "anonymousRssBytes": 4096,
+          "fileBackedRssBytes": 131072,
+          "heapMappingRssBytes": 0,
+          "databaseMappedRssBytes": 0
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      }
+    },
+    {
+      "label": "selected-control-10000",
+      "pendingKind": "selectedControl",
+      "pendingFacts": 10000,
+      "expectedCount": 1010000,
+      "expectedChecksum": 500049495000,
+      "graphBytes": 382373888,
+      "walBytes": 651976,
+      "measurement": {
+        "openElapsedMs": 48.271171,
+        "openBaselineRssBytes": 16101376,
+        "baselineBreakdown": {
+          "anonymousRssBytes": 13582336,
+          "fileBackedRssBytes": 2695168,
+          "heapMappingRssBytes": 10219520,
+          "databaseMappedRssBytes": 0
+        },
+        "warmup": {
+          "elapsedMs": 544.669734,
+          "rssBytes": 16953344,
+          "peakRssBytes": 17936384,
+          "cursorDiagnostics": {
+            "selectedPendingEntries": 10000,
+            "selectedPendingSnapshotBytes": 1440000,
+            "committedEntriesVisited": 1000000,
+            "pendingEntriesVisited": 10000,
+            "exactFactResolutions": 0,
+            "emittedRows": 1010000,
+            "peakEntityValues": 1,
+            "peakEntityWindows": 1,
+            "yieldCount": 0,
+            "resumeCount": 0
+          }
+        },
+        "samples": [
+          {
+            "elapsedMs": 628.09649,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 558.492248,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 548.5365559999999,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 553.7575300000001,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 552.314164,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 533.776405,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 545.274797,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 551.162929,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 546.3407500000001,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 562.9455949999999,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 551.526645,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 570.989811,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 566.9904,
+            "rssBytes": 17739776,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 573.053889,
+            "rssBytes": 17870848,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 537.380712,
+            "rssBytes": 17870848,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 547.738419,
+            "rssBytes": 17870848,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 565.6438099999999,
+            "rssBytes": 17870848,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 555.7189219999999,
+            "rssBytes": 17870848,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 537.655879,
+            "rssBytes": 17870848,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          },
+          {
+            "elapsedMs": 556.1480779999999,
+            "rssBytes": 17870848,
+            "peakRssBytes": 17936384,
+            "cursorDiagnostics": {
+              "selectedPendingEntries": 10000,
+              "selectedPendingSnapshotBytes": 1440000,
+              "committedEntriesVisited": 1000000,
+              "pendingEntriesVisited": 10000,
+              "exactFactResolutions": 0,
+              "emittedRows": 1010000,
+              "peakEntityValues": 1,
+              "peakEntityWindows": 1,
+              "yieldCount": 0,
+              "resumeCount": 0
+            }
+          }
+        ],
+        "elapsedSummaryMs": {
+          "p50": 552.314164,
+          "p95": 573.053889,
+          "max": 628.09649,
+          "mad": 6.178084000000013
+        },
+        "workloadPeakRssBytes": 17870848,
+        "workloadDeltaRssBytes": 1769472,
+        "processPeakRssBytes": 17936384,
+        "retainedRssBytes": 17870848,
+        "retainedDeltaRssBytes": 1769472,
+        "retainedBreakdown": {
+          "anonymousRssBytes": 15118336,
+          "fileBackedRssBytes": 2826240,
+          "heapMappingRssBytes": 11755520,
+          "databaseMappedRssBytes": 0
+        },
+        "retainedDeltaBreakdown": {
+          "anonymousRssBytes": 1536000,
+          "fileBackedRssBytes": 131072,
+          "heapMappingRssBytes": 1536000,
+          "databaseMappedRssBytes": 0
+        },
+        "count": 1010000,
+        "checksum": 500049495000
+      }
+    }
+  ]
+}

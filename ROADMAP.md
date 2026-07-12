@@ -1726,4 +1726,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: July 2026 — Vetch Gate D/E storage evidence complete; 1292 native tests and 62 browser-WASM tests; #185 remains deferred to 2.0
+**Last Updated**: July 2026 — Vetch Gate D/E storage evidence and unrelated-pending aggregate isolation complete; 1301 native tests and 62 browser-WASM tests; #185 remains deferred to 2.0

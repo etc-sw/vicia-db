@@ -1401,16 +1401,63 @@ HAL7800, release build, 1M unique Integer facts, 20 measured repetitions:
 
 | Metric | Previous clean baseline | Covering cursor |
 |---|---:|---:|
-| Aggregate p50 | 1,631 ms | ~343 ms |
-| Aggregate p95 | 1,698 ms | ~356 ms |
-| Query RSS delta | 380.8 MiB | 1.25 MiB |
-| Retained RSS delta | 78.9 MiB | 1.25 MiB |
+| Aggregate p50 | 1,631 ms | 330.322 ms |
+| Aggregate p95 | 1,698 ms | 357.688 ms |
+| Query RSS delta | 380.8 MiB | 1.375 MiB |
+| Retained RSS delta | 78.9 MiB | 1.375 MiB |
 | Count / checksum | 1,000,000 / 499999500000 | exact |
 
 The Chrome 150 browser-WASM suite includes a 12K paged aggregate that crosses
 multiple 4,096-entry yields, processes a scheduled browser task before query
 completion, performs no full-store IndexedDB read, and releases staging after
 completion.
+
+The clean production-path reference rerun at source `aaf32a9` also measured a
+0.239 ms point read and 12.164 MiB open baseline RSS. Raw cross-engine receipts
+are in
+`benchmarks/baselines/ref-db/2026-07-12-hal7800-v3-pending-isolation-full/`.
+
+## Unrelated Pending Aggregate Isolation (2026-07-12)
+
+`vicia.pending-isolation.v1` starts from one committed 1M-fact selected
+attribute, clones that `.graph` per variant, and leaves unrelated writes in the
+WAL-backed pending layer. Every variant opens in a fresh child, records RSS and
+smaps after open, performs one excluded warmup, then runs 20 selected
+count/sum aggregates. The non-default `bench-internals` build records cursor
+ownership and reducer counters; the default API and v11 format are unchanged.
+
+HAL7800, source `aaf32a9`, exact selected count/checksum
+`1,000,000 / 499999500000`:
+
+| Pending shape | Open RSS | Query RSS delta | p50 | p95 | MAD | Selected snapshot entries / bytes | Pending visits | Peak values / windows |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| unrelated 0 | 3.133 MiB | 1.000 MiB | 532.116 ms | 550.487 ms | 7.618 ms | 0 / 0 | 0 | 1 / 1 |
+| unrelated 10K | 15.355 MiB | 0.125 MiB | 535.776 ms | 562.093 ms | 12.603 ms | 0 / 0 | 0 | 1 / 1 |
+| unrelated 100K | 124.395 MiB | 0.125 MiB | 525.325 ms | 553.748 ms | 7.740 ms | 0 / 0 | 0 | 1 / 1 |
+| unrelated 1M | 1,294.980 MiB | 0.125 MiB | 555.631 ms | 572.429 ms | 12.439 ms | 0 / 0 | 0 | 1 / 1 |
+| selected control 10K | 15.355 MiB | 1.688 MiB | 552.314 ms | 573.054 ms | 6.178 ms | 10,000 / 1,440,000 | 10,000 | 1 / 1 |
+
+All unrelated variants visited exactly 1M committed selected entries, emitted
+exactly 1M selected rows, performed zero exact fact resolutions, and had zero
+yield/resume steps. Their selected snapshot and pending visits remained exactly
+equal to the zero-pending variant. The 1M unrelated case increased whole-store
+open RSS because pending facts and their four in-memory indexes are resident,
+but it did not enter the selected cursor or increase query-owned memory. The
+selected 10K control proves the counters are sensitive rather than stuck at
+zero.
+
+The full validator passed the ±2 MiB query-RSS gate, the ≤10% p50 regression
+gate, and p95 ≤115% of p50 for every unrelated variant. Raw elapsed/RSS samples,
+smaps breakdowns, diagnostics, provenance, and acceptance policy are preserved
+in
+`benchmarks/baselines/pending-isolation/2026-07-12-hal7800-full/receipt.json`.
+
+Reproduce independently of the cross-database table:
+
+```bash
+just pending-isolation-smoke
+just pending-isolation-full
+```
 
 ---
 
