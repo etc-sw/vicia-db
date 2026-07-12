@@ -1533,7 +1533,7 @@ just storage-layout-full
 
 ### Bounded checkpoint index construction
 
-`vicia.checkpoint-construction.v1` measures fresh-child delta checkpoint and
+`vicia.checkpoint-construction.v2` measures fresh-child delta checkpoint and
 forced idle recompact over a common 1M base with 1/10/100/1K pending facts.
 Candidate fact pages are now written as soon as each page fills. Recompact then
 revisits those immutable pages once per EAVT/AEVT/AVET/VAET index, retaining one
@@ -1543,21 +1543,24 @@ unchanged.
 
 | Pending | Checkpoint p50 / p95 | Recompact p50 / p95 | Recompact RSS delta |
 |---:|---:|---:|---:|
-| 1 | 1.672 / 2.327 ms | 5,227.509 / 5,362.865 ms | 177.875 MiB |
-| 10 | 1.721 / 2.704 ms | 5,117.829 / 5,486.011 ms | 177.875 MiB |
-| 100 | 2.192 / 3.727 ms | 5,215.923 / 5,775.185 ms | 177.750 MiB |
-| 1,000 | 8.867 / 12.386 ms | 5,164.666 / 5,872.064 ms | 177.000 MiB |
+| 1 | 1.715 / 2.630 ms | 5,210.578 / 5,807.769 ms | 177.875 MiB |
+| 10 | 1.704 / 3.023 ms | 5,138.870 / 5,768.242 ms | 177.875 MiB |
+| 100 | 2.087 / 3.370 ms | 5,181.993 / 5,567.445 ms | 177.750 MiB |
+| 1,000 | 7.845 / 9.864 ms | 5,225.844 / 5,589.081 ms | 177.000 MiB |
 
 The prior Vetch Gate D idle-recompact evidence was 7.510 s and 947.512 MiB
 RSS. The new matrix reduces measured construction RSS by about 81% while every
 variant remains below the 8.261 s p50 budget and keeps nearest-rank p95 within
-115% of p50. Diagnostics record one fact page in memory, exactly one full typed
+115% of p50. Each checkpoint/recompact phase records baseline and post-operation
+`VmHWM` alongside the 2 ms sampler; the conservative peak is never below the
+kernel high-water mark, including phases shorter than one sampling interval.
+Diagnostics record one fact page in memory, exactly one full typed
 index, four candidate-page passes, and at most 2,888 serialized bytes in the
 B-tree frontier. External sorted runs are therefore not required for the
 current 640 MiB maintenance gate.
 
 Raw samples and provenance are preserved at
-`benchmarks/baselines/checkpoint-construction/2026-07-12-hal7800-full/receipt.json`.
+`benchmarks/baselines/checkpoint-construction/2026-07-13-hal7800-full/receipt.json`.
 
 ```bash
 just checkpoint-construction-smoke

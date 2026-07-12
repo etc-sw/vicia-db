@@ -1,0 +1,2911 @@
+{
+  "schema": "vicia.checkpoint-construction.v2",
+  "profile": "full",
+  "baseFacts": 1000000,
+  "repetitions": 20,
+  "generatedAtUnixMs": 1783872313686,
+  "sourceCommit": "15ec150b8ed0b3b6b89215e0044e7d39a640488f",
+  "trackedClean": true,
+  "variants": [
+    {
+      "pendingFacts": 1,
+      "samples": [
+        {
+          "checkpoint": {
+            "elapsedMs": 1.5538150000000002,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3301376,
+            "postRssBytes": 3432448,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 237568,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5416.993041,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189816832,
+            "postRssBytes": 69345280,
+            "postHwmBytes": 189816832,
+            "conservativePeakRssBytes": 189816832,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186277888,
+            "samplerObservations": 2573
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.25909,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3407872,
+            "conservativePeakRssBytes": 3407872,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5121.3627879999995,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69173248,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2452
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.031612,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5095.628778,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69292032,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2445
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.076043,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3407872,
+            "conservativePeakRssBytes": 3407872,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 4887.452031999999,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69197824,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2346
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.580679,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3301376,
+            "postRssBytes": 3432448,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 237568,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5369.628589000001,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189947904,
+            "postRssBytes": 69238784,
+            "postHwmBytes": 189947904,
+            "conservativePeakRssBytes": 189947904,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186408960,
+            "samplerObservations": 2573
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.726041,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3276800,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3284992,
+            "conservativePeakRssBytes": 3284992,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 8192,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5531.863346,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3284992,
+            "sampledPeakRssBytes": 189669376,
+            "postRssBytes": 69111808,
+            "postHwmBytes": 189669376,
+            "conservativePeakRssBytes": 189669376,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2648
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.969872,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5587.510242,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69283840,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186261504,
+            "samplerObservations": 2648
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.573237,
+            "baselineRssBytes": 3428352,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3428352,
+            "postRssBytes": 3559424,
+            "postHwmBytes": 3559424,
+            "conservativePeakRssBytes": 3559424,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 20480,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5368.369237,
+            "baselineRssBytes": 3559424,
+            "baselineHwmBytes": 3559424,
+            "sampledPeakRssBytes": 190074880,
+            "postRssBytes": 69480448,
+            "postHwmBytes": 190074880,
+            "conservativePeakRssBytes": 190074880,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2568
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.021737,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3301376,
+            "postRssBytes": 3432448,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 237568,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5609.737097,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189947904,
+            "postRssBytes": 69337088,
+            "postHwmBytes": 189947904,
+            "conservativePeakRssBytes": 189947904,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186408960,
+            "samplerObservations": 2684
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.73424,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5157.055192,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69332992,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2467
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.642075,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3407872,
+            "conservativePeakRssBytes": 3407872,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5393.367612,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69140480,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2579
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.98385,
+            "baselineRssBytes": 3428352,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3428352,
+            "postRssBytes": 3559424,
+            "postHwmBytes": 3559424,
+            "conservativePeakRssBytes": 3559424,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 20480,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5087.721781,
+            "baselineRssBytes": 3559424,
+            "baselineHwmBytes": 3559424,
+            "sampledPeakRssBytes": 190074880,
+            "postRssBytes": 69500928,
+            "postHwmBytes": 190074880,
+            "conservativePeakRssBytes": 190074880,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2434
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.582669,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3563520,
+            "postHwmBytes": 3563520,
+            "conservativePeakRssBytes": 3563520,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 24576,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5868.328572,
+            "baselineRssBytes": 3563520,
+            "baselineHwmBytes": 3563520,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69476352,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2806
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.523297,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3432448,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3563520,
+            "postHwmBytes": 3563520,
+            "conservativePeakRssBytes": 3563520,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 131072,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5379.997779,
+            "baselineRssBytes": 3563520,
+            "baselineHwmBytes": 3563520,
+            "sampledPeakRssBytes": 189947904,
+            "postRssBytes": 69353472,
+            "postHwmBytes": 189947904,
+            "conservativePeakRssBytes": 189947904,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2573
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.5202950000000002,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3301376,
+            "postRssBytes": 3432448,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 237568,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 4962.62805,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189947904,
+            "postRssBytes": 69349376,
+            "postHwmBytes": 189947904,
+            "conservativePeakRssBytes": 189947904,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186408960,
+            "samplerObservations": 2374
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.629634,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3416064,
+            "conservativePeakRssBytes": 3416064,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 8192,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 4911.85371,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3416064,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69332992,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2350
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.5309080000000002,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3407872,
+            "conservativePeakRssBytes": 3407872,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5119.500787,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69201920,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2450
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.556034,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3547136,
+            "postHwmBytes": 3547136,
+            "conservativePeakRssBytes": 3547136,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 8192,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5807.768889,
+            "baselineRssBytes": 3547136,
+            "baselineHwmBytes": 3547136,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69513216,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2778
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.202504,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3407872,
+            "conservativePeakRssBytes": 3407872,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5210.578374,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69160960,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2493
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.714618,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3547136,
+            "postHwmBytes": 3547136,
+            "conservativePeakRssBytes": 3547136,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 8192,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5172.403934,
+            "baselineRssBytes": 3547136,
+            "baselineHwmBytes": 3547136,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69427200,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2473
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000001,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2886
+          }
+        }
+      ]
+    },
+    {
+      "pendingFacts": 10,
+      "samples": [
+        {
+          "checkpoint": {
+            "elapsedMs": 1.545692,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3563520,
+            "postHwmBytes": 3563520,
+            "conservativePeakRssBytes": 3563520,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 24576,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5020.031059,
+            "baselineRssBytes": 3563520,
+            "baselineHwmBytes": 3563520,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69529600,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2407
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 5.83474,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3563520,
+            "postHwmBytes": 3563520,
+            "conservativePeakRssBytes": 3563520,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 24576,
+            "samplerObservations": 3
+          },
+          "recompact": {
+            "elapsedMs": 5324.354381,
+            "baselineRssBytes": 3563520,
+            "baselineHwmBytes": 3563520,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69513216,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2532
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.5704250000000002,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5959.272551,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69226496,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186261504,
+            "samplerObservations": 2842
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.232892,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3407872,
+            "conservativePeakRssBytes": 3407872,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5111.383328999999,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69197824,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2450
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.622555,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5347.840116,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69341184,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2564
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.593826,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3301376,
+            "postRssBytes": 3432448,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 237568,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5065.6648860000005,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189947904,
+            "postRssBytes": 69238784,
+            "postHwmBytes": 189947904,
+            "conservativePeakRssBytes": 189947904,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186408960,
+            "samplerObservations": 2431
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.549552,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3416064,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3547136,
+            "postHwmBytes": 3547136,
+            "conservativePeakRssBytes": 3547136,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 131072,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5041.609152,
+            "baselineRssBytes": 3547136,
+            "baselineHwmBytes": 3547136,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69353472,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2414
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.648876,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3563520,
+            "postHwmBytes": 3563520,
+            "conservativePeakRssBytes": 3563520,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 24576,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5768.242358,
+            "baselineRssBytes": 3563520,
+            "baselineHwmBytes": 3563520,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69447680,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2759
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.180529,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3547136,
+            "postHwmBytes": 3547136,
+            "conservativePeakRssBytes": 3547136,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 8192,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5314.704878,
+            "baselineRssBytes": 3547136,
+            "baselineHwmBytes": 3547136,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69455872,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2542
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.093724,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3153920,
+            "postRssBytes": 3284992,
+            "postHwmBytes": 3407872,
+            "conservativePeakRssBytes": 3407872,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5116.569695,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69197824,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2448
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.170313,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3563520,
+            "postHwmBytes": 3563520,
+            "conservativePeakRssBytes": 3563520,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 24576,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5642.145122,
+            "baselineRssBytes": 3563520,
+            "baselineHwmBytes": 3563520,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69431296,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2700
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.25184,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3547136,
+            "postHwmBytes": 3547136,
+            "conservativePeakRssBytes": 3547136,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 8192,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5137.290034000001,
+            "baselineRssBytes": 3547136,
+            "baselineHwmBytes": 3547136,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69464064,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2457
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 3.022893,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3563520,
+            "postHwmBytes": 3563520,
+            "conservativePeakRssBytes": 3563520,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 24576,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5124.08267,
+            "baselineRssBytes": 3563520,
+            "baselineHwmBytes": 3563520,
+            "sampledPeakRssBytes": 189947904,
+            "postRssBytes": 69414912,
+            "postHwmBytes": 189947904,
+            "conservativePeakRssBytes": 189947904,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2450
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.660005,
+            "baselineRssBytes": 3428352,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3428352,
+            "postRssBytes": 3559424,
+            "postHwmBytes": 3559424,
+            "conservativePeakRssBytes": 3559424,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 20480,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5539.0452510000005,
+            "baselineRssBytes": 3559424,
+            "baselineHwmBytes": 3559424,
+            "sampledPeakRssBytes": 190074880,
+            "postRssBytes": 69484544,
+            "postHwmBytes": 190074880,
+            "conservativePeakRssBytes": 190074880,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2649
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.703666,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5180.457674,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69312512,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186392576,
+            "samplerObservations": 2479
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.1840420000000003,
+            "baselineRssBytes": 3293184,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3293184,
+            "postRssBytes": 3424256,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 245760,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5138.87042,
+            "baselineRssBytes": 3424256,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189808640,
+            "postRssBytes": 69201920,
+            "postHwmBytes": 189808640,
+            "conservativePeakRssBytes": 189808640,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186269696,
+            "samplerObservations": 2460
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.214989,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3276800,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3416064,
+            "conservativePeakRssBytes": 3416064,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 139264,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5155.051809,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3416064,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69332992,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2466
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.680247,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3276800,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3416064,
+            "conservativePeakRssBytes": 3416064,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 139264,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5300.595109,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3416064,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69304320,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2536
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.879786,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3416064,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3547136,
+            "postHwmBytes": 3547136,
+            "conservativePeakRssBytes": 3547136,
+            "conservativeDeltaRssBytes": 131072,
+            "hwmGrowthBytes": 131072,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5035.2687989999995,
+            "baselineRssBytes": 3547136,
+            "baselineHwmBytes": 3547136,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69447680,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186515456,
+            "hwmGrowthBytes": 186515456,
+            "samplerObservations": 2409
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.632589,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3538944,
+            "conservativePeakRssBytes": 3538944,
+            "conservativeDeltaRssBytes": 253952,
+            "hwmGrowthBytes": 0,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5127.628071,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69226496,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186261504,
+            "samplerObservations": 2453
+          },
+          "graphBytes": 784199680,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000010,
+            "factPageVisits": 66660,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        }
+      ]
+    },
+    {
+      "pendingFacts": 100,
+      "samples": [
+        {
+          "checkpoint": {
+            "elapsedMs": 1.888312,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3809280,
+            "postHwmBytes": 3809280,
+            "conservativePeakRssBytes": 3809280,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 4831.27717,
+            "baselineRssBytes": 3809280,
+            "baselineHwmBytes": 3809280,
+            "sampledPeakRssBytes": 190193664,
+            "postRssBytes": 69353472,
+            "postHwmBytes": 190193664,
+            "conservativePeakRssBytes": 190193664,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2319
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.000384,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3678208,
+            "postHwmBytes": 3678208,
+            "conservativePeakRssBytes": 3678208,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5155.567253,
+            "baselineRssBytes": 3678208,
+            "baselineHwmBytes": 3678208,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69398528,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2472
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 3.251101,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3694592,
+            "postRssBytes": 3825664,
+            "postHwmBytes": 3825664,
+            "conservativePeakRssBytes": 3825664,
+            "conservativeDeltaRssBytes": 524288,
+            "hwmGrowthBytes": 286720,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5534.31519,
+            "baselineRssBytes": 3825664,
+            "baselineHwmBytes": 3825664,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69427200,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186253312,
+            "hwmGrowthBytes": 186253312,
+            "samplerObservations": 2629
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 3.275796,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3678208,
+            "postRssBytes": 3809280,
+            "postHwmBytes": 3809280,
+            "conservativePeakRssBytes": 3809280,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5359.946857,
+            "baselineRssBytes": 3809280,
+            "baselineHwmBytes": 3809280,
+            "sampledPeakRssBytes": 190193664,
+            "postRssBytes": 69509120,
+            "postHwmBytes": 190193664,
+            "conservativePeakRssBytes": 190193664,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2558
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.403557,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3416064,
+            "postHwmBytes": 3416064,
+            "conservativePeakRssBytes": 3416064,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 8192,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5548.368157,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3416064,
+            "sampledPeakRssBytes": 189800448,
+            "postRssBytes": 69099520,
+            "postHwmBytes": 189800448,
+            "conservativePeakRssBytes": 189800448,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2655
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.866368,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3825664,
+            "postHwmBytes": 3825664,
+            "conservativePeakRssBytes": 3825664,
+            "conservativeDeltaRssBytes": 524288,
+            "hwmGrowthBytes": 417792,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 4878.339449,
+            "baselineRssBytes": 3825664,
+            "baselineHwmBytes": 3825664,
+            "sampledPeakRssBytes": 190210048,
+            "postRssBytes": 69500928,
+            "postHwmBytes": 190210048,
+            "conservativePeakRssBytes": 190210048,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2342
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.086662,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3301376,
+            "postRssBytes": 3694592,
+            "postHwmBytes": 3694592,
+            "conservativePeakRssBytes": 3694592,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 155648,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5076.799263,
+            "baselineRssBytes": 3694592,
+            "baselineHwmBytes": 3694592,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69271552,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2430
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 3.36996,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3284992,
+            "sampledPeakRssBytes": 3547136,
+            "postRssBytes": 3678208,
+            "postHwmBytes": 3678208,
+            "conservativePeakRssBytes": 3678208,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 393216,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5039.660589,
+            "baselineRssBytes": 3678208,
+            "baselineHwmBytes": 3678208,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69349376,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2411
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.443892,
+            "baselineRssBytes": 3416064,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3678208,
+            "postRssBytes": 3809280,
+            "postHwmBytes": 3809280,
+            "conservativePeakRssBytes": 3809280,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5388.355233,
+            "baselineRssBytes": 3809280,
+            "baselineHwmBytes": 3809280,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69435392,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186253312,
+            "hwmGrowthBytes": 186253312,
+            "samplerObservations": 2578
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.95721,
+            "baselineRssBytes": 3170304,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3301376,
+            "postRssBytes": 3694592,
+            "postHwmBytes": 3694592,
+            "conservativePeakRssBytes": 3694592,
+            "conservativeDeltaRssBytes": 524288,
+            "hwmGrowthBytes": 286720,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5003.303429,
+            "baselineRssBytes": 3694592,
+            "baselineHwmBytes": 3694592,
+            "sampledPeakRssBytes": 190078976,
+            "postRssBytes": 69402624,
+            "postHwmBytes": 190078976,
+            "conservativePeakRssBytes": 190078976,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2395
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.010762,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3809280,
+            "postHwmBytes": 3809280,
+            "conservativePeakRssBytes": 3809280,
+            "conservativeDeltaRssBytes": 524288,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5175.623058,
+            "baselineRssBytes": 3809280,
+            "baselineHwmBytes": 3809280,
+            "sampledPeakRssBytes": 190193664,
+            "postRssBytes": 69521408,
+            "postHwmBytes": 190193664,
+            "conservativePeakRssBytes": 190193664,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2476
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.080902,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3694592,
+            "postHwmBytes": 3694592,
+            "conservativePeakRssBytes": 3694592,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 155648,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5194.2818720000005,
+            "baselineRssBytes": 3694592,
+            "baselineHwmBytes": 3694592,
+            "sampledPeakRssBytes": 189947904,
+            "postRssBytes": 69222400,
+            "postHwmBytes": 189947904,
+            "conservativePeakRssBytes": 189947904,
+            "conservativeDeltaRssBytes": 186253312,
+            "hwmGrowthBytes": 186253312,
+            "samplerObservations": 2485
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.037638,
+            "baselineRssBytes": 3301376,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3432448,
+            "postRssBytes": 3825664,
+            "postHwmBytes": 3825664,
+            "conservativePeakRssBytes": 3825664,
+            "conservativeDeltaRssBytes": 524288,
+            "hwmGrowthBytes": 417792,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5087.189008,
+            "baselineRssBytes": 3825664,
+            "baselineHwmBytes": 3825664,
+            "sampledPeakRssBytes": 190210048,
+            "postRssBytes": 69554176,
+            "postHwmBytes": 190210048,
+            "conservativePeakRssBytes": 190210048,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2432
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.760089,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3547136,
+            "postRssBytes": 3678208,
+            "postHwmBytes": 3678208,
+            "conservativePeakRssBytes": 3678208,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5189.3065289999995,
+            "baselineRssBytes": 3678208,
+            "baselineHwmBytes": 3678208,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69386240,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2482
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 3.088546,
+            "baselineRssBytes": 3432448,
+            "baselineHwmBytes": 3538944,
+            "sampledPeakRssBytes": 3694592,
+            "postRssBytes": 3825664,
+            "postHwmBytes": 3825664,
+            "conservativePeakRssBytes": 3825664,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 286720,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 6389.878853,
+            "baselineRssBytes": 3825664,
+            "baselineHwmBytes": 3825664,
+            "sampledPeakRssBytes": 190210048,
+            "postRssBytes": 69492736,
+            "postHwmBytes": 190210048,
+            "conservativePeakRssBytes": 190210048,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 3057
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 3.4824080000000004,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3547136,
+            "postRssBytes": 3678208,
+            "postHwmBytes": 3678208,
+            "conservativePeakRssBytes": 3678208,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5567.444885999999,
+            "baselineRssBytes": 3678208,
+            "baselineHwmBytes": 3678208,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69382144,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2664
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.034103,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3678208,
+            "postHwmBytes": 3678208,
+            "conservativePeakRssBytes": 3678208,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5382.766014,
+            "baselineRssBytes": 3678208,
+            "baselineHwmBytes": 3678208,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69263360,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2574
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 2.2306850000000003,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3416064,
+            "postRssBytes": 3547136,
+            "postHwmBytes": 3547136,
+            "conservativePeakRssBytes": 3547136,
+            "conservativeDeltaRssBytes": 262144,
+            "hwmGrowthBytes": 139264,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 5395.928653,
+            "baselineRssBytes": 3547136,
+            "baselineHwmBytes": 3547136,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69328896,
+            "postHwmBytes": 189931520,
+            "conservativePeakRssBytes": 189931520,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2579
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 3.193574,
+            "baselineRssBytes": 3153920,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3547136,
+            "postRssBytes": 3678208,
+            "postHwmBytes": 3678208,
+            "conservativePeakRssBytes": 3678208,
+            "conservativeDeltaRssBytes": 524288,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 2
+          },
+          "recompact": {
+            "elapsedMs": 4912.356309,
+            "baselineRssBytes": 3678208,
+            "baselineHwmBytes": 3678208,
+            "sampledPeakRssBytes": 189931520,
+            "postRssBytes": 69410816,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2350
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 1.966821,
+            "baselineRssBytes": 3284992,
+            "baselineHwmBytes": 3407872,
+            "sampledPeakRssBytes": 3284992,
+            "postRssBytes": 3678208,
+            "postHwmBytes": 3678208,
+            "conservativePeakRssBytes": 3678208,
+            "conservativeDeltaRssBytes": 393216,
+            "hwmGrowthBytes": 270336,
+            "samplerObservations": 1
+          },
+          "recompact": {
+            "elapsedMs": 5181.992827,
+            "baselineRssBytes": 3678208,
+            "baselineHwmBytes": 3678208,
+            "sampledPeakRssBytes": 190062592,
+            "postRssBytes": 69353472,
+            "postHwmBytes": 190062592,
+            "conservativePeakRssBytes": 190062592,
+            "conservativeDeltaRssBytes": 186384384,
+            "hwmGrowthBytes": 186384384,
+            "samplerObservations": 2477
+          },
+          "graphBytes": 784261120,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1000100,
+            "factPageVisits": 66668,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        }
+      ]
+    },
+    {
+      "pendingFacts": 1000,
+      "samples": [
+        {
+          "checkpoint": {
+            "elapsedMs": 6.772393,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5726208,
+            "postRssBytes": 5857280,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 4969.7843840000005,
+            "baselineRssBytes": 5857280,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191455232,
+            "postRssBytes": 70356992,
+            "postHwmBytes": 191455232,
+            "conservativePeakRssBytes": 191455232,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185548800,
+            "samplerObservations": 2385
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 7.087297,
+            "baselineRssBytes": 4087808,
+            "baselineHwmBytes": 4087808,
+            "sampledPeakRssBytes": 5877760,
+            "postRssBytes": 6008832,
+            "postHwmBytes": 6053888,
+            "conservativePeakRssBytes": 6053888,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5063.045659,
+            "baselineRssBytes": 6008832,
+            "baselineHwmBytes": 6053888,
+            "sampledPeakRssBytes": 191475712,
+            "postRssBytes": 70426624,
+            "postHwmBytes": 191475712,
+            "conservativePeakRssBytes": 191475712,
+            "conservativeDeltaRssBytes": 185466880,
+            "hwmGrowthBytes": 185421824,
+            "samplerObservations": 2429
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 8.076572,
+            "baselineRssBytes": 4218880,
+            "baselineHwmBytes": 4218880,
+            "sampledPeakRssBytes": 6053888,
+            "postRssBytes": 6008832,
+            "postHwmBytes": 6053888,
+            "conservativePeakRssBytes": 6053888,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5225.843654,
+            "baselineRssBytes": 6008832,
+            "baselineHwmBytes": 6053888,
+            "sampledPeakRssBytes": 191606784,
+            "postRssBytes": 70549504,
+            "postHwmBytes": 191606784,
+            "conservativePeakRssBytes": 191606784,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2507
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 9.264163,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5906432,
+            "postRssBytes": 5857280,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 5
+          },
+          "recompact": {
+            "elapsedMs": 5446.823821999999,
+            "baselineRssBytes": 5857280,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191455232,
+            "postRssBytes": 70389760,
+            "postHwmBytes": 191455232,
+            "conservativePeakRssBytes": 191455232,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185548800,
+            "samplerObservations": 2592
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 9.863988,
+            "baselineRssBytes": 4083712,
+            "baselineHwmBytes": 4083712,
+            "sampledPeakRssBytes": 6049792,
+            "postRssBytes": 6004736,
+            "postHwmBytes": 6049792,
+            "conservativePeakRssBytes": 6049792,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 5
+          },
+          "recompact": {
+            "elapsedMs": 5907.178142000001,
+            "baselineRssBytes": 6004736,
+            "baselineHwmBytes": 6049792,
+            "sampledPeakRssBytes": 191602688,
+            "postRssBytes": 70512640,
+            "postHwmBytes": 191602688,
+            "conservativePeakRssBytes": 191602688,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2791
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 6.814717,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5906432,
+            "postRssBytes": 5861376,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 4980.178215000001,
+            "baselineRssBytes": 5861376,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191459328,
+            "postRssBytes": 70426624,
+            "postHwmBytes": 191459328,
+            "conservativePeakRssBytes": 191459328,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2386
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 8.285766,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5726208,
+            "postRssBytes": 5857280,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5208.23663,
+            "baselineRssBytes": 5857280,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191455232,
+            "postRssBytes": 70426624,
+            "postHwmBytes": 191455232,
+            "conservativePeakRssBytes": 191455232,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185548800,
+            "samplerObservations": 2491
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 7.158119,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5726208,
+            "postRssBytes": 5857280,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5589.081364,
+            "baselineRssBytes": 5857280,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191455232,
+            "postRssBytes": 70389760,
+            "postHwmBytes": 191455232,
+            "conservativePeakRssBytes": 191455232,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185548800,
+            "samplerObservations": 2674
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 7.08301,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5775360,
+            "postRssBytes": 5861376,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5223.059497,
+            "baselineRssBytes": 5861376,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191459328,
+            "postRssBytes": 70430720,
+            "postHwmBytes": 191459328,
+            "conservativePeakRssBytes": 191459328,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2498
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 7.607704,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 6037504,
+            "postRssBytes": 5992448,
+            "postHwmBytes": 6037504,
+            "conservativePeakRssBytes": 6037504,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5287.335361,
+            "baselineRssBytes": 5992448,
+            "baselineHwmBytes": 6037504,
+            "sampledPeakRssBytes": 191459328,
+            "postRssBytes": 70516736,
+            "postHwmBytes": 191459328,
+            "conservativePeakRssBytes": 191459328,
+            "conservativeDeltaRssBytes": 185466880,
+            "hwmGrowthBytes": 185421824,
+            "samplerObservations": 2529
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 6.608278,
+            "baselineRssBytes": 4087808,
+            "baselineHwmBytes": 4087808,
+            "sampledPeakRssBytes": 6053888,
+            "postRssBytes": 6004736,
+            "postHwmBytes": 6053888,
+            "conservativePeakRssBytes": 6053888,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5080.017105999999,
+            "baselineRssBytes": 6004736,
+            "baselineHwmBytes": 6053888,
+            "sampledPeakRssBytes": 191602688,
+            "postRssBytes": 70553600,
+            "postHwmBytes": 191602688,
+            "conservativePeakRssBytes": 191602688,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185548800,
+            "samplerObservations": 2431
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 9.949404,
+            "baselineRssBytes": 3956736,
+            "baselineHwmBytes": 3956736,
+            "sampledPeakRssBytes": 5922816,
+            "postRssBytes": 5767168,
+            "postHwmBytes": 5922816,
+            "conservativePeakRssBytes": 5922816,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 5
+          },
+          "recompact": {
+            "elapsedMs": 5505.994549,
+            "baselineRssBytes": 5767168,
+            "baselineHwmBytes": 5922816,
+            "sampledPeakRssBytes": 191365120,
+            "postRssBytes": 70303744,
+            "postHwmBytes": 191365120,
+            "conservativePeakRssBytes": 191365120,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185442304,
+            "samplerObservations": 2634
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 7.34311,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5906432,
+            "postRssBytes": 5861376,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5463.700806000001,
+            "baselineRssBytes": 5861376,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191328256,
+            "postRssBytes": 70373376,
+            "postHwmBytes": 191328256,
+            "conservativePeakRssBytes": 191328256,
+            "conservativeDeltaRssBytes": 185466880,
+            "hwmGrowthBytes": 185421824,
+            "samplerObservations": 2612
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 8.33917,
+            "baselineRssBytes": 4087808,
+            "baselineHwmBytes": 4087808,
+            "sampledPeakRssBytes": 6053888,
+            "postRssBytes": 6008832,
+            "postHwmBytes": 6053888,
+            "conservativePeakRssBytes": 6053888,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5084.202859,
+            "baselineRssBytes": 6008832,
+            "baselineHwmBytes": 6053888,
+            "sampledPeakRssBytes": 191606784,
+            "postRssBytes": 70561792,
+            "postHwmBytes": 191606784,
+            "conservativePeakRssBytes": 191606784,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2433
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 7.845158,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5906432,
+            "postRssBytes": 5857280,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 4971.364664000001,
+            "baselineRssBytes": 5857280,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191455232,
+            "postRssBytes": 70361088,
+            "postHwmBytes": 191455232,
+            "conservativePeakRssBytes": 191455232,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185548800,
+            "samplerObservations": 2379
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 8.121868000000001,
+            "baselineRssBytes": 4214784,
+            "baselineHwmBytes": 4214784,
+            "sampledPeakRssBytes": 6049792,
+            "postRssBytes": 6004736,
+            "postHwmBytes": 6049792,
+            "conservativePeakRssBytes": 6049792,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5340.569956,
+            "baselineRssBytes": 6004736,
+            "baselineHwmBytes": 6049792,
+            "sampledPeakRssBytes": 191602688,
+            "postRssBytes": 70516736,
+            "postHwmBytes": 191602688,
+            "conservativePeakRssBytes": 191602688,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2557
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 8.745569,
+            "baselineRssBytes": 3956736,
+            "baselineHwmBytes": 3956736,
+            "sampledPeakRssBytes": 5746688,
+            "postRssBytes": 5877760,
+            "postHwmBytes": 5922816,
+            "conservativePeakRssBytes": 5922816,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 5
+          },
+          "recompact": {
+            "elapsedMs": 5386.393419,
+            "baselineRssBytes": 5877760,
+            "baselineHwmBytes": 5922816,
+            "sampledPeakRssBytes": 191475712,
+            "postRssBytes": 70402048,
+            "postHwmBytes": 191475712,
+            "conservativePeakRssBytes": 191475712,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2576
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 6.949086,
+            "baselineRssBytes": 4087808,
+            "baselineHwmBytes": 4087808,
+            "sampledPeakRssBytes": 6053888,
+            "postRssBytes": 6004736,
+            "postHwmBytes": 6053888,
+            "conservativePeakRssBytes": 6053888,
+            "conservativeDeltaRssBytes": 1966080,
+            "hwmGrowthBytes": 1966080,
+            "samplerObservations": 4
+          },
+          "recompact": {
+            "elapsedMs": 5226.001389,
+            "baselineRssBytes": 6004736,
+            "baselineHwmBytes": 6053888,
+            "sampledPeakRssBytes": 191602688,
+            "postRssBytes": 70553600,
+            "postHwmBytes": 191602688,
+            "conservativePeakRssBytes": 191602688,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185548800,
+            "samplerObservations": 2498
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 9.368017,
+            "baselineRssBytes": 4218880,
+            "baselineHwmBytes": 4218880,
+            "sampledPeakRssBytes": 6053888,
+            "postRssBytes": 6004736,
+            "postHwmBytes": 6053888,
+            "conservativePeakRssBytes": 6053888,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 5
+          },
+          "recompact": {
+            "elapsedMs": 5133.200957,
+            "baselineRssBytes": 6004736,
+            "baselineHwmBytes": 6053888,
+            "sampledPeakRssBytes": 191471616,
+            "postRssBytes": 70483968,
+            "postHwmBytes": 191471616,
+            "conservativePeakRssBytes": 191471616,
+            "conservativeDeltaRssBytes": 185466880,
+            "hwmGrowthBytes": 185417728,
+            "samplerObservations": 2456
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        },
+        {
+          "checkpoint": {
+            "elapsedMs": 8.540868,
+            "baselineRssBytes": 4071424,
+            "baselineHwmBytes": 4071424,
+            "sampledPeakRssBytes": 5730304,
+            "postRssBytes": 5861376,
+            "postHwmBytes": 5906432,
+            "conservativePeakRssBytes": 5906432,
+            "conservativeDeltaRssBytes": 1835008,
+            "hwmGrowthBytes": 1835008,
+            "samplerObservations": 5
+          },
+          "recompact": {
+            "elapsedMs": 5342.769325,
+            "baselineRssBytes": 5861376,
+            "baselineHwmBytes": 5906432,
+            "sampledPeakRssBytes": 191459328,
+            "postRssBytes": 70393856,
+            "postHwmBytes": 191459328,
+            "conservativePeakRssBytes": 191459328,
+            "conservativeDeltaRssBytes": 185597952,
+            "hwmGrowthBytes": 185552896,
+            "samplerObservations": 2554
+          },
+          "graphBytes": 784891904,
+          "count": 1000000,
+          "checksum": 499999500000,
+          "diagnostics": {
+            "peakFactPagesInMemory": 1,
+            "peakTypedEntries": 1001000,
+            "factPageVisits": 66728,
+            "peakSerializedEntries": 39,
+            "peakSerializedBytes": 2888
+          }
+        }
+      ]
+    }
+  ]
+}

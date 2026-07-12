@@ -28,7 +28,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Attribute bytes to fact pages and each EAVT/AEVT/AVET/VAET index. The clean `vicia.storage-layout.v1` full receipt accounts for every published v11 page; at production fill 75 the 1M fixture is 61.875 MiB facts, 96.551 MiB EAVT, 96.551 MiB AEVT, 97.410 MiB AVET, and 0.004 MiB VAET.
 - [x] Record B-tree fill ratio and repeated attribute/entity encoding cost. The receipt retains exact payload/structural/unused bytes and conservative restart-10/16 prefix estimates for every index and fill candidate.
 - [ ] Reduce the 1M fixture from 338 MiB without changing the public API or v11 format.
-- [x] Measure `1M base + 1/10/100/1K pending` checkpoint latency and peak RSS. The clean `vicia.checkpoint-construction.v1` receipt records 20 fresh samples per variant; checkpoint p95 is 2.327/2.704/3.727/12.386 ms and recompact RSS delta stays at 177.000–177.875 MiB.
+- [x] Measure `1M base + 1/10/100/1K pending` checkpoint latency and peak RSS. The clean `vicia.checkpoint-construction.v2` receipt records 20 interleaved fresh samples per variant; checkpoint p95 is 2.630/3.023/3.370/9.864 ms and HWM-backed recompact RSS delta stays at 177.000–177.875 MiB.
 
 ## Regression gates
 
