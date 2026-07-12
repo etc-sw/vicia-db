@@ -2,10 +2,11 @@
 
 Per-backend durability semantics (gap G13) and the browser caller rules from
 slice A5 of `docs/APP_ADOPTION_GAP_PLAN.md`. This is the authority for what
-`execute` / `checkpoint` / `backup_to` / `exportGraphAsync` / `importGraph` /
-`importGraphForPagedAccess` / `runIdleMaintenance` guarantee **at the moment they
-return**, per backend, and for the rules a browser caller must follow because
-of those semantics. The session-protocol view of the same facts (the
+`execute` / `executeAtomic` / `checkpoint` / `backup_to` /
+`exportGraphAsync` / `importGraph` / `importGraphForPagedAccess` /
+`runIdleMaintenance` guarantee **at the moment they return**, per backend,
+and for the rules a browser caller must follow because of those semantics. The
+session-protocol view of the same facts (the
 `durability` field on result frames) is `docs/SESSION_PROTOCOL.md`
 "Durability classification"; the two documents must not diverge.
 
@@ -15,7 +16,7 @@ Backends covered:
   file + WAL sidecar. What harrekki runs.
 - **Browser** — eager-compatible `BrowserDb.open(dbName)` or bounded-v11
   `BrowserDb.openPaged(dbName)` (wasm): IndexedDB-backed, write-through, no
-  WAL. Vetch should adopt the paged path after its package/caller gate.
+  WAL. Vetch main `1b57689` uses the paged path for foreground authority.
 - In-memory databases (native `Minigraf::new()`, browser
   `BrowserDb.openInMemory()`) have **no durability**; nothing below
   applies to them.
@@ -25,6 +26,7 @@ Backends covered:
 | Event | Native file-backed | Browser (IndexedDB) |
 | --- | --- | --- |
 | `execute` (write) returns Ok | Facts are in the WAL (**fsynced**) and in memory. Survives kill -9 / power loss via replay. = `applied`. | All dirty pages committed in **one** IndexedDB readwrite transaction. Survives tab close and browser crash; **not** guaranteed against power loss / OS crash (see below). No WAL tier exists. |
+| `BrowserDb.executeAtomic(commands)` returns Ok | Not exposed; native callers use one `transact` or `retract` command per WAL transaction. | Every command was parsed and materialized before mutation; all facts share one `tx_id` / `tx_count`, and the exact dirty-page set committed in **one** IndexedDB readwrite transaction. |
 | `checkpoint()` returns Ok | Committed image durable (data synced before the header publish), WAL retired. = `published`. | Same flush as `execute`'s write-through; only needed after bulk operations. |
 | `backup_to()` / session `backup` returns Ok | Source checkpoint complete; a fresh independent destination contains exactly returned `tx_count`, is fsynced, and was atomically published without overwrite while the same write lock remained held. | Not applicable; browser portability uses atomic export/import. |
 | idle maintenance returns Ok | Pending writes are checkpointed first; threshold delta may be copy-on-write recompacted. | Threshold delta was either healthy (`noop`) or rebuilt as a fresh contiguous graph and atomically replaced in IndexedDB. |
@@ -78,6 +80,14 @@ Backends covered:
   IndexedDB-committed, the browser's strongest available tier. Successful
   write JSON now includes `tx_id`, deterministic `tx_count`,
   `durability = "published"`, `maintenance_pending`, and `advice`.
+- `executeAtomic(commands)` is the browser boundary for one logical write
+  that needs both `transact` and `retract`. It accepts 1–256 write-only
+  commands, preflights at most 262,144 facts and 64 MiB of Datalog source,
+  rejects query/rule/forget commands and repeated entity/attribute/value
+  facts, then assigns one transaction identity to the fully materialized
+  batch. A parse, preflight, materialization, resource-limit, or duplicate
+  error occurs before mutation. An IndexedDB abort follows the same durable
+  reload-or-poison rule as `execute()`; no command prefix is published.
 
 | Browser write result | Meaning | Caller action |
 | --- | --- | --- |
@@ -150,9 +160,10 @@ errors are out of its scope — this table is the browser classification).
 | `open` | IndexedDB unavailable / blocked | browser | No handle; nothing modified. |
 | paged read / write / import / maintenance / export | Another independent handle published a different page 0 | browser | The stale operation rejects with a reopen error before returning mixed-generation data or committing bytes. Already resident old pages remain one old snapshot; a later IndexedDB demand cannot cross into the new image. Discard and reopen the handle. |
 | `execute` | Parse / execution error | both | Rejected — nothing applied, nothing flushed. |
+| `executeAtomic` | Empty/oversized batch, non-write command, parse/materialization error, or duplicate EAV fact | browser | Rejected during preflight — no transaction identity allocated, no live mutation, and no IndexedDB publication. |
 | `execute` | Fact exceeds `MAX_FACT_BYTES` (4080 B) | both | Rejected at serialization; store payloads externally, keep pointers (gap G4 policy). |
 | `execute` | WAL append fails (I/O) | native | Rejected — memory unchanged, database consistent. |
-| `execute` / `checkpoint` | IndexedDB flush fails (quota, I/O) | browser | Durable state = old. Successful durable reload restores the live handle and rejects the operation; unreadable durable state poisons the whole handle until reopen. |
+| `execute` / `executeAtomic` / `checkpoint` | IndexedDB flush fails (quota, I/O) | browser | Durable state = old. Successful durable reload restores the live handle and rejects the operation; unreadable durable state poisons the whole handle until reopen. |
 | `checkpoint` | I/O failure | native | WAL retained, pending facts retained; safe to retry. Lock-poisoned errors indicate a panicked writer thread — treat the process as needing restart. |
 | `importGraph` | Blob shorter than page 0 / unparseable with no valid predecessor | browser | Rejected before any durable or live change. A trailing partial page is treated like native open: only complete pages enter recovery, so an interrupted newest candidate may fall back to the previous manifest. A physically missing page inside the declared prefix keeps `exportGraph` unavailable until a clean repair/maintenance image exists. |
 | `importGraphForPagedAccess` | Recovery selects a legacy or physically incomplete image | browser | Rejected before the IndexedDB transaction and before the live swap. Complete legacy input may migrate to v11, but the post-construction image must pass the bounded sparse-authority planner. The prior live handle and exact durable page map remain unchanged. |
@@ -212,12 +223,13 @@ Derived from the semantics above plus the A5 growth measurements
 
 2. **Batch, then debounce.** Between maintenance windows every write
    `execute()` appends a delta segment and rewrites the manifest, so
-   per-commit latency rises with segment count. Therefore: put
-   multi-statement work in **one** `execute` (one
-   `tx_count`, one segment, one IndexedDB transaction), and debounce
-   high-frequency sources app-side — commit on gesture end, never per
-   frame. Successful write results expose `maintenance_pending` and `advice`;
-   use those fields instead of guessing from commit count.
+   per-commit latency rises with segment count. Therefore: put same-kind facts
+   in one `transact` or `retract` command; when one authority transition
+   needs both kinds, use one bounded `executeAtomic` call. Both forms produce
+   one `tx_count`, one segment, and one IndexedDB transaction. Debounce
+   high-frequency sources app-side — commit on gesture end, never per frame.
+   Successful write results expose `maintenance_pending` and `advice`; use
+   those fields instead of guessing from commit count.
 
 3. **Give O(total) browser work a disposable worker lifetime.** React to write
    advice at startup/import/slice/idle boundaries. End use of the foreground
@@ -236,7 +248,8 @@ Derived from the semantics above plus the A5 growth measurements
    200 ms sampled process-tree PSS. Export retains 1.04 GiB and maintenance
    retains 1.27 GiB when the call returns; the harness then closes the browser
    process. A long-lived authority worker is therefore not the intended
-   reclamation boundary. Vetch main `6c5b1f7` implements this exact boundary
-   against clean Vicia `9c8ae60`: foreground `openPaged()`, one shared Web Lock,
-   disposable migration/import/export/maintenance, outcome receipts, worker
-   termination, and fresh reopen. Its real-Chrome caller smoke closes Gate E.
+   reclamation boundary. Vetch main `1b57689` implements this exact boundary
+   against clean Vicia `e60a7c2`: foreground `openPaged()`, one shared Web
+   Lock, bounded `executeAtomic` authority publications, disposable
+   migration/import/export/maintenance, outcome receipts, worker termination,
+   and fresh reopen. Its real-Chrome caller smoke closes Gate E.

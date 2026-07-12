@@ -29,10 +29,10 @@ worker/idle window and atomically replaces IndexedDB with a fresh contiguous
 image so obsolete page records are actually reclaimed.
 A5-6c adds the bounded `BrowserDb.openPaged()` source and verified asynchronous
 export while retaining eager `open()` compatibility. A5-6d measures that exact
-path at 1M and closes the Vicia-owned browser scale work. Vetch main `6c5b1f7`
-consumes clean Vicia `9c8ae60`, adopts the bounded foreground path, and proves
-the disposable-worker lifecycle. Gate E is complete without another
-storage-format slice.
+path at 1M and closes the Vicia-owned browser scale work. Vetch main `1b57689`
+consumes clean Vicia `e60a7c2`, adopts the bounded foreground path and atomic
+mixed writes, and proves the disposable-worker lifecycle. Gate E is complete
+without another storage-format slice.
 This document is the single high-level plan for the Vetch-driven Minigraf /
 Vicia DB delta-storage line. The detailed storage format and test specification
 remain in `docs/DELTA_INDEX_DESIGN.md`; benchmark evidence remains in
@@ -172,7 +172,7 @@ the result of progressively narrower gates:
 | A5-5 | Native- and Chrome-generated v10 fixtures run through both consumers with exact tagged temporal/ref results and one shared slot/manifest/segment/truncation/tail corruption corpus. | Semantic, portability, and recovery-policy parity pass; page-local base integrity and bounded browser reads remain coupled Gate E work. |
 | A5-6a | Query access planning is a deterministic internal boundary; selective index/fact I/O failures propagate instead of triggering a full scan, and declared fact ranges reject wrong-type pages. | Sparse browser reads can distinguish an explicit full-scan plan from a failed selective read without hiding corruption. |
 | A5-6b | File format v11 adds an in-file, generation/page-id-bound checksum catalog for every immutable base fact/index page; v10 migrates catalog-first/page0-last and BrowserDb durably commits that migration before returning. | Page-local corruption detection and the verified committed-read/export/backup boundary pass; sparse IndexedDB paging and the 1M bounded-memory matrix remain Gate E work. |
-| A5-6c | `BrowserDb.openPaged()` bootstraps bounded v11 metadata, demand-fetches verified pages, preserves sparse residency across writes/rollback/import/maintenance, and pairs with `exportGraphAsync()`; exact page-0 bytes are the cross-handle authority with no added schema key. | Sparse implementation passes while eager `open()` remains compatible; Vetch `6c5b1f7` adopts the bounded path. |
+| A5-6c | `BrowserDb.openPaged()` bootstraps bounded v11 metadata, demand-fetches verified pages, preserves sparse residency across writes/rollback/import/maintenance, and pairs with `exportGraphAsync()`; exact page-0 bytes are the cross-handle authority with no added schema key. | Sparse implementation passes while eager `open()` remains compatible; Vetch `1b57689` adopts the bounded path. |
 | A5-6d | Chrome 150 on a 1M-fact v11 image measures `openPaged()` at 17.8 ms five-run maximum, the open-plus-six-probe phase at 51.1 MiB maximum sampled PSS growth, one-fact writes at 8.3 ms p95, soft-threshold reopen at 428.1 ms maximum, and post-maintenance reopen at 16.3 ms. | The scale matrix plus Vetch's Web-Locked disposable-worker caller smoke close Gate E. |
 
 ## Philosophy Fit

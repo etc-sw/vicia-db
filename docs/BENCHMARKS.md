@@ -497,6 +497,48 @@ File growth over the 100 full-mode slices: 1,228,800 bytes (300 pages) on a
 cadence at 1M facts costs the same as at 10K, and per-slice checkpoint stays
 in the T7A delta-publish range (~5 ms p95).
 
+### Gate D Exact Vetch Trace
+
+Vetch's external runner
+`apps/quiet-surface/scripts/bench-vicia-gate-d-exact-trace.mjs` drives the
+release `minigraf --session` binary rather than calling a Rust benchmark API.
+The acceptance profile starts from an immutable 1M-fact v11 base, replays
+1,024 capture/edit/proposal/receipt/epistemic slices, checkpoints every slice,
+discovers the current card ids through the persisted space-membership entity,
+splits exact entity reads at 128, runs threshold-advised maintenance outside
+the foreground cadence, explicitly checkpoints, then reopens in a fresh child
+and verifies current/history/activation fingerprints. The runner rejects a
+dirty Vicia checkout and emits one JSON receipt with source and binary hashes.
+Vetch main `1b57689` preserves that exact receipt at
+`qa/done/vicia-gate-d-full-e60a7c2.json`.
+
+Recorded host: A0 WSL2 environment, release source
+`e60a7c298a66de486fa4615a085e6aac547b0800`, 2026-07-12.
+
+| Gate D surface | Result | Budget |
+|---|---:|---:|
+| append p95 (5,120 samples) | 2.378 ms | <= 10 ms |
+| checkpoint p95 (1,024 samples) | 3.098 ms | <= 50 ms |
+| selective current p95 | 0.259 ms | <= 10 ms |
+| historical p95 | 0.214 ms | <= 10 ms |
+| agent brief p95 | 0.590 ms | <= 100 ms |
+| 1,024-card current-space rebuild p95 | 173.988 ms | <= 250 ms |
+| fresh-child reopen | 4.357 ms | <= 500 ms |
+| foreground RSS peak | 57.480 MiB | <= 512 MiB |
+| reopen RSS peak | 7.902 MiB | <= 512 MiB |
+| foreground file growth | 28.078 MiB | <= 64 MiB |
+| idle recompact | 7.510 s / 947.512 MiB RSS | <= 60 s / 3,072 MiB |
+| post-maintenance/base file ratio | 2.139 | <= 2.25 |
+
+The first honest run exposed cumulative checkpoint work: p95 was 132.806 ms
+because every publish reread all selected delta segments and rebuilt the full
+committed reader. Retaining decoded segments reduced it to 58.566 ms but still
+missed the product budget. The final implementation keeps shared resident
+fact/index state and inserts only the new segment behind the same pending-to-
+committed read barrier, producing the 3.098 ms result above. All exact query
+shapes remained selective, all 1,024 cards were rediscovered after reopen, and
+foreground, reopened, and expected fingerprints matched.
+
 ### Decay-Candidate Query Cost (harrekki)
 
 `decay/` groups in `benches/minigraf_bench.rs` — "entities untouched since
@@ -961,7 +1003,7 @@ v11 fixture, while migration temporarily loads the legacy published image.
 Run these phases in a disposable DedicatedWorker under the Web Lock, emit an
 outcome, terminate the worker after success or failure, and reopen through
 `openPaged()`. This single 32 GiB host run does not establish a general 16 GiB
-product budget. Vetch main `6c5b1f7` consumes clean Vicia `9c8ae60`, adopts
+product budget. Vetch main `1b57689` consumes clean Vicia `e60a7c2`, adopts
 `openPaged()` for foreground authority handles, and proves the Web-Locked
 disposable migration/import/export/maintenance lifecycle, termination receipts,
 and reopen behavior in real Chrome. Together with this matrix, Gate E passes;

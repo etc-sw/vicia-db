@@ -184,7 +184,7 @@ termination and not a general device-memory floor. A legacy v10 database's
 first `openPaged()` also follows an O(total) migration path and uses the same
 worker lifecycle during Vetch cutover.
 
-Vetch `6c5b1f7` supplies the browser caller evidence: it observes maintenance
+Vetch `1b57689` supplies the browser caller evidence: it observes maintenance
 advice centrally, schedules soft and hard idle demand outside the foreground
 operation, acquires the same Web Lock in a disposable worker, posts a truthful
 outcome, terminates after success or failure, and reopens through `openPaged()`.

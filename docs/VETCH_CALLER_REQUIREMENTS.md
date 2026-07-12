@@ -52,13 +52,16 @@ The default quiet-surface store uses `viciaBackedCanvasPersistence`, backed by
 Vetch's local `@vicia-db/browser` build. The adapter opens the IndexedDB database
 `vetch.quiet-surface.authority.v2` and writes Datalog facts for canvas command
 events, cards, source references, edges, spaces, and manual groups.
-Vetch main `6c5b1f7` vendors the clean `@vicia-db/browser` build from Vicia
-`9c8ae60`. The adapter opens foreground authority handles through
+Vetch main `1b57689` vendors the clean `@vicia-db/browser` build from Vicia
+`e60a7c2`. The adapter opens foreground authority handles through
 `BrowserDb.openPaged()`, preflights any legacy v10 Vicia image before mount,
 serializes the paged one-in-flight boundary, and runs strict import, verified
 export, and maintenance in disposable workers under one shared Web Lock. The
 Vicia-owned 1M matrix supplies the foreground and O(total) process evidence;
-the Vetch Chrome acceptance supplies the caller lifecycle proof.
+the Vetch Chrome acceptance supplies the caller lifecycle proof. Mixed
+event-plus-projection and Condense head replacements use bounded
+`executeAtomic()` writes, and the exact Vicia source is recorded in the
+vendored `vicia-build.json`.
 
 The integration has already proved useful primitives:
 
@@ -277,7 +280,7 @@ must remain usable at the expected 1M+ fact baseline. `BrowserDb.open()` keeps
 the original eager behavior for compatibility. `BrowserDb.openPaged()` is the
 v11 page-on-demand path: it reads bounded authority/catalog/manifest metadata,
 fetches verified fact/index pages on deterministic query demand, and evicts
-clean staging through the existing fixed-size cache boundary. Vetch `6c5b1f7`
+clean staging through the existing fixed-size cache boundary. Vetch `1b57689`
 adopts that exact measured path rather than a shadow database. Five real-Chrome
 1M runs measured 16.6 ms p50 / 17.8 ms maximum open and 51.1 MiB maximum sampled
 PSS growth across open plus six point probes; see `docs/BENCHMARKS.md` A5-6d. A
@@ -365,11 +368,20 @@ checkpoint, current-space rebuild, selective current query, historical query,
 reopen, memory, and file growth. Use receipt/slice batching plus idle
 maintenance; do not hide recompact in the foreground path.
 
-Status: the existing 1M cadence suites cover capture/edit/receipt append,
-checkpoint, selective current/`:as-of` reads, and file growth. The one-run
-Vetch trace still needs proposal, epistemic transition, current-space rebuild,
-agent-brief, reopen/RSS, and a real-threshold maintenance cycle with
-Vetch-owned product budgets. Gate D is not yet claimed complete.
+Status: **Gate D passes on the recorded WSL2 host.** Vetch's external release-
+session runner starts from 1M facts, replays 1,024 capture/edit/proposal/
+receipt/epistemic slices, rediscovers the 1,024-card space from persisted
+membership, keeps all entity reads exact and capped at 128, observes the real
+delta threshold, runs recompact outside foreground work, explicitly
+checkpoints, reopens, and verifies current/history/activation fingerprints.
+At clean Vicia `e60a7c2`, append/checkpoint/current/history/agent-brief/current-
+space p95 measured 2.378/3.098/0.259/0.214/0.590/173.988 ms; fresh-child
+reopen was 4.357 ms, foreground RSS peaked at 57.480 MiB, idle maintenance
+took 7.510 s at 947.512 MiB peak RSS, and foreground growth was 28.078 MiB.
+Every recorded product budget passed. This closes the storage/cadence gate; it
+does not substitute for a packaged Windows WebView2 smoke or claim Gate A's
+removal of the legacy canvas co-authority. The exact receipt is preserved at
+`qa/done/vicia-gate-d-full-e60a7c2.json` in Vetch main `1b57689`.
 
 ### Gate E — Browser/native parity
 
@@ -387,13 +399,14 @@ page-0 authority checks across independent handles, sparse write rollback, and
 post-import/maintenance return to sparse residency. The additive
 `importGraphForPagedAccess()` cutover gate now accepts complete v10 migration
 but rejects non-exportable truncated recovery before durable replacement,
-while `importGraph()` remains recovery-compatible. All 57 structural browser
+while `importGraph()` remains recovery-compatible. All 62 structural browser
 tests pass in the final headless-Chrome run. A5-6d now completes bounded 1M
 open/query/growth and maintenance peak-memory evidence on the recorded host.
 Foreground v11 open/query/write is bounded; legacy migration, import, full
 export, and recompact are accepted only in a disposable DedicatedWorker. The
-measured latter three sampled PSS deltas are 2.55 / 1.04 / 2.09 GiB. Vetch main
-`6c5b1f7` consumes clean Vicia `9c8ae60`, adopts `openPaged()`, preflights v10,
+measured latter three sampled PSS deltas are 2.55 / 1.04 / 2.09 GiB. Vetch
+main `1b57689` consumes clean Vicia `e60a7c2`, adopts `openPaged()`,
+preflights v10,
 uses strict paged-ready import, observes write advice, runs all O(total) work
 under its shared Web Lock, terminates workers after success or failure, and
 reopens through the bounded path. Its aggregate Chrome authority suite covers
