@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &str = "vicia.pending-isolation.v2";
+const SCHEMA: &str = "vicia.pending-isolation.v3";
 const BASE_FACTS: u64 = 1_000_000;
 const SELECTED_CONTROL_FACTS: u64 = 10_000;
 const WRITE_BATCH: u64 = 1_000;

@@ -445,9 +445,9 @@ enum WriteContext {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WalReplayMemoryDiagnostics {
-    /// Decoded WAL transaction entries retained together before apply.
+    /// Peak decoded WAL transaction entries retained together during apply.
     pub entries: u64,
-    /// Decoded facts retained together before apply.
+    /// Peak decoded facts retained together during apply.
     pub facts: u64,
     /// Reserved inline bytes for the outer `Vec<WalEntry>`.
     pub entry_vector_bytes: u64,
@@ -463,8 +463,8 @@ pub struct WalReplayMemoryDiagnostics {
     pub owned_value_allocations: u64,
     /// Sum of all accounted decoded-WAL bytes.
     pub total_accounted_bytes: u64,
-    /// The replay implementation retains all decoded entries while applying
-    /// cloned facts to pending storage.
+    /// The decoded transaction overlaps pending publication while its facts
+    /// are moved into the canonical overlay.
     pub overlaps_live_pending_during_apply: bool,
 }
 

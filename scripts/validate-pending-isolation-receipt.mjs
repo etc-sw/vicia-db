@@ -21,7 +21,7 @@ const unrelatedCounts =
     ? [0, 10_000, 100_000, 1_000_000]
     : [0, 100, 1_000, 10_000];
 
-assert(receipt.schema === "vicia.pending-isolation.v2", "unexpected schema");
+assert(receipt.schema === "vicia.pending-isolation.v3", "unexpected schema");
 assert(receipt.profile === expectedProfile, "unexpected profile");
 assert(receipt.baseFacts === BASE_FACTS, "unexpected committed base size");
 assert(receipt.repetitions === repetitions, "unexpected repetition count");
@@ -324,7 +324,12 @@ function validateMemoryAudit(variant) {
   );
 
   const wal = audit.walReplay;
-  assert(wal && wal.facts === variant.pendingFacts, `${variant.label}: WAL fact accounting`);
+  const expectedPeakWalFacts = Math.min(1_000, variant.pendingFacts);
+  assert(
+    wal && wal.entries === (variant.pendingFacts === 0 ? 0 : 1) &&
+      wal.facts === expectedPeakWalFacts,
+    `${variant.label}: peak WAL batch accounting`,
+  );
   assert(
     wal.totalAccountedBytes ===
       wal.entryVectorBytes +
