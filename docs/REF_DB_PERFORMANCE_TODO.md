@@ -31,7 +31,11 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Regression gates
 
-- [ ] Preserve 1M point-read latency near the current 0.24 ms baseline.
+- [x] Preserve 1M point-read latency near the current 0.24 ms baseline. Current final run: 0.277 ms (+14.8%, inside the 20% regression gate).
 - [x] Preserve open baseline RSS near 12 MiB. Current baseline: 12.29 MiB.
 - [x] Require exact count `1,000,000` and checksum `499999500000` for every run.
-- [ ] Keep engine aggregate and KV owned-scan results in separate comparison groups.
+- [x] Keep engine aggregate and KV owned-scan results in separate comparison groups. The v3 summarizer separates `engineAggregate` from `ownedResultScan` and treats redb/Fjall as storage floors.
+
+## Next task
+
+- Verify that growing unrelated pending attributes does not increase selected-attribute aggregate snapshot memory. Add a controlled `1M committed selected attribute + 0/10K/100K/1M unrelated pending facts` workload, record cursor snapshot bytes and peak reducer state, and require selected count/checksum plus snapshot memory to remain constant within allocator-page noise.
