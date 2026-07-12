@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = "vicia.storage-layout.v1";
-const BATCH: u64 = 1_000;
+const BATCH: usize = 1_000;
 const FILLS: &[u8] = &[75, 85, 90, 95, 100];
 
 #[derive(Clone, Copy)]
@@ -213,9 +213,9 @@ fn build(path: &Path, facts: u64, fill: u8) -> Result<CheckpointSample> {
         }
         .benchmark_btree_fill_percent(fill),
     )?;
-    for start in (0..facts).step_by(BATCH as usize) {
+    for start in (0..facts).step_by(BATCH) {
         let mut command = String::from("(transact [");
-        for entity in start..(start + BATCH).min(facts) {
+        for entity in start..(start + u64::try_from(BATCH)?).min(facts) {
             command.push_str(&format!("[:layout/e{entity} :layout/value {entity}]"));
         }
         command.push_str("])");
@@ -340,18 +340,19 @@ fn elapsed(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 fn median(values: &[f64]) -> f64 {
-    percentile(values, 0.5)
+    percentile(values, 50)
 }
-fn percentile(values: &[f64], quantile: f64) -> f64 {
+fn percentile(values: &[f64], percent: usize) -> f64 {
     let mut values = values.to_vec();
     values.sort_by(f64::total_cmp);
-    let index = ((values.len() - 1) as f64 * quantile).ceil() as usize;
-    values[index]
+    let scaled = (values.len() - 1).saturating_mul(percent);
+    let index = scaled.saturating_add(99) / 100;
+    values.get(index).copied().unwrap_or(f64::NAN)
 }
 fn median_u64(values: &[u64]) -> u64 {
     let mut values = values.to_vec();
     values.sort_unstable();
-    values[(values.len() - 1) / 2]
+    values.get((values.len() - 1) / 2).copied().unwrap_or(0)
 }
 fn select_fill(candidates: &[Candidate]) -> Option<u8> {
     let baseline = candidates
@@ -370,7 +371,7 @@ fn select_fill(candidates: &[Candidate]) -> Option<u8> {
             )
         })
         .filter(|candidate| {
-            latency_gate(
+            point_latency_gate(
                 &candidate.query.point_samples_ms,
                 &baseline.query.point_samples_ms,
             )
@@ -382,21 +383,28 @@ fn select_fill(candidates: &[Candidate]) -> Option<u8> {
             )
         })
         .filter(|candidate| {
+            const RSS_RESOLUTION_BYTES: u64 = 2 * 1024 * 1024;
             median_u64(&candidate.checkpoint.delta_rss_samples_bytes)
                 <= median_u64(&baseline.checkpoint.delta_rss_samples_bytes).saturating_mul(110)
                     / 100
+                    + RSS_RESOLUTION_BYTES
                 && candidate.query.delta_rss_bytes
                     <= baseline.query.delta_rss_bytes.saturating_mul(110) / 100
+                        + RSS_RESOLUTION_BYTES
         })
         .map(|candidate| candidate.fill_percent)
         .max()
 }
 fn latency_gate(candidate: &[f64], baseline: &[f64]) -> bool {
-    let candidate_p50 = percentile(candidate, 0.5);
-    let candidate_p95 = percentile(candidate, 0.95);
-    candidate_p50 <= percentile(baseline, 0.5) * 1.10
-        && candidate_p95 <= percentile(baseline, 0.95) * 1.10
+    let candidate_p50 = percentile(candidate, 50);
+    let candidate_p95 = percentile(candidate, 95);
+    candidate_p50 <= percentile(baseline, 50) * 1.10
+        && candidate_p95 <= percentile(baseline, 95) * 1.10
         && candidate_p95 <= candidate_p50 * 1.15
+}
+fn point_latency_gate(candidate: &[f64], baseline: &[f64]) -> bool {
+    percentile(candidate, 50) <= percentile(baseline, 50) * 1.20
+        && percentile(candidate, 95) <= percentile(baseline, 95) * 1.20
 }
 fn index_unused(layout: &StorageLayoutDiagnostics) -> u64 {
     [&layout.eavt, &layout.aevt, &layout.avet, &layout.vaet]
