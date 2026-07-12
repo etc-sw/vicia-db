@@ -13,6 +13,43 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+#[cfg(feature = "bench-internals")]
+use std::cell::Cell;
+
+#[cfg(feature = "bench-internals")]
+thread_local! {
+    static PEAK_SERIALIZED_ENTRIES: Cell<u64> = const { Cell::new(0) };
+    static PEAK_SERIALIZED_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn reset_build_diagnostics() {
+    PEAK_SERIALIZED_ENTRIES.set(0);
+    PEAK_SERIALIZED_BYTES.set(0);
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn build_diagnostics() -> (u64, u64) {
+    (PEAK_SERIALIZED_ENTRIES.get(), PEAK_SERIALIZED_BYTES.get())
+}
+
+#[cfg(feature = "bench-internals")]
+fn observe_serialized_frontier(entries: usize, bytes: usize) {
+    PEAK_SERIALIZED_ENTRIES.set(
+        PEAK_SERIALIZED_ENTRIES
+            .get()
+            .max(u64::try_from(entries).unwrap_or(u64::MAX)),
+    );
+    PEAK_SERIALIZED_BYTES.set(
+        PEAK_SERIALIZED_BYTES
+            .get()
+            .max(u64::try_from(bytes).unwrap_or(u64::MAX)),
+    );
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn observe_serialized_frontier(_entries: usize, _bytes: usize) {}
+
 // ─── Page type constants ───────────────────────────────────────────────────────
 
 /// Leaf node page type (v6).
@@ -229,8 +266,8 @@ pub fn build_btree(
     cache: &PageCache,
     start_page_id: u64,
 ) -> Result<(u64, u64)> {
-    build_btree_with_options(
-        sorted_entries,
+    build_btree_serialized_results(
+        sorted_entries.map(Ok),
         backend,
         cache,
         start_page_id,
@@ -245,6 +282,42 @@ pub(crate) fn build_btree_with_options(
     start_page_id: u64,
     options: BtreeBuildOptions,
 ) -> Result<(u64, u64)> {
+    build_btree_serialized_results(
+        sorted_entries.map(Ok),
+        backend,
+        cache,
+        start_page_id,
+        options,
+    )
+}
+
+pub(crate) fn build_btree_from_key_entries<K: Serialize>(
+    sorted_entries: impl Iterator<Item = (K, FactRef)>,
+    backend: &mut dyn StorageBackend,
+    cache: &PageCache,
+    start_page_id: u64,
+    options: BtreeBuildOptions,
+) -> Result<(u64, u64)> {
+    build_btree_serialized_results(
+        sorted_entries.map(|(key, fact_ref)| {
+            let entry_bytes = postcard::to_allocvec(&(&key, &fact_ref))?;
+            let key_bytes = postcard::to_allocvec(&key)?;
+            Ok((entry_bytes, key_bytes))
+        }),
+        backend,
+        cache,
+        start_page_id,
+        options,
+    )
+}
+
+fn build_btree_serialized_results(
+    sorted_entries: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
+    backend: &mut dyn StorageBackend,
+    cache: &PageCache,
+    start_page_id: u64,
+    options: BtreeBuildOptions,
+) -> Result<(u64, u64)> {
     let page_fill_bytes = options.fill_bytes();
     // ── Phase 1: pack entries into leaf pages ─────────────────────────────────
     let mut leaf_infos: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -254,7 +327,8 @@ pub(crate) fn build_btree_with_options(
     let mut cur_first_key: Option<Vec<u8>> = None;
     let mut next_page = start_page_id;
 
-    for (entry_bytes, key_bytes) in sorted_entries {
+    for entry in sorted_entries {
+        let (entry_bytes, key_bytes) = entry?;
         let projected = LEAF_HEADER_SIZE
             + (cur_entries.len() + 1) * SLOT_SIZE
             + cur_data_bytes
@@ -281,6 +355,7 @@ pub(crate) fn build_btree_with_options(
         }
         cur_data_bytes += entry_bytes.len();
         cur_entries.push(entry_bytes);
+        observe_serialized_frontier(cur_entries.len(), cur_data_bytes);
     }
 
     // Flush the last (or only) batch
@@ -377,6 +452,7 @@ pub(crate) fn build_btree_with_options(
 
                 sep_data_bytes += sep.len();
                 sep_bytes.push(sep);
+                observe_serialized_frontier(sep_bytes.len(), sep_data_bytes);
                 child_ids.push(
                     current_level
                         .get(i)
@@ -1045,6 +1121,41 @@ mod tests {
         assert!(BtreeBuildOptions::new(50).is_ok());
         assert!(BtreeBuildOptions::new(100).is_ok());
         assert!(BtreeBuildOptions::new(101).is_err());
+    }
+
+    #[test]
+    fn lazy_key_serialization_matches_eager_tree_bytes() {
+        let entries = (0u128..200)
+            .map(|n| make_eavt(n, ":lazy", n as u64 + 1))
+            .collect::<Vec<_>>();
+        let mut eager = MemoryBackend::new();
+        let mut lazy = MemoryBackend::new();
+        let eager_cache = PageCache::new(256);
+        let lazy_cache = PageCache::new(256);
+        let serialized = btree_entries(entries.iter().cloned()).unwrap();
+        let eager_result = build_btree_with_options(
+            serialized.into_iter(),
+            &mut eager,
+            &eager_cache,
+            1,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        let lazy_result = build_btree_from_key_entries(
+            entries.into_iter(),
+            &mut lazy,
+            &lazy_cache,
+            1,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(lazy_result, eager_result);
+        for page_id in 1..eager_result.1 {
+            assert_eq!(
+                lazy.read_page(page_id).unwrap(),
+                eager.read_page(page_id).unwrap()
+            );
+        }
     }
 
     fn make_eavt(n: u128, attr: &str, tx: u64) -> (EavtKey, FactRef) {

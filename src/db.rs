@@ -1015,6 +1015,13 @@ impl Minigraf {
         self.inner.wal_replay_memory_diagnostics
     }
 
+    /// Return diagnostics from the most recent full base construction on this
+    /// thread. Repository benchmark hook available only with `bench-internals`.
+    #[cfg(feature = "bench-internals")]
+    pub fn checkpoint_construction_diagnostics(&self) -> crate::CheckpointConstructionDiagnostics {
+        crate::storage::persistent_facts::checkpoint_construction_diagnostics()
+    }
+
     /// Execute a `(forget ...)` bulk valid-time closure while holding the
     /// write lock.
     ///
@@ -1446,6 +1453,24 @@ impl Minigraf {
                 ))
             }
         }
+    }
+
+    /// Force the visible delta into a fresh base for repository benchmarks.
+    #[cfg(all(feature = "bench-internals", not(target_arch = "wasm32")))]
+    pub fn benchmark_recompact_visible_delta(&self) -> Result<()> {
+        if is_write_tx_active() {
+            bail!("cannot benchmark recompact while a WriteTransaction is active");
+        }
+        let mut ctx = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock is poisoned"))?;
+        let WriteContext::File { pfs, .. } = &mut *ctx else {
+            bail!("benchmark recompact requires file-backed storage");
+        };
+        pfs.recompact_visible_delta()?;
+        Ok(())
     }
 
     /// Returns the current monotonic transaction counter.

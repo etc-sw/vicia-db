@@ -39,3 +39,11 @@ storage-layout-smoke OUTPUT_DIR="target/storage-layout/smoke":
 # Measure the clean 1M/20-sample B-tree fill-factor matrix.
 storage-layout-full OUTPUT_DIR="target/storage-layout/full":
     ./scripts/run-storage-layout-bench.sh full "{{OUTPUT_DIR}}"
+
+# Measure bounded checkpoint/recompact construction with a 10K base.
+checkpoint-construction-smoke OUTPUT_DIR="target/checkpoint-construction/smoke":
+    ./scripts/run-checkpoint-construction-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run the clean 1M/20-sample checkpoint construction acceptance matrix.
+checkpoint-construction-full OUTPUT_DIR="target/checkpoint-construction/full":
+    ./scripts/run-checkpoint-construction-bench.sh full "{{OUTPUT_DIR}}"

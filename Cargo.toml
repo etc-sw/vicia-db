@@ -102,6 +102,11 @@ name = "storage-layout-bench"
 path = "src/bin/storage_layout_bench.rs"
 required-features = ["bench-internals"]
 
+[[bin]]
+name = "checkpoint-construction-bench"
+path = "src/bin/checkpoint_construction_bench.rs"
+required-features = ["bench-internals"]
+
 [features]
 default = []
 wasm = []

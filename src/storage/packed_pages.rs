@@ -181,6 +181,43 @@ impl PackedFactPacker {
         self.pages.push(self.current_page);
         self.pages
     }
+
+    /// Removes every completed page while retaining the current partial page.
+    ///
+    /// Streaming writers can call this after each push to keep fact-page
+    /// ownership bounded without changing the packed-page byte layout.
+    pub(crate) fn take_completed_pages(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pages)
+    }
+}
+
+/// Visits every fact in a packed-page range together with its physical ref.
+pub(crate) fn visit_fact_refs_in_pages(
+    backend: &dyn StorageBackend,
+    start_page_id: u64,
+    page_count: u64,
+    visitor: &mut dyn FnMut(Fact, FactRef) -> Result<()>,
+) -> Result<()> {
+    for page_offset in 0..page_count {
+        let page_id = start_page_id
+            .checked_add(page_offset)
+            .ok_or_else(|| anyhow::anyhow!("fact page id overflow"))?;
+        let page = backend.read_page(page_id)?;
+        let count_bytes = page
+            .get(2..4)
+            .ok_or_else(|| anyhow::anyhow!("packed page missing record count"))?;
+        let record_count = u16::from_le_bytes(count_bytes.try_into()?);
+        for slot_index in 0..record_count {
+            visitor(
+                read_slot(&page, slot_index)?,
+                FactRef {
+                    page_id,
+                    slot_index,
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Read a single fact from a packed page at the given slot index.
@@ -552,6 +589,20 @@ mod tests {
         for (orig, rec) in facts.iter().zip(recovered.iter()) {
             assert_eq!(orig.entity, rec.entity);
         }
+    }
+
+    #[test]
+    fn draining_completed_pages_preserves_exact_layout() {
+        let facts: Vec<Fact> = (0..200).map(make_fact).collect();
+        let (expected, _) = pack_facts(&facts, 7).unwrap();
+        let mut packer = PackedFactPacker::new(7);
+        let mut actual = Vec::new();
+        for fact in &facts {
+            packer.push(fact).unwrap();
+            actual.extend(packer.take_completed_pages());
+        }
+        actual.extend(packer.finish());
+        assert_eq!(actual, expected, "streaming drain must be byte-identical");
     }
 
     #[test]

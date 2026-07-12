@@ -9,7 +9,7 @@ use crate::storage::FACT_PAGE_FORMAT_PACKED;
 use crate::storage::backend::file::FileBackend;
 use crate::storage::btree_v6::{
     BtreeBuildOptions, MutexStorageBackend, OnDiskIndexReader, btree_entries,
-    build_btree_with_options, merge_sorted_vecs, stream_all_entries,
+    build_btree_from_key_entries, build_btree_with_options, merge_sorted_vecs, stream_all_entries,
 };
 use crate::storage::cache::PageCache;
 use crate::storage::delta_growth::{DeltaGrowthMetrics, DeltaMaintenanceDecision};
@@ -25,7 +25,7 @@ use crate::storage::header_extension::{
     build_header_page_with_extension, select_header_manifest_slot_from_page0,
 };
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey, encode_value};
-use crate::storage::packed_pages::{PackedFactPacker, pack_facts};
+use crate::storage::packed_pages::{PackedFactPacker, pack_facts, visit_fact_refs_in_pages};
 use crate::storage::page_integrity::{
     BasePageIntegrityCatalog, catalog_crc32,
     compute_page_checksum as compute_integrity_page_checksum,
@@ -35,11 +35,71 @@ use crate::storage::{
 };
 use anyhow::Result;
 use crc32fast::Hasher;
+use serde::Serialize;
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+
+#[cfg(feature = "bench-internals")]
+use std::cell::Cell;
+
+#[cfg(feature = "bench-internals")]
+/// Repository-only ownership counters for a full base construction.
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointConstructionDiagnostics {
+    /// Maximum completed fact pages retained before writing.
+    pub peak_fact_pages_in_memory: u64,
+    /// Maximum typed entries retained for one index.
+    pub peak_typed_entries: u64,
+    /// Candidate fact pages visited across index passes.
+    pub fact_page_visits: u64,
+    /// Maximum serialized entries retained by a B-tree frontier.
+    pub peak_serialized_entries: u64,
+    /// Maximum serialized payload bytes retained by a B-tree frontier.
+    pub peak_serialized_bytes: u64,
+}
+
+#[cfg(feature = "bench-internals")]
+thread_local! {
+    static CHECKPOINT_DIAGNOSTICS: Cell<CheckpointConstructionDiagnostics> =
+        const { Cell::new(CheckpointConstructionDiagnostics {
+            peak_fact_pages_in_memory: 0,
+            peak_typed_entries: 0,
+            fact_page_visits: 0,
+            peak_serialized_entries: 0,
+            peak_serialized_bytes: 0,
+        }) };
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn checkpoint_construction_diagnostics() -> CheckpointConstructionDiagnostics {
+    let mut diagnostics = CHECKPOINT_DIAGNOSTICS.get();
+    let (entries, bytes) = crate::storage::btree_v6::build_diagnostics();
+    diagnostics.peak_serialized_entries = entries;
+    diagnostics.peak_serialized_bytes = bytes;
+    diagnostics
+}
+
+#[cfg(feature = "bench-internals")]
+fn reset_checkpoint_construction_diagnostics() {
+    CHECKPOINT_DIAGNOSTICS.set(CheckpointConstructionDiagnostics::default());
+    crate::storage::btree_v6::reset_build_diagnostics();
+}
+
+#[cfg(feature = "bench-internals")]
+fn observe_checkpoint_typed_entries(entries: usize) {
+    let mut diagnostics = CHECKPOINT_DIAGNOSTICS.get();
+    diagnostics.peak_typed_entries = diagnostics
+        .peak_typed_entries
+        .max(u64::try_from(entries).unwrap_or(u64::MAX));
+    CHECKPOINT_DIAGNOSTICS.set(diagnostics);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn observe_checkpoint_typed_entries(_entries: usize) {}
 
 fn normalize_legacy_retractions(facts: &mut [Fact]) {
     for fact in facts {
@@ -1048,6 +1108,21 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         )
     }
 
+    fn build_btree_keys<K: Serialize>(
+        &self,
+        entries: impl Iterator<Item = (K, FactRef)>,
+        backend: &mut dyn StorageBackend,
+        start_page_id: u64,
+    ) -> Result<(u64, u64)> {
+        build_btree_from_key_entries(
+            entries,
+            backend,
+            &self.page_cache,
+            start_page_id,
+            self.btree_build_options,
+        )
+    }
+
     fn base_fact_loader(&self) -> Arc<dyn CommittedFactReader> {
         let backend_adapter = match &self.base_integrity {
             Some(base_integrity) => {
@@ -1678,64 +1753,128 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             anyhow::bail!("Recompact base candidate cannot start on page 0");
         }
 
+        #[cfg(feature = "bench-internals")]
+        reset_checkpoint_construction_diagnostics();
+
         let mut packer = PackedFactPacker::new(base_fact_page_start);
-        let mut index_entries = new_index_entries_with_capacity(0);
         let mut node_count = 0u64;
+        let mut written_fact_pages = 0u64;
+        self.page_cache.invalidate_from(base_fact_page_start);
+        let candidate_backend = self.backend.clone();
         source(&mut |fact| {
-            let fact_ref = packer.push(&fact)?;
-            push_index_entries_for_fact(&mut index_entries, &fact, fact_ref);
+            packer.push(&fact)?;
+            let completed = packer.take_completed_pages();
+            if !completed.is_empty() {
+                let mut backend = candidate_backend
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+                for page in completed {
+                    let page_id = base_fact_page_start
+                        .checked_add(written_fact_pages)
+                        .ok_or_else(|| anyhow::anyhow!("fact page id overflow"))?;
+                    backend.write_page(page_id, &page)?;
+                    written_fact_pages = written_fact_pages
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("fact page count overflow"))?;
+                }
+            }
             node_count = node_count
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("fact count exceeds u64::MAX"))?;
             Ok(())
         })?;
 
-        let fact_pages = packer.finish();
-        let num_fact_pages = u64::try_from(fact_pages.len())
-            .map_err(|_| anyhow::anyhow!("fact page count exceeds u64::MAX"))?;
-        sort_index_entries(&mut index_entries);
-        let (eavt_entries, aevt_entries, avet_entries, vaet_entries) = index_entries;
+        let final_pages = packer.finish();
 
         let mut backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
 
-        self.page_cache.invalidate_from(base_fact_page_start);
-        for (i, page_data) in fact_pages.iter().enumerate() {
-            let page_offset =
-                u64::try_from(i).map_err(|_| anyhow::anyhow!("page index {i} exceeds u64::MAX"))?;
+        for page_data in final_pages {
             let page_id = base_fact_page_start
-                .checked_add(page_offset)
+                .checked_add(written_fact_pages)
                 .ok_or_else(|| anyhow::anyhow!("page id overflow writing recompact facts"))?;
-            backend.write_page(page_id, page_data)?;
+            backend.write_page(page_id, &page_data)?;
+            written_fact_pages = written_fact_pages
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("fact page count overflow"))?;
         }
+        let num_fact_pages = written_fact_pages;
+
+        #[cfg(feature = "bench-internals")]
+        CHECKPOINT_DIAGNOSTICS.set(CheckpointConstructionDiagnostics {
+            peak_fact_pages_in_memory: 1,
+            fact_page_visits: num_fact_pages.saturating_mul(4),
+            ..CheckpointConstructionDiagnostics::default()
+        });
 
         let index_start = base_fact_page_start
             .checked_add(num_fact_pages)
             .ok_or_else(|| {
                 anyhow::anyhow!("page count overflow computing recompact index_start")
             })?;
-        let (eavt_root, next1) = self.build_btree(
-            btree_entries(eavt_entries.into_iter())?.into_iter(),
-            &mut *backend,
-            index_start,
+        let mut eavt_entries = Vec::with_capacity(usize::try_from(node_count).unwrap_or(0));
+        visit_fact_refs_in_pages(
+            &*backend,
+            base_fact_page_start,
+            num_fact_pages,
+            &mut |fact, fact_ref| {
+                eavt_entries.push((eavt_key(&fact), fact_ref));
+                Ok(())
+            },
         )?;
-        let (aevt_root, next2) = self.build_btree(
-            btree_entries(aevt_entries.into_iter())?.into_iter(),
-            &mut *backend,
-            next1,
+        eavt_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        observe_checkpoint_typed_entries(eavt_entries.len());
+        let (eavt_root, next1) =
+            self.build_btree_keys(eavt_entries.into_iter(), &mut *backend, index_start)?;
+
+        let mut aevt_entries = Vec::with_capacity(usize::try_from(node_count).unwrap_or(0));
+        visit_fact_refs_in_pages(
+            &*backend,
+            base_fact_page_start,
+            num_fact_pages,
+            &mut |fact, fact_ref| {
+                aevt_entries.push((aevt_key(&fact), fact_ref));
+                Ok(())
+            },
         )?;
-        let (avet_root, next3) = self.build_btree(
-            btree_entries(avet_entries.into_iter())?.into_iter(),
-            &mut *backend,
-            next2,
+        aevt_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        observe_checkpoint_typed_entries(aevt_entries.len());
+        let (aevt_root, next2) =
+            self.build_btree_keys(aevt_entries.into_iter(), &mut *backend, next1)?;
+
+        let mut avet_entries = Vec::with_capacity(usize::try_from(node_count).unwrap_or(0));
+        visit_fact_refs_in_pages(
+            &*backend,
+            base_fact_page_start,
+            num_fact_pages,
+            &mut |fact, fact_ref| {
+                avet_entries.push((avet_key(&fact), fact_ref));
+                Ok(())
+            },
         )?;
-        let (vaet_root, next4) = self.build_btree(
-            btree_entries(vaet_entries.into_iter())?.into_iter(),
-            &mut *backend,
-            next3,
+        avet_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        observe_checkpoint_typed_entries(avet_entries.len());
+        let (avet_root, next3) =
+            self.build_btree_keys(avet_entries.into_iter(), &mut *backend, next2)?;
+
+        let mut vaet_entries = Vec::new();
+        visit_fact_refs_in_pages(
+            &*backend,
+            base_fact_page_start,
+            num_fact_pages,
+            &mut |fact, fact_ref| {
+                if let Some(key) = vaet_key(&fact) {
+                    vaet_entries.push((key, fact_ref));
+                }
+                Ok(())
+            },
         )?;
+        vaet_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        observe_checkpoint_typed_entries(vaet_entries.len());
+        let (vaet_root, next4) =
+            self.build_btree_keys(vaet_entries.into_iter(), &mut *backend, next3)?;
 
         let total_data_pages = next4.saturating_sub(base_fact_page_start);
         backend.sync()?;
@@ -3495,6 +3634,61 @@ fn new_index_entries_with_capacity(capacity: usize) -> SortedIndexEntries {
         Vec::with_capacity(capacity),
         Vec::new(),
     )
+}
+
+fn eavt_key(fact: &Fact) -> EavtKey {
+    EavtKey {
+        entity: fact.entity,
+        attribute: fact.attribute.clone(),
+        valid_from: fact.valid_from,
+        valid_to: fact.valid_to,
+        tx_count: fact.tx_count,
+        value_bytes: encode_value(&fact.value),
+        tx_id: fact.tx_id,
+        asserted: fact.asserted,
+    }
+}
+
+fn aevt_key(fact: &Fact) -> AevtKey {
+    AevtKey {
+        attribute: fact.attribute.clone(),
+        entity: fact.entity,
+        valid_from: fact.valid_from,
+        valid_to: fact.valid_to,
+        tx_count: fact.tx_count,
+        value_bytes: encode_value(&fact.value),
+        tx_id: fact.tx_id,
+        asserted: fact.asserted,
+    }
+}
+
+fn avet_key(fact: &Fact) -> AvetKey {
+    AvetKey {
+        attribute: fact.attribute.clone(),
+        value_bytes: encode_value(&fact.value),
+        valid_from: fact.valid_from,
+        valid_to: fact.valid_to,
+        entity: fact.entity,
+        tx_count: fact.tx_count,
+        tx_id: fact.tx_id,
+        asserted: fact.asserted,
+    }
+}
+
+fn vaet_key(fact: &Fact) -> Option<VaetKey> {
+    let Value::Ref(target) = &fact.value else {
+        return None;
+    };
+    Some(VaetKey {
+        ref_target: *target,
+        attribute: fact.attribute.clone(),
+        valid_from: fact.valid_from,
+        valid_to: fact.valid_to,
+        source_entity: fact.entity,
+        tx_count: fact.tx_count,
+        tx_id: fact.tx_id,
+        asserted: fact.asserted,
+    })
 }
 
 fn push_index_entries_for_fact(entries: &mut SortedIndexEntries, fact: &Fact, fact_ref: FactRef) {
