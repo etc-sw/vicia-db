@@ -459,6 +459,16 @@ impl Drop for Inner {
         // Skip if wal_checkpoint_threshold is usize::MAX — that sentinel suppresses
         // all checkpointing (used by benchmarks to keep WAL entries pending).
         if self.options.wal_checkpoint_threshold == usize::MAX {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let ctx = self
+                    .write_lock
+                    .get_mut()
+                    .unwrap_or_else(|error| error.into_inner());
+                if let WriteContext::File { pfs, .. } = ctx {
+                    pfs.suppress_drop_save();
+                }
+            }
             return;
         }
         if let Ok(mut ctx) = self.write_lock.lock() {
@@ -805,6 +815,22 @@ impl Minigraf {
             );
             executor.execute(cmd)
         }
+    }
+
+    /// Return diagnostics from the most recently started selected-attribute
+    /// aggregate cursor on this database handle.
+    ///
+    /// This repository benchmark hook exists only with the non-default
+    /// `bench-internals` feature. Serial harnesses should read it immediately
+    /// after `execute`; concurrent diagnostic queries use last-writer-wins
+    /// observation and are intentionally outside this hook's contract.
+    #[cfg(feature = "bench-internals")]
+    pub fn last_current_attribute_cursor_diagnostics(
+        &self,
+    ) -> Option<crate::CurrentAttributeCursorDiagnostics> {
+        self.inner
+            .fact_storage
+            .last_current_attribute_cursor_diagnostics()
     }
 
     /// Execute a `(forget ...)` bulk valid-time closure while holding the
@@ -2729,6 +2755,59 @@ mod tests {
         // Facts should still be present
         let facts = db.inner.fact_storage.get_asserted_facts().unwrap();
         assert_eq!(facts.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn max_checkpoint_threshold_preserves_pending_wal_across_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drop-pending.graph");
+        {
+            let seed = Minigraf::open(&path).unwrap();
+            seed.execute("(transact [[:base :bench/selected 1]])")
+                .unwrap();
+            seed.checkpoint().unwrap();
+        }
+        let base_bytes = std::fs::metadata(&path).unwrap().len();
+
+        {
+            let db = Minigraf::open_with_options(
+                &path,
+                OpenOptions {
+                    wal_checkpoint_threshold: usize::MAX,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            db.execute("(transact [[:pending :bench/unrelated 2]])")
+                .unwrap();
+            assert_eq!(db.inner.fact_storage.pending_fact_count(), 1);
+            assert!(Minigraf::wal_path_for(&path).exists());
+        }
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            base_bytes,
+            "usize::MAX drop must not append a committed delta segment"
+        );
+        assert!(
+            Minigraf::wal_path_for(&path).exists(),
+            "usize::MAX drop must leave the WAL as pending authority"
+        );
+
+        let replayed = Minigraf::open_with_options(
+            &path,
+            OpenOptions {
+                wal_checkpoint_threshold: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            replayed.inner.fact_storage.pending_fact_count(),
+            1,
+            "fresh open must replay the pending WAL without publishing it"
+        );
     }
 
     #[test]

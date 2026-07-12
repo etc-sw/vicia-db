@@ -6,6 +6,8 @@ use crate::query::datalog::types::AsOf;
 use crate::storage::index::{AevtKey, FactRef, Indexes, encode_value};
 use anyhow::Result;
 use std::collections::HashSet;
+#[cfg(any(test, feature = "bench-internals"))]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -30,6 +32,36 @@ struct CurrentValueState {
     assertions: std::collections::HashMap<(i64, i64), (u64, FactRef)>,
 }
 
+/// Repository-only counters for one selected-attribute current-view cursor.
+///
+/// The type exists only for tests and the non-default `bench-internals`
+/// feature. It is not part of the default application API or file format.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentAttributeCursorDiagnostics {
+    /// Selected pending AEVT entries cloned into the cursor snapshot.
+    pub selected_pending_entries: u64,
+    /// Inline entry structs plus owned attribute/value bytes in that snapshot.
+    pub selected_pending_snapshot_bytes: u64,
+    /// Logical committed AEVT entries consumed inside the selected range.
+    pub committed_entries_visited: u64,
+    /// Logical pending AEVT entries consumed inside the selected range.
+    pub pending_entries_visited: u64,
+    /// Covering entries that required resolving the exact fact (currently Float).
+    pub exact_fact_resolutions: u64,
+    /// Current-view entity/value rows successfully emitted to the query sink.
+    pub emitted_rows: u64,
+    /// Maximum distinct encoded values retained for one entity.
+    pub peak_entity_values: u64,
+    /// Maximum assertion/scoped-retraction windows retained for one entity.
+    pub peak_entity_windows: u64,
+    /// Number of bounded cursor steps that yielded before completion.
+    pub yield_count: u64,
+    /// Number of calls that resumed a previously yielded cursor.
+    pub resume_count: u64,
+}
+
 pub(crate) struct CurrentAttributeCursor {
     end: Option<AevtKey>,
     next_start: AevtKey,
@@ -39,9 +71,89 @@ pub(crate) struct CurrentAttributeCursor {
     values: std::collections::HashMap<Vec<u8>, CurrentValueState>,
     as_of: Option<AsOf>,
     valid_time: CurrentValidTime,
+    committed_fact_reader: Option<Arc<dyn crate::storage::CommittedFactReader>>,
+    committed_index_reader: Option<Arc<dyn crate::storage::CommittedIndexReader>>,
+    publication_generation: u64,
     last_key: Option<AevtKey>,
     committed_complete: bool,
     complete: bool,
+    yielded: bool,
+    #[cfg(any(test, feature = "bench-internals"))]
+    current_entity_windows: u64,
+    #[cfg(any(test, feature = "bench-internals"))]
+    diagnostics: CurrentAttributeCursorDiagnostics,
+    #[cfg(any(test, feature = "bench-internals"))]
+    diagnostics_slot: Arc<Mutex<Option<CurrentAttributeCursorDiagnostics>>>,
+}
+
+impl CurrentAttributeCursor {
+    fn begin_step(&mut self) {
+        if self.yielded {
+            self.yielded = false;
+            #[cfg(any(test, feature = "bench-internals"))]
+            {
+                self.diagnostics.resume_count = self.diagnostics.resume_count.saturating_add(1);
+            }
+        }
+    }
+
+    fn note_yield(&mut self) {
+        self.yielded = true;
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            self.diagnostics.yield_count = self.diagnostics.yield_count.saturating_add(1);
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    fn note_committed_entry(&mut self) {
+        self.diagnostics.committed_entries_visited =
+            self.diagnostics.committed_entries_visited.saturating_add(1);
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    fn note_pending_entry(&mut self) {
+        self.diagnostics.pending_entries_visited =
+            self.diagnostics.pending_entries_visited.saturating_add(1);
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    fn note_reducer_shape(&mut self, added_window: bool) {
+        if added_window {
+            self.current_entity_windows = self.current_entity_windows.saturating_add(1);
+        }
+        self.diagnostics.peak_entity_values = self
+            .diagnostics
+            .peak_entity_values
+            .max(usize_to_u64(self.values.len()));
+        self.diagnostics.peak_entity_windows = self
+            .diagnostics
+            .peak_entity_windows
+            .max(self.current_entity_windows);
+    }
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+impl CurrentAttributeCursor {
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics(&self) -> CurrentAttributeCursorDiagnostics {
+        self.diagnostics
+    }
+
+    fn persist_diagnostics(&self) {
+        let mut slot = self
+            .diagnostics_slot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *slot = Some(self.diagnostics);
+    }
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+impl Drop for CurrentAttributeCursor {
+    fn drop(&mut self) {
+        self.persist_diagnostics();
+    }
 }
 
 pub(crate) enum CurrentAttributeStep {
@@ -68,6 +180,23 @@ fn pending_key(f: &Fact) -> PendingKey {
     )
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn pending_snapshot_bytes(pending: &[(AevtKey, FactRef)]) -> u64 {
+    pending.iter().fold(0_u64, |total, (key, _)| {
+        let entry = std::mem::size_of::<(AevtKey, FactRef)>();
+        let owned = key
+            .attribute
+            .capacity()
+            .saturating_add(key.value_bytes.capacity());
+        total.saturating_add(usize_to_u64(entry.saturating_add(owned)))
+    })
+}
+
 // ============================================================================
 // Datalog Fact Storage (Phase 3+)
 // ============================================================================
@@ -90,6 +219,9 @@ struct FactData {
     /// Provides bounded range scans over the four committed (on-disk) covering indexes.
     /// Set by `set_committed_index_reader()` after open/migration/checkpoint.
     committed_index_reader: Option<Arc<dyn crate::storage::CommittedIndexReader>>,
+    /// Changes whenever a committed reader or pending publication is replaced.
+    /// Resumable cursors capture this identity and fail if it changes mid-session.
+    publication_generation: u64,
 }
 
 /// In-memory storage for Datalog facts with transaction support
@@ -131,6 +263,9 @@ pub(crate) struct FactStorage {
     data: Arc<RwLock<FactData>>,
     /// Monotonically incrementing batch counter — increments once per transact/retract call.
     tx_counter: Arc<AtomicU64>,
+    #[cfg(any(test, feature = "bench-internals"))]
+    last_current_attribute_cursor_diagnostics:
+        Arc<Mutex<Option<CurrentAttributeCursorDiagnostics>>>,
 }
 
 impl Default for FactStorage {
@@ -149,8 +284,11 @@ impl FactStorage {
                 pending_indexes: Indexes::new(),
                 committed: None,
                 committed_index_reader: None,
+                publication_generation: 0,
             })),
             tx_counter: Arc::new(AtomicU64::new(0)),
+            #[cfg(any(test, feature = "bench-internals"))]
+            last_current_attribute_cursor_diagnostics: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -498,6 +636,7 @@ impl FactStorage {
         d.pending_indexes = Indexes::new();
         d.committed = None;
         d.committed_index_reader = None;
+        d.publication_generation = d.publication_generation.saturating_add(1);
         self.tx_counter.store(0, Ordering::SeqCst);
         Ok(())
     }
@@ -510,6 +649,7 @@ impl FactStorage {
     pub(crate) fn replace_pending_indexes(&self, indexes: Indexes) {
         let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
         d.pending_indexes = indexes;
+        d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
     /// Return the pending (uncommitted) facts held in memory.
@@ -524,6 +664,7 @@ impl FactStorage {
         d.facts.clear();
         d.pending_keys.clear();
         d.pending_indexes = Indexes::new();
+        d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
     /// Set the tx_counter to `max` (used on load to restore from persisted state).
@@ -553,6 +694,7 @@ impl FactStorage {
     ) {
         let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
         d.committed = Some(reader);
+        d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
     /// Set the committed index reader. Called by PersistentFactStorage after
@@ -564,6 +706,7 @@ impl FactStorage {
     ) {
         let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
         d.committed_index_reader = Some(reader);
+        d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
     /// Publish a complete committed-reader replacement and retire the pending
@@ -581,6 +724,7 @@ impl FactStorage {
         d.facts.clear();
         d.pending_keys.clear();
         d.pending_indexes = Indexes::new();
+        d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
     /// Extend an already-published shared committed reader and retire the
@@ -591,6 +735,7 @@ impl FactStorage {
         d.facts.clear();
         d.pending_keys.clear();
         d.pending_indexes = Indexes::new();
+        d.publication_generation = d.publication_generation.saturating_add(1);
     }
 
     /// Count of in-memory (pending, not yet checkpointed) fact records.
@@ -599,6 +744,16 @@ impl FactStorage {
     pub(crate) fn pending_fact_count(&self) -> usize {
         let d = self.data.read().unwrap_or_else(|e| e.into_inner());
         d.facts.len()
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn last_current_attribute_cursor_diagnostics(
+        &self,
+    ) -> Option<CurrentAttributeCursorDiagnostics> {
+        *self
+            .last_current_attribute_cursor_diagnostics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     /// `true` when this storage has a committed reader — some facts live on
@@ -823,6 +978,38 @@ fn resolve_fact_ref(d: &FactData, fr: FactRef) -> Result<Fact> {
     }
 }
 
+/// Resolve against the readers captured when the cursor was created. The
+/// generation check in each step prevents pending slot references from being
+/// reused after checkpoint publication.
+fn resolve_cursor_fact(
+    d: &FactData,
+    cursor: &CurrentAttributeCursor,
+    fact_ref: FactRef,
+) -> Result<Fact> {
+    if fact_ref.page_id == 0 {
+        d.facts
+            .get(usize::from(fact_ref.slot_index))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "pending fact index {} out of bounds for cursor snapshot",
+                    fact_ref.slot_index
+                )
+            })
+    } else {
+        cursor
+            .committed_fact_reader
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "current attribute cursor has no committed fact reader for page {}",
+                    fact_ref.page_id
+                )
+            })?
+            .resolve(fact_ref)
+    }
+}
+
 /// Increment the last byte of a string for prefix upper-bound construction.
 /// Returns `None` if all bytes are 0xFF (true unbounded scan needed).
 /// Used by the production index-driven lookup methods (`get_facts_by_attribute`).
@@ -1042,7 +1229,7 @@ impl FactStorage {
             asserted: false,
         });
         let d = self.data.read().unwrap_or_else(|error| error.into_inner());
-        let pending = match &end {
+        let pending: Vec<(AevtKey, FactRef)> = match &end {
             Some(end) => d
                 .pending_indexes
                 .aevt
@@ -1057,6 +1244,20 @@ impl FactStorage {
                 .map(|(key, fact_ref)| (key.clone(), *fact_ref))
                 .collect(),
         };
+        #[cfg(any(test, feature = "bench-internals"))]
+        let diagnostics = CurrentAttributeCursorDiagnostics {
+            selected_pending_entries: usize_to_u64(pending.len()),
+            selected_pending_snapshot_bytes: pending_snapshot_bytes(&pending),
+            ..CurrentAttributeCursorDiagnostics::default()
+        };
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            let mut slot = self
+                .last_current_attribute_cursor_diagnostics
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *slot = None;
+        }
         CurrentAttributeCursor {
             end,
             next_start: start,
@@ -1066,9 +1267,19 @@ impl FactStorage {
             values: Default::default(),
             as_of: as_of.cloned(),
             valid_time,
+            committed_fact_reader: d.committed.clone(),
+            committed_index_reader: d.committed_index_reader.clone(),
+            publication_generation: d.publication_generation,
             last_key: None,
             committed_complete: false,
             complete: false,
+            yielded: false,
+            #[cfg(any(test, feature = "bench-internals"))]
+            current_entity_windows: 0,
+            #[cfg(any(test, feature = "bench-internals"))]
+            diagnostics,
+            #[cfg(any(test, feature = "bench-internals"))]
+            diagnostics_slot: self.last_current_attribute_cursor_diagnostics.clone(),
         }
     }
 
@@ -1078,10 +1289,28 @@ impl FactStorage {
         max_entries: usize,
         visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
     ) -> Result<CurrentAttributeStep> {
+        cursor.begin_step();
+        let result = self.step_current_attribute_cursor_inner(cursor, max_entries, visit);
+        #[cfg(any(test, feature = "bench-internals"))]
+        cursor.persist_diagnostics();
+        result
+    }
+
+    fn step_current_attribute_cursor_inner(
+        &self,
+        cursor: &mut CurrentAttributeCursor,
+        max_entries: usize,
+        visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
+    ) -> Result<CurrentAttributeStep> {
         if cursor.complete {
             return Ok(CurrentAttributeStep::Complete);
         }
         let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        if d.publication_generation != cursor.publication_generation {
+            anyhow::bail!(
+                "current attribute cursor publication changed during the aggregate session"
+            );
+        }
         let mut processed = 0usize;
 
         let flush_entity = |cursor: &mut CurrentAttributeCursor,
@@ -1104,7 +1333,12 @@ impl FactStorage {
                         continue;
                     }
                     let value = if encoded.first() == Some(&0x03) {
-                        resolve_fact_ref(&d, *fact_ref)?.value
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        {
+                            cursor.diagnostics.exact_fact_resolutions =
+                                cursor.diagnostics.exact_fact_resolutions.saturating_add(1);
+                        }
+                        resolve_cursor_fact(&d, cursor, *fact_ref)?.value
                     } else {
                         decode_index_value(encoded)?
                     };
@@ -1113,9 +1347,18 @@ impl FactStorage {
             }
             for value in &output {
                 visit(entity, value)?;
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    cursor.diagnostics.emitted_rows =
+                        cursor.diagnostics.emitted_rows.saturating_add(1);
+                }
             }
             cursor.values.clear();
             cursor.current_entity = None;
+            #[cfg(any(test, feature = "bench-internals"))]
+            {
+                cursor.current_entity_windows = 0;
+            }
             Ok(())
         };
 
@@ -1135,7 +1378,11 @@ impl FactStorage {
                 flush_entity(cursor, visit)?;
             }
             cursor.current_entity = Some(key.entity);
-            reduce_current_entry(&mut cursor.values, key, fact_ref);
+            let added_window = reduce_current_entry(&mut cursor.values, key, fact_ref);
+            #[cfg(any(test, feature = "bench-internals"))]
+            cursor.note_reducer_shape(added_window);
+            #[cfg(not(any(test, feature = "bench-internals")))]
+            let _ = added_window;
             cursor.last_key = Some(key.clone());
             Ok(())
         };
@@ -1144,42 +1391,45 @@ impl FactStorage {
             let last_key = cursor.last_key.clone();
             let next_start = cursor.next_start.clone();
             let end = cursor.end.clone();
-            let complete = d
-                .committed_index_reader
-                .as_ref()
-                .map_or(Ok(true), |reader| {
-                    reader.visit_aevt_entries(&next_start, end.as_ref(), &mut |key, fact_ref| {
-                        if last_key.as_ref().is_some_and(|last| key <= last) {
-                            return Ok(true);
-                        }
-                        while cursor.pending_position < cursor.pending.len()
-                            && cursor
-                                .pending
-                                .get(cursor.pending_position)
-                                .is_some_and(|(pending_key, _)| pending_key < key)
-                        {
-                            let (pending_key, pending_ref) = cursor
-                                .pending
-                                .get(cursor.pending_position)
-                                .cloned()
-                                .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
-                            accept(cursor, &pending_key, pending_ref, visit)?;
-                            cursor.pending_position += 1;
-                            processed += 1;
-                            if processed >= max_entries {
-                                return Ok(false);
-                            }
-                        }
-                        accept(cursor, key, fact_ref, visit)?;
+            let committed_index_reader = cursor.committed_index_reader.clone();
+            let complete = committed_index_reader.as_ref().map_or(Ok(true), |reader| {
+                reader.visit_aevt_entries(&next_start, end.as_ref(), &mut |key, fact_ref| {
+                    if last_key.as_ref().is_some_and(|last| key <= last) {
+                        return Ok(true);
+                    }
+                    while cursor.pending_position < cursor.pending.len()
+                        && cursor
+                            .pending
+                            .get(cursor.pending_position)
+                            .is_some_and(|(pending_key, _)| pending_key < key)
+                    {
+                        let (pending_key, pending_ref) = cursor
+                            .pending
+                            .get(cursor.pending_position)
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        cursor.note_pending_entry();
+                        accept(cursor, &pending_key, pending_ref, visit)?;
+                        cursor.pending_position += 1;
                         processed += 1;
-                        Ok(processed < max_entries)
-                    })
-                })?;
+                        if processed >= max_entries {
+                            return Ok(false);
+                        }
+                    }
+                    #[cfg(any(test, feature = "bench-internals"))]
+                    cursor.note_committed_entry();
+                    accept(cursor, key, fact_ref, visit)?;
+                    processed += 1;
+                    Ok(processed < max_entries)
+                })
+            })?;
             cursor.committed_complete = complete;
             if let Some(last) = &cursor.last_key {
                 cursor.next_start = last.clone();
             }
             if !complete {
+                cursor.note_yield();
                 return Ok(CurrentAttributeStep::Yielded { entries: processed });
             }
         }
@@ -1190,11 +1440,14 @@ impl FactStorage {
                 .get(cursor.pending_position)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+            #[cfg(any(test, feature = "bench-internals"))]
+            cursor.note_pending_entry();
             accept(cursor, &key, fact_ref, visit)?;
             cursor.pending_position += 1;
             processed += 1;
         }
         if cursor.pending_position < cursor.pending.len() {
+            cursor.note_yield();
             return Ok(CurrentAttributeStep::Yielded { entries: processed });
         }
         flush_entity(cursor, visit)?;
@@ -1238,8 +1491,12 @@ fn reduce_current_entry(
     values: &mut std::collections::HashMap<Vec<u8>, CurrentValueState>,
     key: &AevtKey,
     fact_ref: FactRef,
-) {
+) -> bool {
     let state = values.entry(key.value_bytes.clone()).or_default();
+    let windows_before = state
+        .assertions
+        .len()
+        .saturating_add(state.max_scoped_retract_tx.len());
     if key.asserted {
         state
             .assertions
@@ -1259,6 +1516,11 @@ fn reduce_current_entry(
             .and_modify(|tx| *tx = (*tx).max(key.tx_count))
             .or_insert(key.tx_count);
     }
+    state
+        .assertions
+        .len()
+        .saturating_add(state.max_scoped_retract_tx.len())
+        > windows_before
 }
 
 fn decode_index_value(encoded: &[u8]) -> Result<Value> {
@@ -2831,5 +3093,304 @@ mod tests {
         );
         assert_eq!(result[0].valid_from, w2.0);
         assert_eq!(result[0].valid_to, w2.1);
+    }
+
+    #[test]
+    fn current_attribute_cursor_ignores_one_million_unrelated_pending_entries() {
+        const UNRELATED: u128 = 1_000_000;
+        let storage = FactStorage::new();
+        {
+            let mut data = storage.data.write().unwrap();
+            for index in 0..UNRELATED {
+                let attribute = if index < UNRELATED / 2 {
+                    ":a/noise"
+                } else {
+                    ":z/noise"
+                };
+                data.pending_indexes.aevt.insert(
+                    AevtKey {
+                        attribute: attribute.to_owned(),
+                        entity: uuid::Uuid::from_u128(index.saturating_add(1)),
+                        valid_from: 0,
+                        valid_to: VALID_TIME_FOREVER,
+                        tx_count: 1,
+                        value_bytes: encode_value(&Value::Integer(1)),
+                        tx_id: 1,
+                        asserted: true,
+                    },
+                    FactRef {
+                        page_id: 0,
+                        slot_index: 0,
+                    },
+                );
+            }
+        }
+
+        let mut cursor = storage.current_attribute_cursor(
+            &":m/selected".to_owned(),
+            None,
+            CurrentValidTime::Any,
+        );
+        let initial = cursor.diagnostics();
+        assert_eq!(initial.selected_pending_entries, 0);
+        assert_eq!(initial.selected_pending_snapshot_bytes, 0);
+
+        let step = storage
+            .step_current_attribute_cursor(&mut cursor, usize::MAX, &mut |_, _| Ok(()))
+            .unwrap();
+        assert!(matches!(step, CurrentAttributeStep::Complete));
+        let diagnostics = cursor.diagnostics();
+        assert_eq!(diagnostics.pending_entries_visited, 0);
+        assert_eq!(diagnostics.committed_entries_visited, 0);
+        assert_eq!(diagnostics.emitted_rows, 0);
+        assert_eq!(diagnostics.peak_entity_values, 0);
+        assert_eq!(diagnostics.peak_entity_windows, 0);
+    }
+
+    #[test]
+    fn selected_pending_control_counts_snapshot_visits_yields_and_reducer_peak() {
+        const SELECTED: usize = 10_000;
+        const STEP: usize = 257;
+        let storage = FactStorage::new();
+        let facts = (0..SELECTED)
+            .map(|index| {
+                (
+                    uuid::Uuid::from_u128(u128::try_from(index).unwrap().saturating_add(1)),
+                    ":m/selected".to_owned(),
+                    Value::Integer(i64::try_from(index).unwrap()),
+                )
+            })
+            .collect();
+        storage.transact(facts, None).unwrap();
+
+        let mut cursor = storage.current_attribute_cursor(
+            &":m/selected".to_owned(),
+            None,
+            CurrentValidTime::Any,
+        );
+        let initial = cursor.diagnostics();
+        assert_eq!(initial.selected_pending_entries, 10_000);
+        assert!(
+            initial.selected_pending_snapshot_bytes
+                >= 10_000_u64.saturating_mul(
+                    u64::try_from(std::mem::size_of::<(AevtKey, FactRef,)>()).unwrap()
+                )
+        );
+
+        let mut emitted = 0_u64;
+        loop {
+            let step = storage
+                .step_current_attribute_cursor(&mut cursor, STEP, &mut |_, _| {
+                    emitted = emitted.saturating_add(1);
+                    Ok(())
+                })
+                .unwrap();
+            if matches!(step, CurrentAttributeStep::Complete) {
+                break;
+            }
+        }
+        let diagnostics = cursor.diagnostics();
+        assert_eq!(emitted, 10_000);
+        assert_eq!(diagnostics.pending_entries_visited, 10_000);
+        assert_eq!(diagnostics.emitted_rows, 10_000);
+        assert_eq!(diagnostics.peak_entity_values, 1);
+        assert_eq!(diagnostics.peak_entity_windows, 1);
+        assert!(diagnostics.yield_count > 0);
+        assert_eq!(diagnostics.resume_count, diagnostics.yield_count);
+    }
+
+    fn cursor_semantic_fact(
+        entity: uuid::Uuid,
+        attribute: &str,
+        value: Value,
+        tx_count: u64,
+        valid_from: i64,
+        valid_to: i64,
+        asserted: bool,
+    ) -> Fact {
+        Fact {
+            entity,
+            attribute: attribute.to_owned(),
+            value,
+            tx_id: tx_count,
+            tx_count,
+            valid_from,
+            valid_to,
+            asserted,
+        }
+    }
+
+    fn collect_cursor_values(
+        storage: &FactStorage,
+        as_of: Option<&AsOf>,
+        valid_time: CurrentValidTime,
+    ) -> (Vec<(EntityId, Value)>, CurrentAttributeCursorDiagnostics) {
+        let mut cursor =
+            storage.current_attribute_cursor(&":m/selected".to_owned(), as_of, valid_time);
+        let mut values = Vec::new();
+        loop {
+            let step = storage
+                .step_current_attribute_cursor(&mut cursor, 2, &mut |entity, value| {
+                    values.push((entity, value.clone()));
+                    Ok(())
+                })
+                .unwrap();
+            if matches!(step, CurrentAttributeStep::Complete) {
+                return (values, cursor.diagnostics());
+            }
+        }
+    }
+
+    #[test]
+    fn current_attribute_cursor_isolates_mixed_temporal_ref_and_float_entries() {
+        let storage = FactStorage::new();
+        let scoped = uuid::Uuid::from_u128(10);
+        let unscoped = uuid::Uuid::from_u128(20);
+        let ref_entity = uuid::Uuid::from_u128(30);
+        let float_entity = uuid::Uuid::from_u128(40);
+        let target = uuid::Uuid::from_u128(99);
+        let facts = [
+            cursor_semantic_fact(
+                uuid::Uuid::from_u128(1),
+                ":a/noise",
+                Value::Float(999.0),
+                1,
+                0,
+                VALID_TIME_FOREVER,
+                true,
+            ),
+            cursor_semantic_fact(scoped, ":m/selected", Value::Integer(10), 1, 0, 100, true),
+            cursor_semantic_fact(scoped, ":m/selected", Value::Integer(10), 2, 0, 100, false),
+            cursor_semantic_fact(scoped, ":m/selected", Value::Integer(20), 3, 100, 200, true),
+            cursor_semantic_fact(
+                unscoped,
+                ":m/selected",
+                Value::Keyword(":active".to_owned()),
+                1,
+                0,
+                VALID_TIME_FOREVER,
+                true,
+            ),
+            cursor_semantic_fact(
+                unscoped,
+                ":m/selected",
+                Value::Keyword(":active".to_owned()),
+                2,
+                RETRACT_ALL_VALID_FROM,
+                VALID_TIME_FOREVER,
+                false,
+            ),
+            cursor_semantic_fact(
+                ref_entity,
+                ":m/selected",
+                Value::Ref(target),
+                1,
+                0,
+                VALID_TIME_FOREVER,
+                true,
+            ),
+            cursor_semantic_fact(
+                float_entity,
+                ":m/selected",
+                Value::Float(2.5),
+                1,
+                0,
+                VALID_TIME_FOREVER,
+                true,
+            ),
+            cursor_semantic_fact(
+                uuid::Uuid::from_u128(100),
+                ":z/noise",
+                Value::Ref(target),
+                1,
+                0,
+                VALID_TIME_FOREVER,
+                true,
+            ),
+        ];
+        for fact in facts {
+            assert!(storage.load_fact(fact).unwrap());
+        }
+
+        let (current, diagnostics) =
+            collect_cursor_values(&storage, None, CurrentValidTime::At(150));
+        assert_eq!(current.len(), 3);
+        assert!(current.contains(&(scoped, Value::Integer(20))));
+        assert!(current.contains(&(ref_entity, Value::Ref(target))));
+        assert!(current.contains(&(float_entity, Value::Float(2.5))));
+        assert_eq!(diagnostics.selected_pending_entries, 7);
+        assert_eq!(diagnostics.pending_entries_visited, 7);
+        assert_eq!(diagnostics.exact_fact_resolutions, 1);
+        assert_eq!(diagnostics.emitted_rows, 3);
+        assert_eq!(diagnostics.peak_entity_values, 2);
+        assert_eq!(diagnostics.peak_entity_windows, 3);
+
+        let (historical, historical_diagnostics) =
+            collect_cursor_values(&storage, Some(&AsOf::Counter(1)), CurrentValidTime::At(50));
+        assert_eq!(historical.len(), 4);
+        assert!(historical.contains(&(scoped, Value::Integer(10))));
+        assert!(historical.contains(&(unscoped, Value::Keyword(":active".to_owned()))));
+        assert!(historical.contains(&(ref_entity, Value::Ref(target))));
+        assert!(historical.contains(&(float_entity, Value::Float(2.5))));
+        assert_eq!(historical_diagnostics.pending_entries_visited, 7);
+        assert_eq!(historical_diagnostics.exact_fact_resolutions, 1);
+        assert_eq!(historical_diagnostics.emitted_rows, 4);
+    }
+
+    #[test]
+    fn cursor_diagnostics_survive_errors_and_publication_changes_fail_closed() {
+        let storage = FactStorage::new();
+        storage
+            .transact(
+                vec![(
+                    uuid::Uuid::from_u128(1),
+                    ":m/selected".to_owned(),
+                    Value::Integer(1),
+                )],
+                None,
+            )
+            .unwrap();
+
+        let mut visitor_error_cursor = storage.current_attribute_cursor(
+            &":m/selected".to_owned(),
+            None,
+            CurrentValidTime::Any,
+        );
+        let error = match storage.step_current_attribute_cursor(
+            &mut visitor_error_cursor,
+            1,
+            &mut |_, _| anyhow::bail!("injected aggregate sink failure"),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("injected aggregate sink failure must propagate"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("injected aggregate sink failure")
+        );
+        let failed = storage.last_current_attribute_cursor_diagnostics().unwrap();
+        assert_eq!(failed.selected_pending_entries, 1);
+        assert_eq!(failed.pending_entries_visited, 1);
+        assert_eq!(failed.emitted_rows, 0);
+
+        let mut publication_cursor = storage.current_attribute_cursor(
+            &":m/selected".to_owned(),
+            None,
+            CurrentValidTime::Any,
+        );
+        storage.post_checkpoint_clear();
+        let error =
+            match storage
+                .step_current_attribute_cursor(&mut publication_cursor, 1, &mut |_, _| Ok(()))
+            {
+                Err(error) => error,
+                Ok(_) => panic!("publication replacement must invalidate the cursor"),
+            };
+        assert!(error.to_string().contains("publication changed"));
+        let changed = storage.last_current_attribute_cursor_diagnostics().unwrap();
+        assert_eq!(changed.selected_pending_entries, 1);
+        assert_eq!(changed.pending_entries_visited, 0);
+        assert_eq!(changed.emitted_rows, 0);
     }
 }

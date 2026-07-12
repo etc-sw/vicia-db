@@ -2751,6 +2751,15 @@ mod tests {
             anyhow::bail!("injected committed index read failure")
         }
 
+        fn visit_aevt_entries(
+            &self,
+            _: &AevtKey,
+            _: Option<&AevtKey>,
+            _: &mut dyn FnMut(&AevtKey, FactRef) -> anyhow::Result<bool>,
+        ) -> anyhow::Result<bool> {
+            anyhow::bail!("injected committed index read failure")
+        }
+
         fn range_scan_avet(
             &self,
             _: &AvetKey,
@@ -3623,6 +3632,47 @@ mod tests {
             stream_calls.load(Ordering::SeqCst),
             0,
             "an attribute-selective failure must not trigger a committed full scan"
+        );
+    }
+
+    #[test]
+    fn aggregate_cursor_index_error_is_not_replaced_by_full_scan() {
+        let fact = Fact::with_valid_time(
+            Uuid::new_v4(),
+            ":bench/name".to_string(),
+            Value::Integer(1),
+            1000,
+            1,
+            0,
+            crate::graph::types::VALID_TIME_FOREVER,
+        );
+        let storage = FactStorage::new();
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        storage.set_committed_reader(Arc::new(FallbackCapableFactReader {
+            facts: vec![fact],
+            stream_calls: stream_calls.clone(),
+            fail_resolve: false,
+        }));
+        storage.set_committed_index_reader(Arc::new(FailingCommittedIndexReader));
+        let executor = DatalogExecutor::new(storage);
+        let command =
+            parse_datalog_command("(query [:find (count ?v) :where [?e :bench/name ?v]])").unwrap();
+
+        let error = match executor.execute(command) {
+            Err(error) => error,
+            Ok(_) => panic!("aggregate cursor index failure must fail the query"),
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected committed index read failure"),
+            "the original aggregate cursor failure must remain visible"
+        );
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "an aggregate cursor failure must not trigger a committed full scan"
         );
     }
 

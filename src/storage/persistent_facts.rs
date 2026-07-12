@@ -2768,6 +2768,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.dirty
     }
 
+    /// Suppress the fallback auto-save in [`Drop`] when the owning database
+    /// explicitly keeps WAL entries pending (the `usize::MAX` benchmark
+    /// sentinel). The WAL remains the durable authority and will replay on the
+    /// next open.
+    pub(crate) fn suppress_drop_save(&mut self) {
+        self.dirty = false;
+    }
+
     /// Inspect the logical packed-fact range selected by the loaded v11 base.
     #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
     pub(crate) fn browser_base_fact_range(&self) -> Result<BrowserPageRange> {

@@ -92,9 +92,17 @@ harness = false
 name = "vetch_cadence_benchmark"
 harness = false
 
+[[bin]]
+name = "pending-isolation-bench"
+path = "src/bin/pending_isolation_bench.rs"
+required-features = ["bench-internals"]
+
 [features]
 default = []
 wasm = []
+# Non-default diagnostics used only by repository benchmark harnesses. This
+# feature does not alter the default public API or the on-disk format.
+bench-internals = []
 browser = [
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",

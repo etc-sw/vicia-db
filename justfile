@@ -23,3 +23,11 @@ db-ref-bench-smoke OUTPUT_DIR="target/ref-db-bench/smoke":
 # Run the 1M/20-sample reference comparison.
 db-ref-bench-full OUTPUT_DIR="target/ref-db-bench/full":
     ./scripts/run-ref-db-bench.sh full "{{OUTPUT_DIR}}"
+
+# Prove selected aggregates ignore unrelated pending WAL facts (1M committed base).
+pending-isolation-smoke OUTPUT_DIR="target/pending-isolation/smoke":
+    ./scripts/run-pending-isolation-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run the clean-source 0/10K/100K/1M unrelated pending acceptance matrix.
+pending-isolation-full OUTPUT_DIR="target/pending-isolation/full":
+    ./scripts/run-pending-isolation-bench.sh full "{{OUTPUT_DIR}}"
