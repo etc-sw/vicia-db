@@ -519,12 +519,40 @@ impl FactStorage {
 
     /// Set the committed index reader. Called by PersistentFactStorage after
     /// each open/migration/checkpoint so queries can range-scan the on-disk B+tree.
+    #[cfg(test)]
     pub(crate) fn set_committed_index_reader(
         &self,
         reader: Arc<dyn crate::storage::CommittedIndexReader>,
     ) {
         let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
         d.committed_index_reader = Some(reader);
+    }
+
+    /// Publish a complete committed-reader replacement and retire the pending
+    /// view under one storage write barrier. Readers therefore observe either
+    /// the pre-checkpoint pending facts or the post-checkpoint committed view,
+    /// never a mixture of both.
+    pub(crate) fn publish_committed_readers(
+        &self,
+        fact_reader: Arc<dyn crate::storage::CommittedFactReader>,
+        index_reader: Option<Arc<dyn crate::storage::CommittedIndexReader>>,
+    ) {
+        let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
+        d.committed = Some(fact_reader);
+        d.committed_index_reader = index_reader;
+        d.facts.clear();
+        d.pending_keys.clear();
+        d.pending_indexes = Indexes::new();
+    }
+
+    /// Extend an already-published shared committed reader and retire the
+    /// matching pending facts under the same barrier used by point queries.
+    pub(crate) fn publish_incremental_committed(&self, extend: impl FnOnce()) {
+        let mut d = self.data.write().unwrap_or_else(|e| e.into_inner());
+        extend();
+        d.facts.clear();
+        d.pending_keys.clear();
+        d.pending_indexes = Indexes::new();
     }
 
     /// Count of in-memory (pending, not yet checkpointed) fact records.

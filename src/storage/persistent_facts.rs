@@ -1058,9 +1058,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
             None => base_loader,
         };
-        self.storage.set_committed_reader(fact_reader);
 
         if header.eavt_root_page == 0 {
+            self.storage.publish_committed_readers(fact_reader, None);
             self.resident_delta_segment_count = delta_segments.len();
             self.resident_delta_facts = resident_delta_facts;
             self.resident_delta_indexes = resident_delta_indexes;
@@ -1096,7 +1096,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             }
             None => base_index_reader,
         };
-        self.storage.set_committed_index_reader(index_reader);
+        self.storage
+            .publish_committed_readers(fact_reader, Some(index_reader));
         self.resident_delta_segment_count = delta_segments.len();
         self.resident_delta_facts = resident_delta_facts;
         self.resident_delta_indexes = resident_delta_indexes;
@@ -1112,19 +1113,22 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .resident_delta_indexes
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Resident delta index state is missing"))?;
-        let payload = segment.payload();
-        resident_delta_facts
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .extend(payload.facts().iter().cloned());
-        resident_delta_indexes
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .extend_from_entries(&payload.eavt, &payload.aevt, &payload.avet, &payload.vaet);
-        self.resident_delta_segment_count = self
+        let next_segment_count = self
             .resident_delta_segment_count
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Resident delta segment count overflow"))?;
+        let payload = segment.payload();
+        self.storage.publish_incremental_committed(|| {
+            resident_delta_facts
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend(payload.facts().iter().cloned());
+            resident_delta_indexes
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_from_entries(&payload.eavt, &payload.aevt, &payload.avet, &payload.vaet);
+        });
+        self.resident_delta_segment_count = next_segment_count;
         Ok(())
     }
 
