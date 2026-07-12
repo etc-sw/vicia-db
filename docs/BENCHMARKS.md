@@ -1417,40 +1417,63 @@ The clean production-path reference rerun at source `aaf32a9` also measured a
 are in
 `benchmarks/baselines/ref-db/2026-07-12-hal7800-v3-pending-isolation-full/`.
 
-## Unrelated Pending Aggregate Isolation (2026-07-12)
+## Unrelated Pending Aggregate Isolation and Ownership (2026-07-12)
 
-`vicia.pending-isolation.v1` starts from one committed 1M-fact selected
-attribute, clones that `.graph` per variant, and leaves unrelated writes in the
-WAL-backed pending layer. Every variant opens in a fresh child, records RSS and
-smaps after open, performs one excluded warmup, then runs 20 selected
-count/sum aggregates. The non-default `bench-internals` build records cursor
-ownership and reducer counters; the default API and v11 format are unchanged.
+`vicia.pending-isolation.v2` retains the v1 selected-cursor gate and adds a
+separate fresh-child memory audit. The audit opens the WAL-backed variant,
+accounts live ownership without cloning, samples RSS, calls glibc
+`malloc_trim(0)` while the database remains live, then drops the database and
+trims again. This separates live database state from allocator-retained WAL
+replay memory. Non-glibc hosts preserve the ownership receipt but report the
+trim step as unsupported. The default API and v11 format remain unchanged.
 
-HAL7800, source `aaf32a9`, exact selected count/checksum
+HAL7800, clean source `84495e6`, exact selected count/checksum
 `1,000,000 / 499999500000`:
 
-| Pending shape | Open RSS | Query RSS delta | p50 | p95 | MAD | Selected snapshot entries / bytes | Pending visits | Peak values / windows |
+| Pending shape | Open RSS | Query RSS delta | p50 | p95 | Live DB after trim | Accounted live payload | Container/allocator residual | Replay-retained RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| unrelated 0 | 3.133 MiB | 1.000 MiB | 532.116 ms | 550.487 ms | 7.618 ms | 0 / 0 | 0 | 1 / 1 |
-| unrelated 10K | 15.355 MiB | 0.125 MiB | 535.776 ms | 562.093 ms | 12.603 ms | 0 / 0 | 0 | 1 / 1 |
-| unrelated 100K | 124.395 MiB | 0.125 MiB | 525.325 ms | 553.748 ms | 7.740 ms | 0 / 0 | 0 | 1 / 1 |
-| unrelated 1M | 1,294.980 MiB | 0.125 MiB | 555.631 ms | 572.429 ms | 12.439 ms | 0 / 0 | 0 | 1 / 1 |
-| selected control 10K | 15.355 MiB | 1.688 MiB | 552.314 ms | 573.054 ms | 6.178 ms | 10,000 / 1,440,000 | 10,000 | 1 / 1 |
+| unrelated 0 | 3.004 MiB | 1.125 MiB | 528.272 ms | 565.683 ms | 0.211 MiB | 0 | 0.211 MiB | 0 |
+| unrelated 10K | 15.480 MiB | 0.125 MiB | 554.574 ms | 580.559 ms | 11.273 MiB | 7.711 MiB | 3.562 MiB | 1.238 MiB |
+| unrelated 100K | 124.398 MiB | 0.125 MiB | 518.281 ms | 552.322 ms | 107.703 MiB | 70.770 MiB | 36.933 MiB | 13.770 MiB |
+| unrelated 1M | 1,295.113 MiB | 0.125 MiB | 514.956 ms | 540.242 ms | 1,152.316 MiB | 747.949 MiB | 404.367 MiB | 139.617 MiB |
+| selected control 10K | 15.480 MiB | 1.566 MiB | 546.905 ms | 572.908 ms | 11.273 MiB | 7.664 MiB | 3.610 MiB | 1.242 MiB |
 
-All unrelated variants visited exactly 1M committed selected entries, emitted
-exactly 1M selected rows, performed zero exact fact resolutions, and had zero
-yield/resume steps. Their selected snapshot and pending visits remained exactly
-equal to the zero-pending variant. The 1M unrelated case increased whole-store
-open RSS because pending facts and their four in-memory indexes are resident,
-but it did not enter the selected cursor or increase query-owned memory. The
-selected 10K control proves the counters are sensitive rather than stuck at
-zero.
+The 1M unrelated live payload decomposes as follows. Owned byte counts include
+inline container payload plus exact `String`/`Vec<u8>` capacities; B-tree node
+headers, hash control bytes, allocation size-class rounding, and allocator
+metadata remain in the explicit residual.
 
-The full validator passed the ±2 MiB query-RSS gate, the ≤10% p50 regression
-gate, and p95 ≤115% of p50 for every unrelated variant. Raw elapsed/RSS samples,
-smaps breakdowns, diagnostics, provenance, and acceptance policy are preserved
-in
-`benchmarks/baselines/pending-isolation/2026-07-12-hal7800-full/receipt.json`.
+| Live owner | Accounted MiB | Entries | Attribute buffers | Encoded-value buffers |
+|---|---:|---:|---:|---:|
+| Pending `Vec<Fact>` | 127.259 | 1,000,000 | 1,000,000 | 0 |
+| Duplicate-key `HashSet` | 205.842 | 1,000,000 | 1,000,000 | 1,000,000 |
+| EAVT `BTreeMap` | 138.283 | 1,000,000 | 1,000,000 | 1,000,000 |
+| AEVT `BTreeMap` | 138.283 | 1,000,000 | 1,000,000 | 1,000,000 |
+| AVET `BTreeMap` | 138.283 | 1,000,000 | 1,000,000 | 1,000,000 |
+| VAET | 0 | 0 | 0 | 0 |
+
+The primary cause is the live pending representation: each Integer fact has
+five structural owners and creates five attribute buffers plus four encoded
+value buffers, or 9,000,000 small heap allocations at 1M facts. This directly
+accounts for 747.949 MiB. The remaining 404.367 MiB is consistent with those
+small allocations' size-class/metadata cost plus B-tree nodes and hash-table
+controls; that attribution is an inference from the exact allocation counts,
+not a byte-exact split inside the residual.
+
+WAL replay is a secondary, separately measured cost. `WalReader::read_entries`
+retains all 1,000 decoded transactions / 1M facts (124.665 MiB accounted) while
+`load_fact` clones them into the live pending owners. After the decoded batch is
+dropped, glibc still retained 139.617 MiB of RSS until `malloc_trim`. The fresh
+process peak was 1,322.551 MiB. Streaming replay can remove that transient and
+retained portion, but it cannot fix the dominant 1,152.316 MiB live database
+shape by itself.
+
+All unrelated variants still recorded zero selected pending snapshot
+entries/bytes and zero pending visits. The full validator passed exact
+count/checksum, ±2 MiB query RSS, ≤10% p50 regression, and p95 ≤115% of p50.
+Raw samples, smaps, cursor diagnostics, live component accounting, allocation
+counts, decoded-WAL overlap, trim deltas, and provenance are preserved in
+`benchmarks/baselines/pending-isolation/2026-07-12-hal7800-memory-full/receipt.json`.
 
 Reproduce independently of the cross-database table:
 
