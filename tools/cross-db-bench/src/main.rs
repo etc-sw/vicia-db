@@ -59,6 +59,35 @@ impl Engine {
             Self::Redb => "4.1.0",
         }
     }
+
+    fn supports_engine_aggregate(self) -> bool {
+        !matches!(self, Self::Redb)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScanWorkload {
+    EngineAggregate,
+    MaterializedScan,
+}
+
+impl ScanWorkload {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "engine-aggregate" => Ok(Self::EngineAggregate),
+            "materialized-scan" => Ok(Self::MaterializedScan),
+            _ => bail!(
+                "unknown scan workload {value}; expected engine-aggregate or materialized-scan"
+            ),
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::EngineAggregate => "engineAggregate",
+            Self::MaterializedScan => "materializedScan",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -91,9 +120,10 @@ struct Metrics {
     reopen: SampleStats,
     durable_append: SampleStats,
     point_read: SampleStats,
-    full_scan: SampleStats,
+    engine_aggregate: Option<ScanMeasurement>,
+    materialized_scan: ScanMeasurement,
     total_ms: f64,
-    peak_rss_bytes: Option<u64>,
+    stress_process_peak_rss_bytes: Option<u64>,
     primary_file_bytes: u64,
     total_storage_bytes: u64,
     bytes_per_fact: f64,
@@ -103,9 +133,11 @@ struct Metrics {
 #[serde(rename_all = "camelCase")]
 struct Correctness {
     expected_count: u64,
-    actual_count: u64,
     expected_checksum: i128,
-    actual_checksum: i128,
+    materialized_count: u64,
+    materialized_checksum: i128,
+    engine_aggregate_count: Option<u64>,
+    engine_aggregate_checksum: Option<i128>,
     repeated_reopen_cycles: u64,
     integrity_check: String,
     passed: bool,
@@ -144,11 +176,19 @@ struct RunMeasurements {
     reopen_ms: Vec<f64>,
     append_ms: Vec<f64>,
     read_ms: Vec<f64>,
-    scan_ms: f64,
-    count: u64,
-    checksum: i128,
     integrity: String,
     primary_path: PathBuf,
+}
+
+#[derive(Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanMeasurement {
+    workload: String,
+    execution_boundary: String,
+    elapsed_ms: f64,
+    peak_rss_bytes: Option<u64>,
+    count: u64,
+    checksum: i128,
 }
 
 #[derive(Serialize)]
@@ -164,8 +204,116 @@ struct CrashReceipt {
     passed: bool,
 }
 
+fn measure_scan_in_child(
+    engine: Engine,
+    db_dir: &Path,
+    workload: ScanWorkload,
+) -> Result<ScanMeasurement> {
+    let output = Command::new(std::env::current_exe()?)
+        .arg("scan")
+        .arg(engine.id())
+        .arg(db_dir)
+        .arg(match workload {
+            ScanWorkload::EngineAggregate => "engine-aggregate",
+            ScanWorkload::MaterializedScan => "materialized-scan",
+        })
+        .output()
+        .with_context(|| format!("launch isolated {} scan", engine.id()))?;
+    if !output.status.success() {
+        bail!(
+            "isolated {} {} failed: {}",
+            engine.id(),
+            workload.id(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("decode isolated scan measurement")
+}
+
+fn measure_scan(engine: Engine, db_dir: &Path, workload: ScanWorkload) -> Result<ScanMeasurement> {
+    if matches!(workload, ScanWorkload::EngineAggregate) && !engine.supports_engine_aggregate() {
+        bail!("{} has no query-engine aggregate boundary", engine.id());
+    }
+
+    let (count, checksum, execution_boundary, elapsed_ms) = match engine {
+        Engine::Vicia => {
+            let db = OpenOptions::new().path(db_dir.join("vicia.graph")).open()?;
+            let started = Instant::now();
+            let (count, checksum) = match workload {
+                ScanWorkload::EngineAggregate => vicia_aggregate(&db)?,
+                ScanWorkload::MaterializedScan => vicia_scan(&db)?,
+            };
+            let boundary = match workload {
+                ScanWorkload::EngineAggregate => "datalog-count-sum-scalar",
+                ScanWorkload::MaterializedScan => "datalog-all-values-rust-fold",
+            };
+            (count, checksum, boundary, elapsed_ms(started))
+        }
+        Engine::Cozo => {
+            let db = cozo_open(&db_dir.join("cozo.db"))?;
+            let started = Instant::now();
+            let (count, checksum) = match workload {
+                ScanWorkload::EngineAggregate => cozo_aggregate(&db)?,
+                ScanWorkload::MaterializedScan => cozo_scan(&db)?,
+            };
+            let boundary = match workload {
+                ScanWorkload::EngineAggregate => "cozoscript-count-sum-scalar",
+                ScanWorkload::MaterializedScan => "cozoscript-all-values-rust-fold",
+            };
+            (count, checksum, boundary, elapsed_ms(started))
+        }
+        Engine::Sqlite => {
+            let db = sqlite_open(&db_dir.join("sqlite.db"))?;
+            let started = Instant::now();
+            let (count, checksum) = match workload {
+                ScanWorkload::EngineAggregate => sqlite_aggregate(&db)?,
+                ScanWorkload::MaterializedScan => sqlite_scan(&db)?,
+            };
+            let boundary = match workload {
+                ScanWorkload::EngineAggregate => "sql-count-sum-scalar",
+                ScanWorkload::MaterializedScan => "sql-all-values-rust-fold",
+            };
+            (count, checksum, boundary, elapsed_ms(started))
+        }
+        Engine::Redb => {
+            let db = Database::open(db_dir.join("redb.db"))?;
+            let started = Instant::now();
+            let (count, checksum) = redb_scan(&db)?;
+            (
+                count,
+                checksum,
+                "ordered-table-all-values-rust-fold",
+                elapsed_ms(started),
+            )
+        }
+    };
+
+    Ok(ScanMeasurement {
+        workload: workload.id().to_string(),
+        execution_boundary: execution_boundary.to_string(),
+        elapsed_ms,
+        peak_rss_bytes: peak_rss_bytes(),
+        count,
+        checksum,
+    })
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("scan") {
+        if args.len() != 5 {
+            bail!(
+                "usage: vicia-cross-db-bench scan <engine> <db-dir> <engine-aggregate|materialized-scan>"
+            );
+        }
+        let measurement = measure_scan(
+            Engine::parse(&args[2])?,
+            Path::new(&args[3]),
+            ScanWorkload::parse(&args[4])?,
+        )?;
+        println!("{}", serde_json::to_string(&measurement)?);
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("crash-write") {
         if args.len() != 7 {
             bail!(
@@ -233,15 +381,36 @@ fn main() -> Result<()> {
         .checked_add(config.cycles.saturating_mul(config.facts_per_cycle))
         .context("expected fact count overflow")?;
     let expected_checksum = arithmetic_checksum(expected_count);
-    let passed = run.count == expected_count && run.checksum == expected_checksum;
+    let materialized_scan = measure_scan_in_child(engine, &db_dir, ScanWorkload::MaterializedScan)?;
+    let engine_aggregate = if engine.supports_engine_aggregate() {
+        Some(measure_scan_in_child(
+            engine,
+            &db_dir,
+            ScanWorkload::EngineAggregate,
+        )?)
+    } else {
+        None
+    };
+    let materialized_passed = materialized_scan.count == expected_count
+        && materialized_scan.checksum == expected_checksum;
+    let aggregate_passed = engine_aggregate.as_ref().is_none_or(|measurement| {
+        measurement.count == expected_count && measurement.checksum == expected_checksum
+    });
+    let passed = materialized_passed && aggregate_passed;
     if !passed {
         bail!(
-            "{} correctness failed: count {}/{}, checksum {}/{}",
+            "{} scan correctness failed: materialized count {}/{}, checksum {}/{}; aggregate {:?}/{:?}",
             engine.id(),
-            run.count,
+            materialized_scan.count,
             expected_count,
-            run.checksum,
-            expected_checksum
+            materialized_scan.checksum,
+            expected_checksum,
+            engine_aggregate
+                .as_ref()
+                .map(|measurement| measurement.count),
+            engine_aggregate
+                .as_ref()
+                .map(|measurement| measurement.checksum),
         );
     }
 
@@ -255,7 +424,7 @@ fn main() -> Result<()> {
         .len();
     let total_storage_bytes = directory_bytes(&db_dir)?;
     let receipt = Receipt {
-        schema: "vicia.cross-db-stress.v1",
+        schema: "vicia.cross-db-stress.v2",
         engine: engine.id(),
         engine_version: engine.version(),
         classification: engine.classification(),
@@ -269,18 +438,25 @@ fn main() -> Result<()> {
             reopen: stats(run.reopen_ms),
             durable_append: stats(run.append_ms),
             point_read: stats(run.read_ms),
-            full_scan: stats(vec![run.scan_ms]),
+            engine_aggregate: engine_aggregate.clone(),
+            materialized_scan: materialized_scan.clone(),
             total_ms: round3(total_started.elapsed().as_secs_f64() * 1_000.0),
-            peak_rss_bytes: peak_rss_bytes(),
+            stress_process_peak_rss_bytes: peak_rss_bytes(),
             primary_file_bytes,
             total_storage_bytes,
             bytes_per_fact: round3(total_storage_bytes as f64 / expected_count as f64),
         },
         correctness: Correctness {
             expected_count,
-            actual_count: run.count,
             expected_checksum,
-            actual_checksum: run.checksum,
+            materialized_count: materialized_scan.count,
+            materialized_checksum: materialized_scan.checksum,
+            engine_aggregate_count: engine_aggregate
+                .as_ref()
+                .map(|measurement| measurement.count),
+            engine_aggregate_checksum: engine_aggregate
+                .as_ref()
+                .map(|measurement| measurement.checksum),
             repeated_reopen_cycles: config.cycles,
             integrity_check: run.integrity,
             passed,
@@ -446,19 +622,12 @@ fn run_vicia(dir: &Path, config: Config) -> Result<RunMeasurements> {
         append_ms.push(elapsed_ms(appended));
         drop(db);
     }
-    let db = OpenOptions::new().path(&path).open()?;
-    let scan = Instant::now();
-    let (count, checksum) = vicia_scan(&db)?;
-    let scan_ms = elapsed_ms(scan);
     Ok(RunMeasurements {
         build_ms,
         reopen_ms,
         append_ms,
         read_ms,
-        scan_ms,
-        count,
-        checksum,
-        integrity: "open-and-full-scan".to_string(),
+        integrity: "repeated-open-and-durable-append".to_string(),
         primary_path: path,
     })
 }
@@ -492,15 +661,33 @@ fn vicia_scan(db: &minigraf::Minigraf) -> Result<(u64, i128)> {
     let QueryResult::QueryResults { results, .. } = result else {
         bail!("Vicia full scan returned a non-query result");
     };
-    let mut checksum = 0i128;
-    for row in &results {
-        checksum += i128::from(
-            row.first()
+    let values = results
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .next()
                 .and_then(|value| value.as_integer())
-                .context("Vicia scan returned no integer")?,
-        );
-    }
-    Ok((u64::try_from(results.len())?, checksum))
+                .context("Vicia scan returned no integer")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    fold_materialized_values(values)
+}
+
+fn vicia_aggregate(db: &minigraf::Minigraf) -> Result<(u64, i128)> {
+    let result = db.execute("(query [:find (count ?v) (sum ?v) :where [?e :cmp/value ?v]])")?;
+    let QueryResult::QueryResults { results, .. } = result else {
+        bail!("Vicia aggregate returned a non-query result");
+    };
+    let row = results.first().context("Vicia aggregate returned no row")?;
+    let count = row
+        .first()
+        .and_then(|value| value.as_integer())
+        .context("Vicia aggregate returned no count")?;
+    let checksum = row
+        .get(1)
+        .and_then(|value| value.as_integer())
+        .context("Vicia aggregate returned no checksum")?;
+    Ok((u64::try_from(count)?, i128::from(checksum)))
 }
 
 fn run_sqlite(dir: &Path, config: Config) -> Result<RunMeasurements> {
@@ -547,15 +734,6 @@ fn run_sqlite(dir: &Path, config: Config) -> Result<RunMeasurements> {
         append_ms.push(elapsed_ms(appended));
     }
     let connection = sqlite_open(&path)?;
-    let scan = Instant::now();
-    let mut aggregate =
-        connection.prepare("SELECT COUNT(*), COALESCE(SUM(value), 0) FROM facts")?;
-    if aggregate.next()? != State::Row {
-        bail!("SQLite aggregate returned no row");
-    }
-    let count = aggregate.read::<i64, _>(0)? as u64;
-    let checksum = aggregate.read::<i64, _>(1)?;
-    let scan_ms = elapsed_ms(scan);
     let mut integrity_statement = connection.prepare("PRAGMA integrity_check")?;
     if integrity_statement.next()? != State::Row {
         bail!("SQLite integrity_check returned no row");
@@ -566,9 +744,6 @@ fn run_sqlite(dir: &Path, config: Config) -> Result<RunMeasurements> {
         reopen_ms,
         append_ms,
         read_ms,
-        scan_ms,
-        count,
-        checksum: i128::from(checksum),
         integrity,
         primary_path: path,
     })
@@ -602,6 +777,27 @@ fn sqlite_insert(connection: &Connection, start: u64, end: u64) -> Result<()> {
     }
     connection.execute("COMMIT")?;
     Ok(())
+}
+
+fn sqlite_aggregate(connection: &Connection) -> Result<(u64, i128)> {
+    let mut statement =
+        connection.prepare("SELECT COUNT(*), COALESCE(SUM(value), 0) FROM facts")?;
+    if statement.next()? != State::Row {
+        bail!("SQLite aggregate returned no row");
+    }
+    Ok((
+        u64::try_from(statement.read::<i64, _>(0)?)?,
+        i128::from(statement.read::<i64, _>(1)?),
+    ))
+}
+
+fn sqlite_scan(connection: &Connection) -> Result<(u64, i128)> {
+    let mut statement = connection.prepare("SELECT value FROM facts")?;
+    let mut values = Vec::new();
+    while statement.next()? == State::Row {
+        values.push(statement.read::<i64, _>(0)?);
+    }
+    fold_materialized_values(values)
 }
 
 fn run_redb(dir: &Path, config: Config) -> Result<RunMeasurements> {
@@ -644,27 +840,12 @@ fn run_redb(dir: &Path, config: Config) -> Result<RunMeasurements> {
         redb_insert(&database, visible, visible + config.facts_per_cycle)?;
         append_ms.push(elapsed_ms(appended));
     }
-    let database = Database::open(&path)?;
-    let scan = Instant::now();
-    let transaction = database.begin_read()?;
-    let table = transaction.open_table(REDB_FACTS)?;
-    let mut count = 0u64;
-    let mut checksum = 0i128;
-    for entry in table.iter()? {
-        let (_, value) = entry?;
-        count += 1;
-        checksum += i128::from(value.value());
-    }
-    let scan_ms = elapsed_ms(scan);
     Ok(RunMeasurements {
         build_ms,
         reopen_ms,
         append_ms,
         read_ms,
-        scan_ms,
-        count,
-        checksum,
-        integrity: "transactional-open-and-full-scan".to_string(),
+        integrity: "transactional-open-and-durable-append".to_string(),
         primary_path: path,
     })
 }
@@ -679,6 +860,17 @@ fn redb_insert(database: &Database, start: u64, end: u64) -> Result<()> {
     }
     transaction.commit()?;
     Ok(())
+}
+
+fn redb_scan(database: &Database) -> Result<(u64, i128)> {
+    let transaction = database.begin_read()?;
+    let table = transaction.open_table(REDB_FACTS)?;
+    let mut values = Vec::new();
+    for entry in table.iter()? {
+        let (_, value) = entry?;
+        values.push(value.value());
+    }
+    fold_materialized_values(values)
 }
 
 fn run_cozo(dir: &Path, config: Config) -> Result<RunMeasurements> {
@@ -735,33 +927,12 @@ fn run_cozo(dir: &Path, config: Config) -> Result<RunMeasurements> {
         cozo_insert(&database, visible, visible + config.facts_per_cycle)?;
         append_ms.push(elapsed_ms(appended));
     }
-    let database = cozo_open(&path)?;
-    let scan = Instant::now();
-    let rows = database
-        .run_script(
-            "?[value] := *facts{value}",
-            BTreeMap::new(),
-            ScriptMutability::Immutable,
-        )
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let scan_ms = elapsed_ms(scan);
-    let mut checksum = 0i128;
-    for row in &rows.rows {
-        checksum += i128::from(
-            row.first()
-                .and_then(cozo_integer)
-                .context("Cozo scan returned no integer")?,
-        );
-    }
     Ok(RunMeasurements {
         build_ms,
         reopen_ms,
         append_ms,
         read_ms,
-        scan_ms,
-        count: u64::try_from(rows.rows.len())?,
-        checksum,
-        integrity: "transactional-open-and-full-scan".to_string(),
+        integrity: "transactional-open-and-durable-append".to_string(),
         primary_path: path,
     })
 }
@@ -790,6 +961,73 @@ fn cozo_integer(value: &DataValue) -> Option<i64> {
         DataValue::Num(Num::Int(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn cozo_exact_integer(value: &DataValue) -> Option<i64> {
+    match value {
+        DataValue::Num(Num::Int(value)) => Some(*value),
+        DataValue::Num(Num::Float(value))
+            if value.is_finite()
+                && value.fract() == 0.0
+                && *value >= i64::MIN as f64
+                && *value <= i64::MAX as f64 =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            Some(*value as i64)
+        }
+        _ => None,
+    }
+}
+
+fn cozo_aggregate(database: &DbInstance) -> Result<(u64, i128)> {
+    let rows = database
+        .run_script(
+            "?[count(value), sum(value)] := *facts{value}",
+            BTreeMap::new(),
+            ScriptMutability::Immutable,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let row = rows
+        .rows
+        .first()
+        .context("Cozo aggregate returned no row")?;
+    let count = row
+        .first()
+        .and_then(cozo_integer)
+        .context("Cozo aggregate returned no count")?;
+    let checksum = row
+        .get(1)
+        .and_then(cozo_exact_integer)
+        .context("Cozo aggregate returned no checksum")?;
+    Ok((u64::try_from(count)?, i128::from(checksum)))
+}
+
+fn cozo_scan(database: &DbInstance) -> Result<(u64, i128)> {
+    let rows = database
+        .run_script(
+            "?[value] := *facts{value}",
+            BTreeMap::new(),
+            ScriptMutability::Immutable,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let values = rows
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .next()
+                .as_ref()
+                .and_then(cozo_integer)
+                .context("Cozo scan returned no integer")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    fold_materialized_values(values)
+}
+
+fn fold_materialized_values(values: Vec<i64>) -> Result<(u64, i128)> {
+    let count = u64::try_from(values.len())?;
+    let checksum = values.into_iter().map(i128::from).sum();
+    Ok((count, checksum))
 }
 
 fn probe_entity(cycle: u64, probe: u64, visible: u64) -> u64 {

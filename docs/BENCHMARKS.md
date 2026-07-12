@@ -62,6 +62,33 @@ result queries still intentionally materialize their result rows and therefore
 retain the prior approximately 506 MiB RSS shape; a future bounded result cursor
 is required to change that public result boundary.
 
+### Cross-database scan comparison contract (v2)
+
+The cross-database stress harness does not publish one ambiguous `fullScan`
+ranking. It records two independently verified workloads:
+
+| Workload | Comparable boundary | Included engines |
+|---|---|---|
+| `engineAggregate` | Engine computes count and sum, returns one scalar row | Vicia Datalog, CozoScript, SQLite SQL; redb is N/A |
+| `materializedScan` | Adapter owns every value in one `Vec<i64>`, then the shared Rust fold computes count/checksum | Vicia, Cozo, SQLite, redb |
+
+Each workload runs in a fresh child process after the stress database is built.
+Its elapsed time excludes open, while its `VmHWM` includes open plus that one
+scan only. Build/checkpoint/append memory and the other scan can therefore not
+pollute the read-memory comparison. Both workloads must independently equal the
+same arithmetic count and checksum. The v2 summarizer also checks the exact
+engine-specific execution-boundary label and rejects a redb aggregate result;
+redb has no query engine and must not receive a simulated scalar fast path.
+Only a full-profile summary whose source checkout was clean is marked
+`acceptanceEligible`; the Markdown and JSON summaries both carry the exact
+source commit and testbed identity.
+
+The historical 2026-07-12 v1 baseline remains useful for build, append, point
+read, reopen, storage, and crash evidence. Its single scan column compared
+Vicia/Cozo materialization with SQLite engine aggregation and redb iteration,
+and its process-wide RSS included build/checkpoint history; do not use those two
+v1 fields for cross-engine ranking.
+
 Benchmarks were run with [Criterion 0.8](https://bheisler.github.io/criterion.rs/book/). Each benchmark group is described below.
 
 ### Evidence contract, milestones, and CI coverage

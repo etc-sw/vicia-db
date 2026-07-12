@@ -15,7 +15,7 @@ for (const engine of ["vicia", "cozo", "sqlite", "redb"]) {
   const minimumCount = await killWriter(
     engine,
     join(outputDir, `${engine}-data`),
-    stress.correctness.actualCount,
+    stress.correctness.materializedCount,
     Number(factsPerCycle),
   );
   const verified = spawnSync(
