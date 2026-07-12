@@ -221,9 +221,23 @@ impl WalReader {
     /// Reads sequentially from after the header. Stops at the first entry
     /// with an invalid CRC32 (partial write) or at EOF. Earlier entries are
     /// unaffected by a bad entry.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn read_entries(&mut self) -> Result<Vec<WalEntry>> {
-        self.file.seek(SeekFrom::Start(WAL_HEADER_SIZE as u64))?;
         let mut entries = Vec::new();
+        self.visit_entries(&mut |entry| {
+            entries.push(entry);
+            Ok(())
+        })?;
+        Ok(entries)
+    }
+
+    /// Decode and validate WAL transactions sequentially, releasing each
+    /// decoded transaction after the visitor returns.
+    pub(crate) fn visit_entries(
+        &mut self,
+        visit: &mut dyn FnMut(WalEntry) -> Result<()>,
+    ) -> Result<()> {
+        self.file.seek(SeekFrom::Start(WAL_HEADER_SIZE as u64))?;
 
         loop {
             // Read checksum (4 bytes); EOF here means no more entries
@@ -306,10 +320,9 @@ impl WalReader {
                 break; // corrupted entry — stop here
             }
 
-            entries.push(WalEntry { tx_count, facts });
+            visit(WalEntry { tx_count, facts })?;
         }
-
-        Ok(entries)
+        Ok(())
     }
 }
 

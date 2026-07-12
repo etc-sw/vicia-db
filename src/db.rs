@@ -782,25 +782,32 @@ impl Minigraf {
         }
 
         let mut reader = crate::wal::WalReader::open(wal_path)?;
-        let entries = reader.read_entries()?;
         #[cfg(any(test, feature = "bench-internals"))]
-        let memory = wal_replay_memory_diagnostics(&entries, entries.capacity());
+        let mut memory = WalReplayMemoryDiagnostics::default();
         let last_checkpointed = pfs.last_checkpointed_tx_count();
 
         let mut replayed = 0;
-        for entry in &entries {
+        reader.visit_entries(&mut |entry| {
+            #[cfg(any(test, feature = "bench-internals"))]
+            {
+                let sample = wal_replay_memory_diagnostics(std::slice::from_ref(&entry), 1);
+                if sample.total_accounted_bytes > memory.total_accounted_bytes {
+                    memory = sample;
+                }
+            }
             if entry.tx_count <= last_checkpointed {
                 // Already present in the main file; skip.
-                continue;
+                return Ok(());
             }
-            for fact in &entry.facts {
-                let _ = fact_storage.load_fact(fact.clone())?;
+            for fact in entry.facts {
+                let _ = fact_storage.load_fact(fact)?;
             }
             #[allow(clippy::arithmetic_side_effects)]
             {
                 replayed += 1;
             }
-        }
+            Ok(())
+        })?;
 
         // Re-synchronise tx_counter to the maximum tx_count across the
         // replayed facts. Committed facts live on disk, not in memory, so the
