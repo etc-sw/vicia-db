@@ -435,6 +435,129 @@ enum WriteContext {
     },
 }
 
+/// Accounted memory held by the fully decoded WAL batch during replay.
+///
+/// This repository-only type is available with `bench-internals`; it excludes
+/// temporary CRC payload buffers and allocator/container overhead. During
+/// replay the decoded batch remains live while each fact is cloned into the
+/// pending store; the receipt records that overlap explicitly.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalReplayMemoryDiagnostics {
+    /// Decoded WAL transaction entries retained together before apply.
+    pub entries: u64,
+    /// Decoded facts retained together before apply.
+    pub facts: u64,
+    /// Reserved inline bytes for the outer `Vec<WalEntry>`.
+    pub entry_vector_bytes: u64,
+    /// Reserved inline bytes across all entry-local `Vec<Fact>` allocations.
+    pub fact_vector_bytes: u64,
+    /// Heap capacity owned by decoded fact attributes.
+    pub owned_attribute_bytes: u64,
+    /// Separately allocated decoded attribute buffers.
+    pub owned_attribute_allocations: u64,
+    /// Heap capacity owned by decoded string-like fact values.
+    pub owned_value_bytes: u64,
+    /// Separately allocated decoded string-like value buffers.
+    pub owned_value_allocations: u64,
+    /// Sum of all accounted decoded-WAL bytes.
+    pub total_accounted_bytes: u64,
+    /// The replay implementation retains all decoded entries while applying
+    /// cloned facts to pending storage.
+    pub overlaps_live_pending_during_apply: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ReplayWalOutcome {
+    entry_count: usize,
+    #[cfg(any(test, feature = "bench-internals"))]
+    memory: WalReplayMemoryDiagnostics,
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn wal_replay_memory_diagnostics(
+    entries: &[crate::wal::WalEntry],
+    entry_capacity: usize,
+) -> WalReplayMemoryDiagnostics {
+    let entry_vector_bytes =
+        entry_capacity.saturating_mul(std::mem::size_of::<crate::wal::WalEntry>());
+    let facts = entries.iter().fold(0_usize, |total, entry| {
+        total.saturating_add(entry.facts.len())
+    });
+    let fact_vector_bytes = entries.iter().fold(0_usize, |total, entry| {
+        total.saturating_add(
+            entry
+                .facts
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Fact>()),
+        )
+    });
+    let owned_attribute_bytes = entries.iter().fold(0_usize, |total, entry| {
+        entry.facts.iter().fold(total, |total, fact| {
+            total.saturating_add(fact.attribute.capacity())
+        })
+    });
+    let owned_value_bytes = entries.iter().fold(0_usize, |total, entry| {
+        entry.facts.iter().fold(total, |total, fact| {
+            let capacity = match &fact.value {
+                Value::String(value) | Value::Keyword(value) => value.capacity(),
+                Value::Integer(_)
+                | Value::Float(_)
+                | Value::Boolean(_)
+                | Value::Ref(_)
+                | Value::Null => 0,
+            };
+            total.saturating_add(capacity)
+        })
+    });
+    let owned_attribute_allocations = entries.iter().fold(0_usize, |total, entry| {
+        total.saturating_add(
+            entry
+                .facts
+                .iter()
+                .filter(|fact| fact.attribute.capacity() > 0)
+                .count(),
+        )
+    });
+    let owned_value_allocations = entries.iter().fold(0_usize, |total, entry| {
+        total.saturating_add(
+            entry
+                .facts
+                .iter()
+                .filter(|fact| match &fact.value {
+                    Value::String(value) | Value::Keyword(value) => value.capacity() > 0,
+                    Value::Integer(_)
+                    | Value::Float(_)
+                    | Value::Boolean(_)
+                    | Value::Ref(_)
+                    | Value::Null => false,
+                })
+                .count(),
+        )
+    });
+    let to_u64 = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+    let entry_vector_bytes = to_u64(entry_vector_bytes);
+    let fact_vector_bytes = to_u64(fact_vector_bytes);
+    let owned_attribute_bytes = to_u64(owned_attribute_bytes);
+    let owned_value_bytes = to_u64(owned_value_bytes);
+    WalReplayMemoryDiagnostics {
+        entries: to_u64(entries.len()),
+        facts: to_u64(facts),
+        entry_vector_bytes,
+        fact_vector_bytes,
+        owned_attribute_bytes,
+        owned_attribute_allocations: to_u64(owned_attribute_allocations),
+        owned_value_bytes,
+        owned_value_allocations: to_u64(owned_value_allocations),
+        total_accounted_bytes: entry_vector_bytes
+            .saturating_add(fact_vector_bytes)
+            .saturating_add(owned_attribute_bytes)
+            .saturating_add(owned_value_bytes),
+        overlaps_live_pending_during_apply: facts > 0,
+    }
+}
+
 // ─── Inner ────────────────────────────────────────────────────────────────────
 
 struct Inner {
@@ -450,6 +573,8 @@ struct Inner {
     write_lock: Mutex<WriteContext>,
     /// Configuration options.
     options: OpenOptions,
+    #[cfg(any(test, feature = "bench-internals"))]
+    wal_replay_memory_diagnostics: WalReplayMemoryDiagnostics,
 }
 
 impl Drop for Inner {
@@ -568,7 +693,8 @@ impl Minigraf {
         let wal_path = Self::wal_path_for(&db_path);
 
         // Replay any existing WAL entries before opening the writer
-        let wal_entry_count = Self::replay_wal(&wal_path, &fact_storage, &pfs)?;
+        let replay = Self::replay_wal(&wal_path, &fact_storage, &pfs)?;
+        let wal_entry_count = replay.entry_count;
 
         // Open the WAL writer only if the WAL file already exists from a previous session.
         // Otherwise, create it lazily on the first write.
@@ -592,6 +718,8 @@ impl Minigraf {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(ctx),
                 options: opts,
+                #[cfg(any(test, feature = "bench-internals"))]
+                wal_replay_memory_diagnostics: replay.memory,
             }),
         })
     }
@@ -628,6 +756,8 @@ impl Minigraf {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(WriteContext::Memory),
                 options: opts,
+                #[cfg(any(test, feature = "bench-internals"))]
+                wal_replay_memory_diagnostics: WalReplayMemoryDiagnostics::default(),
             }),
         })
     }
@@ -636,19 +766,25 @@ impl Minigraf {
 
     /// Replay any WAL entries that are newer than the main file's checkpoint.
     ///
-    /// Returns the number of entries replayed (used to seed `wal_entry_count`).
+    /// Returns replay count plus repository-only decoded-memory accounting.
     #[cfg(not(target_arch = "wasm32"))]
     fn replay_wal(
         wal_path: &Path,
         fact_storage: &FactStorage,
         pfs: &PersistentFactStorage<FileBackend>,
-    ) -> Result<usize> {
+    ) -> Result<ReplayWalOutcome> {
         if !wal_path.exists() {
-            return Ok(0);
+            return Ok(ReplayWalOutcome {
+                entry_count: 0,
+                #[cfg(any(test, feature = "bench-internals"))]
+                memory: WalReplayMemoryDiagnostics::default(),
+            });
         }
 
         let mut reader = crate::wal::WalReader::open(wal_path)?;
         let entries = reader.read_entries()?;
+        #[cfg(any(test, feature = "bench-internals"))]
+        let memory = wal_replay_memory_diagnostics(&entries, entries.capacity());
         let last_checkpointed = pfs.last_checkpointed_tx_count();
 
         let mut replayed = 0;
@@ -679,7 +815,11 @@ impl Minigraf {
             fact_storage.restore_tx_counter_from(last_checkpointed);
         }
 
-        Ok(replayed)
+        Ok(ReplayWalOutcome {
+            entry_count: replayed,
+            #[cfg(any(test, feature = "bench-internals"))]
+            memory,
+        })
     }
 
     // ── Execute ──────────────────────────────────────────────────────────────
@@ -831,6 +971,22 @@ impl Minigraf {
         self.inner
             .fact_storage
             .last_current_attribute_cursor_diagnostics()
+    }
+
+    /// Return live pending-container memory accounting without cloning data.
+    ///
+    /// Repository benchmark hook available only with `bench-internals`.
+    #[cfg(feature = "bench-internals")]
+    pub fn pending_memory_diagnostics(&self) -> crate::PendingMemoryDiagnostics {
+        self.inner.fact_storage.pending_memory_diagnostics()
+    }
+
+    /// Return the decoded WAL batch accounting captured during this open.
+    ///
+    /// Repository benchmark hook available only with `bench-internals`.
+    #[cfg(feature = "bench-internals")]
+    pub fn wal_replay_memory_diagnostics(&self) -> WalReplayMemoryDiagnostics {
+        self.inner.wal_replay_memory_diagnostics
     }
 
     /// Execute a `(forget ...)` bulk valid-time closure while holding the
@@ -2295,6 +2451,52 @@ mod tests {
         assert_eq!(facts.len(), 2, "expected 2 facts after 2 transacts");
     }
 
+    #[test]
+    fn wal_replay_memory_diagnostics_accounts_decoded_batch_ownership() {
+        let entries = vec![crate::wal::WalEntry {
+            tx_count: 1,
+            facts: vec![
+                Fact::with_valid_time(
+                    uuid::Uuid::from_u128(1),
+                    ":memory/int".to_string(),
+                    Value::Integer(1),
+                    1,
+                    1,
+                    1,
+                    VALID_TIME_FOREVER,
+                ),
+                Fact::with_valid_time(
+                    uuid::Uuid::from_u128(2),
+                    ":memory/string".to_string(),
+                    Value::String("owned-value".to_string()),
+                    1,
+                    1,
+                    1,
+                    VALID_TIME_FOREVER,
+                ),
+            ],
+        }];
+
+        let diagnostics = wal_replay_memory_diagnostics(&entries, entries.capacity());
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.facts, 2);
+        assert!(diagnostics.entry_vector_bytes > 0);
+        assert!(diagnostics.fact_vector_bytes > 0);
+        assert!(diagnostics.owned_attribute_bytes > 0);
+        assert_eq!(diagnostics.owned_attribute_allocations, 2);
+        assert!(diagnostics.owned_value_bytes > 0);
+        assert_eq!(diagnostics.owned_value_allocations, 1);
+        assert_eq!(
+            diagnostics.total_accounted_bytes,
+            diagnostics
+                .entry_vector_bytes
+                .saturating_add(diagnostics.fact_vector_bytes)
+                .saturating_add(diagnostics.owned_attribute_bytes)
+                .saturating_add(diagnostics.owned_value_bytes)
+        );
+        assert!(diagnostics.overlaps_live_pending_during_apply);
+    }
+
     // ── begin_write / commit ─────────────────────────────────────────────────
 
     #[test]
@@ -2808,6 +3010,16 @@ mod tests {
             1,
             "fresh open must replay the pending WAL without publishing it"
         );
+        let replay_memory = replayed.inner.wal_replay_memory_diagnostics;
+        assert_eq!(replay_memory.entries, 1);
+        assert_eq!(replay_memory.facts, 1);
+        assert!(replay_memory.total_accounted_bytes > 0);
+        let pending_memory = replayed.inner.fact_storage.pending_memory_diagnostics();
+        assert_eq!(pending_memory.facts.entries, 1);
+        assert_eq!(pending_memory.eavt.entries, 1);
+        assert_eq!(pending_memory.aevt.entries, 1);
+        assert_eq!(pending_memory.avet.entries, 1);
+        assert_eq!(pending_memory.vaet.entries, 0);
     }
 
     #[test]

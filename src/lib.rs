@@ -64,7 +64,7 @@
 //! |---------|--------|-------------|
 //! | *(default)* | native / WASI | File-backed and in-memory databases; full Datalog engine |
 //! | `browser` | `wasm32-unknown-unknown` | Enables the `browser` module (`BrowserDb`), backed by IndexedDB for use inside a web browser via `wasm-pack` |
-//! | `bench-internals` | native | Exposes repository-only cursor diagnostics for benchmark receipts; not a stable application API |
+//! | `bench-internals` | native | Exposes repository-only cursor and pending/WAL memory diagnostics for benchmark receipts; not a stable application API |
 //!
 //! The `browser` feature is only meaningful on the `wasm32-unknown-unknown` target.
 //! When browsing docs on [docs.rs](https://docs.rs/minigraf), switch the target to
@@ -111,7 +111,11 @@ pub use repl::Repl;
 pub use graph::types::{EntityId, FactRecord, FactValidTime, Value};
 
 #[cfg(feature = "bench-internals")]
-pub use graph::storage::CurrentAttributeCursorDiagnostics;
+pub use db::WalReplayMemoryDiagnostics;
+#[cfg(feature = "bench-internals")]
+pub use graph::storage::{
+    CurrentAttributeCursorDiagnostics, PendingMemoryComponent, PendingMemoryDiagnostics,
+};
 
 // Query result type
 pub use query::datalog::executor::QueryResult;

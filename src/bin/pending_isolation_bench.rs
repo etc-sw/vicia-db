@@ -1,7 +1,10 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::{Context, Result, bail};
-use minigraf::{CurrentAttributeCursorDiagnostics, Minigraf, OpenOptions, QueryResult, Value};
+use minigraf::{
+    CurrentAttributeCursorDiagnostics, Minigraf, OpenOptions, PendingMemoryDiagnostics,
+    QueryResult, Value, WalReplayMemoryDiagnostics,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
@@ -9,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &str = "vicia.pending-isolation.v1";
+const SCHEMA: &str = "vicia.pending-isolation.v2";
 const BASE_FACTS: u64 = 1_000_000;
 const SELECTED_CONTROL_FACTS: u64 = 10_000;
 const WRITE_BATCH: u64 = 1_000;
@@ -134,6 +137,7 @@ struct VariantReceipt {
     graph_bytes: u64,
     wal_bytes: u64,
     measurement: Measurement,
+    memory_audit: MemoryAudit,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -163,6 +167,25 @@ struct Measurement {
     retained_delta_breakdown: MemoryBreakdown,
     count: u64,
     checksum: i128,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryAudit {
+    rss_before_trim_bytes: u64,
+    breakdown_before_trim: MemoryBreakdown,
+    allocator_trim_supported: bool,
+    allocator_trim_released: bool,
+    rss_after_live_trim_bytes: u64,
+    breakdown_after_live_trim: MemoryBreakdown,
+    replay_retained_rss_bytes: u64,
+    process_peak_rss_bytes: u64,
+    pending: PendingMemoryDiagnostics,
+    wal_replay: WalReplayMemoryDiagnostics,
+    replay_overlap_accounted_bytes: u64,
+    rss_after_drop_trim_bytes: u64,
+    live_database_rss_bytes: u64,
+    live_unaccounted_rss_bytes: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -257,6 +280,15 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&measurement)?);
             Ok(())
         }
+        "audit-memory" => {
+            let path = PathBuf::from(args.next().context("missing graph path")?);
+            if args.next().is_some() {
+                bail!("audit-memory accepts only <graph-path>");
+            }
+            let audit = audit_memory(&path)?;
+            println!("{}", serde_json::to_string(&audit)?);
+            Ok(())
+        }
         _ => bail!("usage: pending-isolation-bench run <smoke|full> <output-directory>"),
     }
 }
@@ -310,6 +342,8 @@ fn run_profile(profile: Profile, output_dir: &Path) -> Result<()> {
             &["measure", &profile.repetitions().to_string()],
             &[&variant_path],
         )?;
+        let memory_audit: MemoryAudit =
+            child_json(&executable, &["audit-memory"], &[&variant_path])?;
         let (expected_count, expected_checksum) = expected(kind, pending_facts);
         if measurement.count != expected_count || measurement.checksum != expected_checksum {
             bail!(
@@ -329,6 +363,7 @@ fn run_profile(profile: Profile, output_dir: &Path) -> Result<()> {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
             measurement,
+            memory_audit,
         });
     }
 
@@ -361,11 +396,14 @@ fn run_profile(profile: Profile, output_dir: &Path) -> Result<()> {
     );
     for variant in &receipt.variants {
         println!(
-            "{}: p50={:.3} ms p95={:.3} ms rss-delta={:.3} MiB count={} checksum={}",
+            "{}: p50={:.3} ms p95={:.3} ms rss-delta={:.3} MiB live-db={:.3} MiB replay-retained={:.3} MiB accounted={:.3} MiB count={} checksum={}",
             variant.label,
             variant.measurement.elapsed_summary_ms.p50,
             variant.measurement.elapsed_summary_ms.p95,
             variant.measurement.workload_delta_rss_bytes as f64 / 1024.0 / 1024.0,
+            variant.memory_audit.live_database_rss_bytes as f64 / 1024.0 / 1024.0,
+            variant.memory_audit.replay_retained_rss_bytes as f64 / 1024.0 / 1024.0,
+            variant.memory_audit.pending.total_accounted_bytes as f64 / 1024.0 / 1024.0,
             variant.measurement.count,
             variant.measurement.checksum
         );
@@ -533,6 +571,59 @@ fn measure(path: &Path, repetitions: usize) -> Result<Measurement> {
         count: expected.0,
         checksum: expected.1,
     })
+}
+
+fn audit_memory(path: &Path) -> Result<MemoryAudit> {
+    let db = open_without_auto_checkpoint(path)?;
+    let pending = db.pending_memory_diagnostics();
+    let wal_replay = db.wal_replay_memory_diagnostics();
+    let rss_before_trim = current_rss_bytes().context("read RSS before allocator trim")?;
+    let breakdown_before_trim = memory_breakdown(path)?;
+    let process_peak_rss_bytes = peak_rss_bytes().context("read process peak RSS")?;
+    let (allocator_trim_supported, allocator_trim_released) = trim_allocator();
+    let rss_after_live_trim = current_rss_bytes().context("read RSS after live allocator trim")?;
+    let breakdown_after_live_trim = memory_breakdown(path)?;
+
+    drop(db);
+    let _ = trim_allocator();
+    let rss_after_drop_trim = current_rss_bytes().context("read RSS after database drop trim")?;
+    let live_database_rss_bytes = rss_after_live_trim.saturating_sub(rss_after_drop_trim);
+    Ok(MemoryAudit {
+        rss_before_trim_bytes: rss_before_trim,
+        breakdown_before_trim,
+        allocator_trim_supported,
+        allocator_trim_released,
+        rss_after_live_trim_bytes: rss_after_live_trim,
+        breakdown_after_live_trim,
+        replay_retained_rss_bytes: rss_before_trim.saturating_sub(rss_after_live_trim),
+        process_peak_rss_bytes,
+        pending,
+        wal_replay,
+        replay_overlap_accounted_bytes: pending
+            .total_accounted_bytes
+            .saturating_add(wal_replay.total_accounted_bytes),
+        rss_after_drop_trim_bytes: rss_after_drop_trim,
+        live_database_rss_bytes,
+        live_unaccounted_rss_bytes: live_database_rss_bytes
+            .saturating_sub(pending.total_accounted_bytes),
+    })
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator() -> (bool, bool) {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+
+    // SAFETY: glibc's process-global `malloc_trim` accepts any padding value;
+    // this single-threaded benchmark child passes zero and owns no foreign
+    // allocator state. It never runs in the default library API.
+    (true, unsafe { malloc_trim(0) != 0 })
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_allocator() -> (bool, bool) {
+    (false, false)
 }
 
 fn aggregate_sample(db: &Minigraf) -> Result<(AggregateSample, (u64, i128))> {

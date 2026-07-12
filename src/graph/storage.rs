@@ -4,6 +4,8 @@ use crate::graph::types::{
 };
 use crate::query::datalog::types::AsOf;
 use crate::storage::index::{AevtKey, FactRef, Indexes, encode_value};
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::storage::index::{AvetKey, EavtKey, VaetKey};
 use anyhow::Result;
 use std::collections::HashSet;
 #[cfg(any(test, feature = "bench-internals"))]
@@ -18,6 +20,61 @@ use std::sync::{Arc, RwLock};
 /// `encode_value` is used for the value field because `Value` contains `f64`
 /// and therefore cannot implement `Hash` directly.
 type PendingKey = (EntityId, String, Vec<u8>, i64, i64, u64, TxId, bool);
+
+/// Accounted owned memory for one pending in-memory container.
+///
+/// `inline_payload_bytes` is exact for the `Vec<Fact>` allocation, a lower
+/// bound based on reported capacity for `HashSet`, and logical entry payload
+/// only for `BTreeMap` indexes. B-tree node headers, hash control bytes, and
+/// allocator metadata are intentionally left to the RSS residual.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMemoryComponent {
+    /// Number of live entries.
+    pub entries: u64,
+    /// Container capacity where exposed; otherwise equal to `entries`.
+    pub capacity: u64,
+    /// Inline entry payload reserved or logically occupied by the container.
+    pub inline_payload_bytes: u64,
+    /// Heap capacity owned by attribute strings.
+    pub owned_attribute_bytes: u64,
+    /// Separately allocated attribute buffers.
+    pub owned_attribute_allocations: u64,
+    /// Heap capacity owned by encoded or string-like values.
+    pub owned_value_bytes: u64,
+    /// Separately allocated encoded or string-like value buffers.
+    pub owned_value_allocations: u64,
+    /// Sum of the accounted byte fields above.
+    pub accounted_bytes: u64,
+}
+
+/// Live pending-memory ownership snapshot.
+///
+/// Exposed only to tests and the non-default `bench-internals` feature. This
+/// is diagnostic evidence, not a stable public API or an on-disk format.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMemoryDiagnostics {
+    /// Pending fact log allocation and nested strings.
+    pub facts: PendingMemoryComponent,
+    /// Duplicate-detection hash set and its separately owned key bytes.
+    pub duplicate_keys: PendingMemoryComponent,
+    /// Pending EAVT index payload.
+    pub eavt: PendingMemoryComponent,
+    /// Pending AEVT index payload.
+    pub aevt: PendingMemoryComponent,
+    /// Pending AVET index payload.
+    pub avet: PendingMemoryComponent,
+    /// Pending VAET index payload (only `Value::Ref` facts).
+    pub vaet: PendingMemoryComponent,
+    /// Sum across all accounted live components.
+    pub total_accounted_bytes: u64,
+    /// Bytes not represented by the accounting: tree nodes, hash controls,
+    /// allocator metadata/fragmentation, reader caches, and process runtime.
+    pub excludes_container_and_allocator_overhead: bool,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum CurrentValidTime {
@@ -194,6 +251,48 @@ fn pending_snapshot_bytes(pending: &[(AevtKey, FactRef)]) -> u64 {
             .capacity()
             .saturating_add(key.value_bytes.capacity());
         total.saturating_add(usize_to_u64(entry.saturating_add(owned)))
+    })
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn value_owned_capacity(value: &Value) -> usize {
+    match value {
+        Value::String(value) | Value::Keyword(value) => value.capacity(),
+        Value::Integer(_) | Value::Float(_) | Value::Boolean(_) | Value::Ref(_) | Value::Null => 0,
+    }
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn memory_component(
+    entries: usize,
+    capacity: usize,
+    inline_payload_bytes: usize,
+    owned_attribute_bytes: usize,
+    owned_attribute_allocations: usize,
+    owned_value_bytes: usize,
+    owned_value_allocations: usize,
+) -> PendingMemoryComponent {
+    let inline_payload_bytes = usize_to_u64(inline_payload_bytes);
+    let owned_attribute_bytes = usize_to_u64(owned_attribute_bytes);
+    let owned_value_bytes = usize_to_u64(owned_value_bytes);
+    PendingMemoryComponent {
+        entries: usize_to_u64(entries),
+        capacity: usize_to_u64(capacity),
+        inline_payload_bytes,
+        owned_attribute_bytes,
+        owned_attribute_allocations: usize_to_u64(owned_attribute_allocations),
+        owned_value_bytes,
+        owned_value_allocations: usize_to_u64(owned_value_allocations),
+        accounted_bytes: inline_payload_bytes
+            .saturating_add(owned_attribute_bytes)
+            .saturating_add(owned_value_bytes),
+    }
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn sum_component_bytes(components: &[PendingMemoryComponent]) -> u64 {
+    components.iter().fold(0_u64, |total, component| {
+        total.saturating_add(component.accounted_bytes)
     })
 }
 
@@ -744,6 +843,165 @@ impl FactStorage {
     pub(crate) fn pending_fact_count(&self) -> usize {
         let d = self.data.read().unwrap_or_else(|e| e.into_inner());
         d.facts.len()
+    }
+
+    /// Account live ownership in the pending fact log, duplicate set, and
+    /// covering indexes without cloning any of them.
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn pending_memory_diagnostics(&self) -> PendingMemoryDiagnostics {
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+
+        let facts = memory_component(
+            d.facts.len(),
+            d.facts.capacity(),
+            d.facts
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Fact>()),
+            d.facts.iter().fold(0_usize, |total, fact| {
+                total.saturating_add(fact.attribute.capacity())
+            }),
+            d.facts
+                .iter()
+                .filter(|fact| fact.attribute.capacity() > 0)
+                .count(),
+            d.facts.iter().fold(0_usize, |total, fact| {
+                total.saturating_add(value_owned_capacity(&fact.value))
+            }),
+            d.facts
+                .iter()
+                .filter(|fact| value_owned_capacity(&fact.value) > 0)
+                .count(),
+        );
+
+        let duplicate_keys = memory_component(
+            d.pending_keys.len(),
+            d.pending_keys.capacity(),
+            d.pending_keys
+                .capacity()
+                .saturating_mul(std::mem::size_of::<PendingKey>()),
+            d.pending_keys
+                .iter()
+                .fold(0_usize, |total, key| total.saturating_add(key.1.capacity())),
+            d.pending_keys
+                .iter()
+                .filter(|key| key.1.capacity() > 0)
+                .count(),
+            d.pending_keys
+                .iter()
+                .fold(0_usize, |total, key| total.saturating_add(key.2.capacity())),
+            d.pending_keys
+                .iter()
+                .filter(|key| key.2.capacity() > 0)
+                .count(),
+        );
+
+        let eavt = memory_component(
+            d.pending_indexes.eavt.len(),
+            d.pending_indexes.eavt.len(),
+            d.pending_indexes
+                .eavt
+                .len()
+                .saturating_mul(std::mem::size_of::<(EavtKey, FactRef)>()),
+            d.pending_indexes.eavt.keys().fold(0_usize, |total, key| {
+                total.saturating_add(key.attribute.capacity())
+            }),
+            d.pending_indexes
+                .eavt
+                .keys()
+                .filter(|key| key.attribute.capacity() > 0)
+                .count(),
+            d.pending_indexes.eavt.keys().fold(0_usize, |total, key| {
+                total.saturating_add(key.value_bytes.capacity())
+            }),
+            d.pending_indexes
+                .eavt
+                .keys()
+                .filter(|key| key.value_bytes.capacity() > 0)
+                .count(),
+        );
+        let aevt = memory_component(
+            d.pending_indexes.aevt.len(),
+            d.pending_indexes.aevt.len(),
+            d.pending_indexes
+                .aevt
+                .len()
+                .saturating_mul(std::mem::size_of::<(AevtKey, FactRef)>()),
+            d.pending_indexes.aevt.keys().fold(0_usize, |total, key| {
+                total.saturating_add(key.attribute.capacity())
+            }),
+            d.pending_indexes
+                .aevt
+                .keys()
+                .filter(|key| key.attribute.capacity() > 0)
+                .count(),
+            d.pending_indexes.aevt.keys().fold(0_usize, |total, key| {
+                total.saturating_add(key.value_bytes.capacity())
+            }),
+            d.pending_indexes
+                .aevt
+                .keys()
+                .filter(|key| key.value_bytes.capacity() > 0)
+                .count(),
+        );
+        let avet = memory_component(
+            d.pending_indexes.avet.len(),
+            d.pending_indexes.avet.len(),
+            d.pending_indexes
+                .avet
+                .len()
+                .saturating_mul(std::mem::size_of::<(AvetKey, FactRef)>()),
+            d.pending_indexes.avet.keys().fold(0_usize, |total, key| {
+                total.saturating_add(key.attribute.capacity())
+            }),
+            d.pending_indexes
+                .avet
+                .keys()
+                .filter(|key| key.attribute.capacity() > 0)
+                .count(),
+            d.pending_indexes.avet.keys().fold(0_usize, |total, key| {
+                total.saturating_add(key.value_bytes.capacity())
+            }),
+            d.pending_indexes
+                .avet
+                .keys()
+                .filter(|key| key.value_bytes.capacity() > 0)
+                .count(),
+        );
+        let vaet = memory_component(
+            d.pending_indexes.vaet.len(),
+            d.pending_indexes.vaet.len(),
+            d.pending_indexes
+                .vaet
+                .len()
+                .saturating_mul(std::mem::size_of::<(VaetKey, FactRef)>()),
+            d.pending_indexes.vaet.keys().fold(0_usize, |total, key| {
+                total.saturating_add(key.attribute.capacity())
+            }),
+            d.pending_indexes
+                .vaet
+                .keys()
+                .filter(|key| key.attribute.capacity() > 0)
+                .count(),
+            0,
+            0,
+        );
+        PendingMemoryDiagnostics {
+            facts,
+            duplicate_keys,
+            eavt,
+            aevt,
+            avet,
+            vaet,
+            total_accounted_bytes: sum_component_bytes(&[
+                facts,
+                duplicate_keys,
+                eavt,
+                aevt,
+                avet,
+                vaet,
+            ]),
+            excludes_container_and_allocator_overhead: true,
+        }
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -3093,6 +3351,62 @@ mod tests {
         );
         assert_eq!(result[0].valid_from, w2.0);
         assert_eq!(result[0].valid_to, w2.1);
+    }
+
+    #[test]
+    fn pending_memory_diagnostics_accounts_each_live_owner_without_cloning() {
+        let storage = FactStorage::new();
+        storage
+            .transact(
+                vec![
+                    (
+                        uuid::Uuid::from_u128(1),
+                        ":memory/int".to_string(),
+                        Value::Integer(1),
+                    ),
+                    (
+                        uuid::Uuid::from_u128(2),
+                        ":memory/string".to_string(),
+                        Value::String("owned-value".to_string()),
+                    ),
+                    (
+                        uuid::Uuid::from_u128(3),
+                        ":memory/ref".to_string(),
+                        Value::Ref(uuid::Uuid::from_u128(4)),
+                    ),
+                ],
+                None,
+            )
+            .unwrap();
+
+        let diagnostics = storage.pending_memory_diagnostics();
+        assert_eq!(diagnostics.facts.entries, 3);
+        assert!(diagnostics.facts.capacity >= 3);
+        assert_eq!(diagnostics.duplicate_keys.entries, 3);
+        assert!(diagnostics.duplicate_keys.capacity >= 3);
+        assert_eq!(diagnostics.eavt.entries, 3);
+        assert_eq!(diagnostics.aevt.entries, 3);
+        assert_eq!(diagnostics.avet.entries, 3);
+        assert_eq!(diagnostics.vaet.entries, 1);
+        assert!(diagnostics.facts.owned_attribute_bytes > 0);
+        assert_eq!(diagnostics.facts.owned_attribute_allocations, 3);
+        assert!(diagnostics.facts.owned_value_bytes > 0);
+        assert_eq!(diagnostics.facts.owned_value_allocations, 1);
+        assert!(diagnostics.duplicate_keys.owned_value_bytes > 0);
+        assert_eq!(diagnostics.duplicate_keys.owned_attribute_allocations, 3);
+        assert_eq!(diagnostics.duplicate_keys.owned_value_allocations, 3);
+        assert_eq!(
+            diagnostics.total_accounted_bytes,
+            diagnostics
+                .facts
+                .accounted_bytes
+                .saturating_add(diagnostics.duplicate_keys.accounted_bytes)
+                .saturating_add(diagnostics.eavt.accounted_bytes)
+                .saturating_add(diagnostics.aevt.accounted_bytes)
+                .saturating_add(diagnostics.avet.accounted_bytes)
+                .saturating_add(diagnostics.vaet.accounted_bytes)
+        );
+        assert!(diagnostics.excludes_container_and_allocator_overhead);
     }
 
     #[test]

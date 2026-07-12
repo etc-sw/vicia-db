@@ -100,8 +100,9 @@ required-features = ["bench-internals"]
 [features]
 default = []
 wasm = []
-# Non-default diagnostics used only by repository benchmark harnesses. This
-# feature does not alter the default public API or the on-disk format.
+# Non-default cursor and pending/WAL memory diagnostics used only by repository
+# benchmark harnesses. This feature does not alter the default public API or
+# the on-disk format.
 bench-internals = []
 browser = [
     "dep:wasm-bindgen",

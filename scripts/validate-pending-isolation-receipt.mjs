@@ -21,7 +21,7 @@ const unrelatedCounts =
     ? [0, 10_000, 100_000, 1_000_000]
     : [0, 100, 1_000, 10_000];
 
-assert(receipt.schema === "vicia.pending-isolation.v1", "unexpected schema");
+assert(receipt.schema === "vicia.pending-isolation.v2", "unexpected schema");
 assert(receipt.profile === expectedProfile, "unexpected profile");
 assert(receipt.baseFacts === BASE_FACTS, "unexpected committed base size");
 assert(receipt.repetitions === repetitions, "unexpected repetition count");
@@ -241,6 +241,114 @@ function validateVariant(variant, expectedSamples, expectedCount, expectedChecks
       `${variant.label}: ${field} summary mismatch`,
     );
   }
+  validateMemoryAudit(variant);
+}
+
+function validateMemoryAudit(variant) {
+  const audit = variant.memoryAudit;
+  assert(audit && typeof audit === "object", `${variant.label}: memory audit missing`);
+  for (const field of [
+    "rssBeforeTrimBytes",
+    "rssAfterLiveTrimBytes",
+    "replayRetainedRssBytes",
+    "processPeakRssBytes",
+    "replayOverlapAccountedBytes",
+    "rssAfterDropTrimBytes",
+    "liveDatabaseRssBytes",
+    "liveUnaccountedRssBytes",
+  ]) {
+    assert(
+      Number.isSafeInteger(audit[field]) && audit[field] >= 0,
+      `${variant.label}: invalid memoryAudit.${field}`,
+    );
+  }
+  assert(
+    typeof audit.allocatorTrimSupported === "boolean" &&
+      typeof audit.allocatorTrimReleased === "boolean",
+    `${variant.label}: allocator trim state missing`,
+  );
+  assert(
+    audit.replayRetainedRssBytes ===
+      Math.max(0, audit.rssBeforeTrimBytes - audit.rssAfterLiveTrimBytes),
+    `${variant.label}: replay-retained RSS arithmetic mismatch`,
+  );
+  assert(
+    audit.liveDatabaseRssBytes ===
+      Math.max(0, audit.rssAfterLiveTrimBytes - audit.rssAfterDropTrimBytes),
+    `${variant.label}: live database RSS arithmetic mismatch`,
+  );
+
+  const pending = audit.pending;
+  assert(pending, `${variant.label}: pending accounting missing`);
+  const components = ["facts", "duplicateKeys", "eavt", "aevt", "avet", "vaet"];
+  let pendingTotal = 0;
+  for (const name of components) {
+    const component = pending[name];
+    assert(component, `${variant.label}: pending.${name} missing`);
+    for (const field of [
+      "entries",
+      "capacity",
+      "inlinePayloadBytes",
+      "ownedAttributeBytes",
+      "ownedAttributeAllocations",
+      "ownedValueBytes",
+      "ownedValueAllocations",
+      "accountedBytes",
+    ]) {
+      assert(
+        Number.isSafeInteger(component[field]) && component[field] >= 0,
+        `${variant.label}: invalid pending.${name}.${field}`,
+      );
+    }
+    assert(
+      component.accountedBytes ===
+        component.inlinePayloadBytes +
+          component.ownedAttributeBytes +
+          component.ownedValueBytes,
+      `${variant.label}: pending.${name} byte sum mismatch`,
+    );
+    pendingTotal += component.accountedBytes;
+  }
+  assert(
+    pendingTotal === pending.totalAccountedBytes,
+    `${variant.label}: pending total mismatch`,
+  );
+  assert(
+    pending.facts.entries === variant.pendingFacts &&
+      pending.duplicateKeys.entries === variant.pendingFacts &&
+      pending.eavt.entries === variant.pendingFacts &&
+      pending.aevt.entries === variant.pendingFacts &&
+      pending.avet.entries === variant.pendingFacts &&
+      pending.vaet.entries === 0,
+    `${variant.label}: pending component entry ownership mismatch`,
+  );
+
+  const wal = audit.walReplay;
+  assert(wal && wal.facts === variant.pendingFacts, `${variant.label}: WAL fact accounting`);
+  assert(
+    wal.totalAccountedBytes ===
+      wal.entryVectorBytes +
+        wal.factVectorBytes +
+        wal.ownedAttributeBytes +
+        wal.ownedValueBytes,
+    `${variant.label}: WAL byte sum mismatch`,
+  );
+  for (const field of ["ownedAttributeAllocations", "ownedValueAllocations"]) {
+    assert(
+      Number.isSafeInteger(wal[field]) && wal[field] >= 0,
+      `${variant.label}: invalid WAL ${field}`,
+    );
+  }
+  assert(
+    audit.replayOverlapAccountedBytes ===
+      pending.totalAccountedBytes + wal.totalAccountedBytes,
+    `${variant.label}: replay overlap sum mismatch`,
+  );
+  assert(
+    audit.liveUnaccountedRssBytes ===
+      Math.max(0, audit.liveDatabaseRssBytes - pending.totalAccountedBytes),
+    `${variant.label}: live unaccounted RSS arithmetic mismatch`,
+  );
 }
 
 function diagnosticsSeries(variant) {
