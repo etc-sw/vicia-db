@@ -1388,6 +1388,30 @@ Negation and disjunction improvements are smaller because those paths are O(N²)
 - **Backend mutex held on cache-cold page reads**: Concurrent B+tree scans serialise only when a page must be loaded from disk (cache miss). Cache-warm reads are fully parallel (#279/#281). Further per-page I/O parallelism is deferred to a future release.
 - **1M recursion not benchmarked**: `chain/depth_100` takes 16 s; `chain/depth_1000` was not run.
 
+## Covering AEVT Aggregate Read (2026-07-12)
+
+Single-pattern attribute aggregates now fold the net current view directly from
+covering AEVT entries. The cursor retains one entity's temporal/retraction state
+and feeds typed values into global or grouped accumulators; it does not build an
+attribute-sized `Vec<Fact>` or row binding map. Sparse BrowserDb execution owns
+the same cursor across IndexedDB awaits, yields every 4,096 entries, and bounds
+clean unpinned staging to 192 pages.
+
+HAL7800, release build, 1M unique Integer facts, 20 measured repetitions:
+
+| Metric | Previous clean baseline | Covering cursor |
+|---|---:|---:|
+| Aggregate p50 | 1,631 ms | ~343 ms |
+| Aggregate p95 | 1,698 ms | ~356 ms |
+| Query RSS delta | 380.8 MiB | 1.25 MiB |
+| Retained RSS delta | 78.9 MiB | 1.25 MiB |
+| Count / checksum | 1,000,000 / 499999500000 | exact |
+
+The Chrome 150 browser-WASM suite includes a 12K paged aggregate that crosses
+multiple 4,096-entry yields, processes a scheduled browser task before query
+completion, performs no full-store IndexedDB read, and releases staging after
+completion.
+
 ---
 
 ## Reproducing

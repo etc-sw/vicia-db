@@ -1873,6 +1873,8 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn paged_attribute_aggregate_resumes_and_releases_staging() {
+        use std::cell::Cell;
+
         let fact_count = 12_000usize;
         let bytes = build_sparse_v11_fixture(fact_count).await;
         let db_name = format!("vicia-paged-aggregate-{}", js_sys::Date::now());
@@ -1887,6 +1889,14 @@ mod tests {
             .await
             .expect("open aggregate fixture");
 
+        let input_processed = Rc::new(Cell::new(false));
+        let input_processed_in_task = input_processed.clone();
+        let task = Closure::once_into_js(move || input_processed_in_task.set(true));
+        web_sys::window()
+            .expect("browser window")
+            .set_timeout_with_callback_and_timeout_and_arguments_0(task.unchecked_ref(), 0)
+            .expect("schedule synthetic input task");
+
         let encoded = db
             .execute("(query [:find (count ?v) (sum ?v) :where [?e :sparse/value ?v]])".to_string())
             .await
@@ -1896,6 +1906,10 @@ mod tests {
         assert_eq!(
             result["results"],
             serde_json::json!([[fact_count, expected_sum]])
+        );
+        assert!(
+            input_processed.get(),
+            "browser task must run before the aggregate completes"
         );
         let counters = idb.read_counters_for_test();
         assert_eq!(counters.full_store_reads, 0);
