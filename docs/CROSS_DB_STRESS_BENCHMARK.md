@@ -21,6 +21,11 @@ testbed, OS, architecture, CPU, logical CPU count, and host memory travel with
 the receipt. The summary rejects mixed-host or mixed-source rows and recomputes
 percentiles and correctness from raw samples.
 
+`peak RSS` is the process-wide Linux `VmHWM` across build/checkpoint, reopen,
+reads, and scan. It is a whole-workload capacity signal, not a scan-only memory
+measurement. Use a fresh-process `verify` run under `/usr/bin/time -v` when
+attributing query-only resident memory.
+
 ## Comparison roles
 
 | Engine | Role | Interpretation |

@@ -17,21 +17,24 @@ use std::sync::{Arc, RwLock};
 /// Returns true if any where clause (at any depth) contains a per-fact
 /// pseudo-attribute pattern (ValidFrom / ValidTo / TxCount / TxId).
 /// Used to enforce the `:any-valid-time` requirement.
+fn clauses_use_per_fact_pseudo_attr(clauses: &[WhereClause]) -> bool {
+    clauses.iter().any(|c| match c {
+        WhereClause::Pattern(p) => matches!(
+            &p.attribute,
+            AttributeSpec::Pseudo(pa) if pa.is_per_fact()
+        ),
+        WhereClause::Not(inner) => clauses_use_per_fact_pseudo_attr(inner),
+        WhereClause::NotJoin { clauses: inner, .. } => clauses_use_per_fact_pseudo_attr(inner),
+        WhereClause::Or(branches) => branches.iter().any(|b| clauses_use_per_fact_pseudo_attr(b)),
+        WhereClause::OrJoin { branches, .. } => {
+            branches.iter().any(|b| clauses_use_per_fact_pseudo_attr(b))
+        }
+        _ => false,
+    })
+}
+
 fn query_uses_per_fact_pseudo_attr(query: &DatalogQuery) -> bool {
-    fn check_clauses(clauses: &[WhereClause]) -> bool {
-        clauses.iter().any(|c| match c {
-            WhereClause::Pattern(p) => matches!(
-                &p.attribute,
-                AttributeSpec::Pseudo(pa) if pa.is_per_fact()
-            ),
-            WhereClause::Not(inner) => check_clauses(inner),
-            WhereClause::NotJoin { clauses: inner, .. } => check_clauses(inner),
-            WhereClause::Or(branches) => branches.iter().any(|b| check_clauses(b)),
-            WhereClause::OrJoin { branches, .. } => branches.iter().any(|b| check_clauses(b)),
-            _ => false,
-        })
-    }
-    check_clauses(&query.where_clauses)
+    clauses_use_per_fact_pseudo_attr(&query.where_clauses)
 }
 
 /// The result of executing a Datalog command via [`crate::db::Minigraf::execute`].
@@ -393,9 +396,8 @@ impl DatalogExecutor {
         };
 
         // Hard-error: per-fact pseudo-attrs require :any-valid-time.
-        if query_uses_per_fact_pseudo_attr(&query)
-            && !matches!(query.valid_at, Some(ValidAt::AnyValidTime))
-        {
+        let retain_fact_metadata = query_uses_per_fact_pseudo_attr(&query);
+        if retain_fact_metadata && !matches!(query.valid_at, Some(ValidAt::AnyValidTime)) {
             return Err(anyhow!(
                 "temporal pseudo-attributes :db/valid-from, :db/valid-to, :db/tx-count, and \
                  :db/tx-id require :any-valid-time; add :any-valid-time to your query"
@@ -404,9 +406,10 @@ impl DatalogExecutor {
 
         // Apply temporal filters before pattern matching
         let filtered_facts = self.filter_facts_for_query(&query)?;
-        let matcher = PatternMatcher::from_slice_with_valid_at(
+        let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
             filtered_facts.clone(),
             valid_at_value.clone(),
+            retain_fact_metadata,
         );
         // Acquire function registry before the plan loop — needed for inline Expr evaluation.
         let registry = self
@@ -559,9 +562,10 @@ impl DatalogExecutor {
                         // Expr-only body: no pre-computation possible.
                         return None;
                     }
-                    let matcher = PatternMatcher::from_slice_with_valid_at(
+                    let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
                         filtered_facts.clone(),
                         valid_at_value.clone(),
+                        clauses_use_per_fact_pseudo_attr(not_body),
                     );
                     let body_bindings = matcher.match_patterns(&patterns);
                     // Store all body bindings as sorted (key, value) vecs for probing.
@@ -610,9 +614,10 @@ impl DatalogExecutor {
                     if patterns.is_empty() {
                         return None;
                     }
-                    let matcher = PatternMatcher::from_slice_with_valid_at(
+                    let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
                         filtered_facts.clone(),
                         valid_at_value.clone(),
+                        clauses_use_per_fact_pseudo_attr(nj_clauses),
                     );
                     let body_bindings = matcher.match_patterns(&patterns);
                     if body_bindings.is_empty() {
@@ -820,9 +825,8 @@ impl DatalogExecutor {
         };
 
         // Hard-error: per-fact pseudo-attrs require :any-valid-time.
-        if query_uses_per_fact_pseudo_attr(&query)
-            && !matches!(query.valid_at, Some(ValidAt::AnyValidTime))
-        {
+        let retain_fact_metadata = query_uses_per_fact_pseudo_attr(&query);
+        if retain_fact_metadata && !matches!(query.valid_at, Some(ValidAt::AnyValidTime)) {
             return Err(anyhow!(
                 "temporal pseudo-attributes :db/valid-from, :db/valid-to, :db/tx-count, and \
                  :db/tx-id require :any-valid-time; add :any-valid-time to your query"
@@ -881,8 +885,11 @@ impl DatalogExecutor {
         let derived_facts: Arc<[Fact]> =
             Arc::from(derived_storage.get_asserted_facts().unwrap_or_default());
 
-        let matcher =
-            PatternMatcher::from_slice_with_valid_at(derived_facts.clone(), valid_at_value.clone());
+        let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
+            derived_facts.clone(),
+            valid_at_value.clone(),
+            retain_fact_metadata,
+        );
 
         // Acquire function registry before the plan loop — needed for inline Expr evaluation.
         let registry = self
@@ -1090,9 +1097,16 @@ impl DatalogExecutor {
                             .collect();
 
                         // Compute not_bindings: if no patterns, seed with current binding.
-                        let m = PatternMatcher::from_slice_with_valid_at(
+                        let retain_substituted_metadata = substituted.iter().any(|pattern| {
+                            matches!(
+                                &pattern.attribute,
+                                AttributeSpec::Pseudo(pseudo) if pseudo.is_per_fact()
+                            )
+                        });
+                        let m = PatternMatcher::from_slice_with_valid_at_and_metadata(
                             derived_facts.clone(),
                             valid_at_value.clone(),
+                            retain_substituted_metadata,
                         );
                         let mut not_bindings: Vec<Binding> = if substituted.is_empty() {
                             vec![binding.clone()]
@@ -1229,10 +1243,12 @@ fn not_body_matches(
         })
         .collect();
 
-    let matcher = crate::query::datalog::matcher::PatternMatcher::from_slice_with_valid_at(
-        storage.clone(),
-        valid_at,
-    );
+    let matcher =
+        crate::query::datalog::matcher::PatternMatcher::from_slice_with_valid_at_and_metadata(
+            storage.clone(),
+            valid_at,
+            clauses_use_per_fact_pseudo_attr(not_body),
+        );
     let mut not_bindings: Vec<Binding> = if patterns.is_empty() {
         // Expr-only not body: start with the outer binding so variables resolve.
         vec![outer.clone()]
@@ -1687,8 +1703,11 @@ pub(crate) fn evaluate_branch(
         })
         .collect();
 
-    let matcher =
-        PatternMatcher::from_slice_with_valid_at(storage.clone(), branch_valid_at_value.clone());
+    let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
+        storage.clone(),
+        branch_valid_at_value.clone(),
+        clauses_use_per_fact_pseudo_attr(branch),
+    );
     let bindings = if patterns.is_empty() {
         incoming
     } else {

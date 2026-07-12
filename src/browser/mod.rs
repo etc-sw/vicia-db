@@ -849,12 +849,16 @@ impl BrowserDb {
     }
 
     async fn execute_read_command(&self, command: DatalogCommand) -> Result<QueryResult, JsValue> {
-        if matches!(
-            &command,
-            DatalogCommand::Query(query) if QueryAccessPlan::for_query(query).is_full_scan()
-        ) {
-            self.prefetch_full_scan_pages().await?;
-        }
+        let demand_batch_pages = match &command {
+            DatalogCommand::Query(query) => {
+                let plan = QueryAccessPlan::for_query(query);
+                if plan.is_full_scan() {
+                    self.prefetch_full_scan_pages().await?;
+                }
+                plan.browser_demand_batch_pages()
+            }
+            _ => 1,
+        };
 
         let mut requested = HashSet::new();
         loop {
@@ -876,7 +880,8 @@ impl BrowserDb {
                                 "paged query requested page {page_id} again after it was staged"
                             )));
                         }
-                        self.fetch_and_stage_page(page_id).await?;
+                        self.fetch_and_stage_page_window(page_id, demand_batch_pages)
+                            .await?;
                     }
                     None => return Err(JsValue::from_str(&error.to_string())),
                 },
@@ -894,6 +899,61 @@ impl BrowserDb {
             .clone_handle();
         let page = idb.load_page(page_id).await?;
         self.verify_and_stage_pages(vec![(page_id, page)])
+    }
+
+    async fn fetch_and_stage_page_window(
+        &self,
+        required_page: u64,
+        batch_pages: u64,
+    ) -> Result<(), JsValue> {
+        if batch_pages <= 1 {
+            return self.fetch_and_stage_page(required_page).await;
+        }
+        let (idb, logical_page_count) = {
+            let inner = self.inner.borrow();
+            let idb = inner
+                .idb
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("paged read is missing its IndexedDB source"))?
+                .clone_handle();
+            let logical_page_count = inner
+                .pfs
+                .with_backend(BrowserBufferBackend::page_count_raw)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            (idb, logical_page_count)
+        };
+        let start = required_page / batch_pages * batch_pages;
+        let count = logical_page_count.saturating_sub(start).min(batch_pages);
+        let pages = idb.load_page_window(required_page, start, count).await?;
+
+        let mut verified = Vec::with_capacity(pages.len());
+        for (page_id, page) in pages {
+            let verification = self
+                .inner
+                .borrow()
+                .pfs
+                .verify_browser_fetched_page(page_id, &page);
+            match verification {
+                Ok(()) => verified.push((page_id, page)),
+                Err(error) if page_id == required_page => {
+                    return Err(JsValue::from_str(&error.to_string()));
+                }
+                Err(_) => {}
+            }
+        }
+        if !verified
+            .iter()
+            .any(|(page_id, _)| *page_id == required_page)
+        {
+            return Err(JsValue::from_str(&format!(
+                "required IndexedDB page {required_page} did not pass verification"
+            )));
+        }
+        self.inner
+            .borrow_mut()
+            .pfs
+            .with_backend_mut(|backend| backend.stage_clean_pages(verified))
+            .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
     fn verify_and_stage_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> Result<(), JsValue> {
@@ -1749,6 +1809,38 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn paged_attribute_range_batches_demand_callbacks() {
+        let fact_count = 400;
+        let bytes = build_sparse_v11_fixture(fact_count).await;
+        let db_name = format!("vicia-paged-attribute-batch-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open attribute-batch seed IDB");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed attribute-batch fixture");
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open attribute-batch fixture");
+        idb.reset_read_counters_for_test();
+
+        let result = db
+            .execute("(query [:find ?v :where [?e :sparse/value ?v]])".to_string())
+            .await
+            .expect("execute attribute range query");
+        let result: serde_json::Value =
+            serde_json::from_str(&result).expect("attribute range JSON");
+        assert_eq!(result["results"].as_array().map(Vec::len), Some(fact_count));
+        let counts = idb.read_counters_for_test();
+        assert_eq!(counts.full_store_reads, 0);
+        assert!(counts.pages_returned > counts.transactions);
+        assert!(
+            counts.pages_requested >= counts.transactions.saturating_mul(8),
+            "attribute range reads must amortize IndexedDB callback transactions"
+        );
+    }
+
+    #[wasm_bindgen_test]
     async fn paged_exact_entity_set_query_avoids_full_fact_prefetch() {
         let fact_count = 4_000;
         let bytes = build_sparse_v11_fixture(fact_count).await;
@@ -1806,9 +1898,9 @@ mod tests {
         let query_counts = idb.read_counters_for_test();
         assert_eq!(query_counts.full_store_reads, 0);
         assert!(query_counts.pages_returned > 0);
-        assert_eq!(
-            query_counts.pages_requested, query_counts.transactions,
-            "exact entity-set query must use single-page demand reads, not range prefetch"
+        assert!(
+            query_counts.pages_requested > query_counts.transactions,
+            "exact entity-set query must batch neighboring demand pages"
         );
         let inner = db.inner.borrow();
         inner.pfs.with_backend(|backend| {

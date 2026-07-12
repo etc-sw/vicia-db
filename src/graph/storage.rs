@@ -615,100 +615,152 @@ pub(crate) fn filter_facts_as_of(facts: Vec<Fact>, as_of: &AsOf) -> Vec<Fact> {
 /// valid-time scoped retraction cancels only the matching interval.
 /// Re-assertions after either retraction are preserved.
 ///
-/// Uses [`encode_value`] for the value key to handle floating-point edge cases
-/// (NaN canonicalisation, ±0.0 disambiguation) consistently with the rest of
-/// the storage layer.
+/// Value keys use the same canonical floating-point identity as
+/// [`encode_value`] (all NaNs equal, ±0.0 distinct) without allocating an
+/// encoded `Vec<u8>` for every input row.
 ///
 /// This is the single source of truth for retraction semantics, shared by
 /// `get_current_value` and `filter_facts_for_query`.
 ///
 /// # Implementation note
 ///
-/// This function uses two flat `HashMap`s in a single pass over the input:
+/// This function uses borrowed keys into the immutable input vector. The maps
+/// retain only identity references and winning row indexes; they never clone
+/// attributes, values, or complete facts. After the maps are dropped, winning
+/// facts are moved out of the original vector.
 ///
 /// - `max_unscoped_retract_tx`: EAV → highest unscoped retraction `tx_count`.
 /// - `max_scoped_retract_tx`: EAV + window → highest scoped retraction `tx_count`.
 /// - `by_window`: (EAV + valid_from + valid_to) → highest-`tx_count` assertion
 ///   for that time window.
 ///
-/// The retraction filter is applied in the final `filter_map` rather than
-/// eagerly. This means `by_window` temporarily
-/// holds assertions that will be filtered out, so on workloads where most
-/// EAV triples are immediately retracted it uses more peak memory than the
-/// previous per-group approach.  The trade-off is intentional: eliminating the
-/// per-group `Vec<Fact>` allocation yields a measurable throughput gain on large
-/// mostly-unique fact sets (see issue #227).
 pub(crate) fn net_asserted_facts(facts: Vec<Fact>) -> Vec<Fact> {
     use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
 
-    type EavKey = (EntityId, Attribute, Vec<u8>);
-    type WindowKey = (EntityId, Attribute, Vec<u8>, i64, i64);
+    #[derive(Clone, Copy)]
+    struct CanonicalValueRef<'a>(&'a Value);
 
-    let mut max_unscoped_retract_tx: HashMap<EavKey, u64> = HashMap::new();
-    let mut max_scoped_retract_tx: HashMap<WindowKey, u64> = HashMap::new();
-    let mut by_window: HashMap<WindowKey, Fact> = HashMap::new();
+    impl PartialEq for CanonicalValueRef<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            match (self.0, other.0) {
+                (Value::Float(left), Value::Float(right)) => {
+                    canonical_float_bits(*left) == canonical_float_bits(*right)
+                }
+                (left, right) => left == right,
+            }
+        }
+    }
 
-    for fact in facts {
-        let eav_key = (
-            fact.entity,
-            fact.attribute.clone(),
-            encode_value(&fact.value),
-        );
+    impl Eq for CanonicalValueRef<'_> {}
 
+    impl Hash for CanonicalValueRef<'_> {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            std::mem::discriminant(self.0).hash(state);
+            match self.0 {
+                Value::String(value) | Value::Keyword(value) => value.hash(state),
+                Value::Integer(value) => value.hash(state),
+                Value::Float(value) => canonical_float_bits(*value).hash(state),
+                Value::Boolean(value) => value.hash(state),
+                Value::Ref(value) => value.hash(state),
+                Value::Null => {}
+            }
+        }
+    }
+
+    fn canonical_float_bits(value: f64) -> u64 {
+        if value.is_nan() {
+            0x7FF8_0000_0000_0000
+        } else {
+            value.to_bits()
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    struct EavKey<'a> {
+        entity: EntityId,
+        attribute: &'a str,
+        value: CanonicalValueRef<'a>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    struct WindowKey<'a> {
+        eav: EavKey<'a>,
+        valid_from: i64,
+        valid_to: i64,
+    }
+
+    fn eav_key(fact: &Fact) -> EavKey<'_> {
+        EavKey {
+            entity: fact.entity,
+            attribute: &fact.attribute,
+            value: CanonicalValueRef(&fact.value),
+        }
+    }
+
+    fn window_key(fact: &Fact) -> WindowKey<'_> {
+        WindowKey {
+            eav: eav_key(fact),
+            valid_from: fact.valid_from,
+            valid_to: fact.valid_to,
+        }
+    }
+
+    let mut max_unscoped_retract_tx: HashMap<EavKey<'_>, u64> = HashMap::new();
+    let mut max_scoped_retract_tx: HashMap<WindowKey<'_>, u64> = HashMap::new();
+    let mut by_window: HashMap<WindowKey<'_>, usize> = HashMap::new();
+
+    for (index, fact) in facts.iter().enumerate() {
         if fact.asserted {
-            let window_key = (
-                eav_key.0,
-                eav_key.1,
-                eav_key.2,
-                fact.valid_from,
-                fact.valid_to,
-            );
-            match by_window.get(&window_key) {
-                None => {
-                    by_window.insert(window_key, fact);
-                }
-                Some(existing) if fact.tx_count > existing.tx_count => {
-                    by_window.insert(window_key, fact);
-                }
-                _ => {}
+            let key = window_key(fact);
+            let replace = by_window
+                .get(&key)
+                .and_then(|existing| facts.get(*existing))
+                .is_none_or(|existing| fact.tx_count > existing.tx_count);
+            if replace {
+                by_window.insert(key, index);
             }
         } else {
             let tx_count = fact.tx_count;
             if fact.valid_from == RETRACT_ALL_VALID_FROM && fact.valid_to == VALID_TIME_FOREVER {
                 max_unscoped_retract_tx
-                    .entry(eav_key)
+                    .entry(eav_key(fact))
                     .and_modify(|max_tx| *max_tx = (*max_tx).max(tx_count))
                     .or_insert(tx_count);
             } else {
-                let window_key = (
-                    eav_key.0,
-                    eav_key.1,
-                    eav_key.2,
-                    fact.valid_from,
-                    fact.valid_to,
-                );
                 max_scoped_retract_tx
-                    .entry(window_key)
+                    .entry(window_key(fact))
                     .and_modify(|max_tx| *max_tx = (*max_tx).max(tx_count))
                     .or_insert(tx_count);
             }
         }
     }
 
-    by_window
+    let mut keep = vec![false; facts.len()];
+    for index in by_window.values().copied() {
+        let Some(fact) = facts.get(index) else {
+            continue;
+        };
+        let unscoped_retract_tx = max_unscoped_retract_tx
+            .get(&eav_key(fact))
+            .copied()
+            .unwrap_or(0);
+        let scoped_retract_tx = max_scoped_retract_tx
+            .get(&window_key(fact))
+            .copied()
+            .unwrap_or(0);
+        if let Some(keep_fact) = keep.get_mut(index) {
+            *keep_fact = fact.tx_count > unscoped_retract_tx.max(scoped_retract_tx);
+        }
+    }
+    drop(by_window);
+    drop(max_scoped_retract_tx);
+    drop(max_unscoped_retract_tx);
+
+    facts
         .into_iter()
-        .filter_map(|((entity, attribute, value, valid_from, valid_to), fact)| {
-            let unscoped_retract_tx = max_unscoped_retract_tx
-                .get(&(entity, attribute.clone(), value.clone()))
-                .copied()
-                .unwrap_or(0);
-            let scoped_retract_tx = max_scoped_retract_tx
-                .get(&(entity, attribute, value, valid_from, valid_to))
-                .copied()
-                .unwrap_or(0);
-            let retract_tx = unscoped_retract_tx.max(scoped_retract_tx);
-            (fact.tx_count > retract_tx).then_some(fact)
-        })
+        .zip(keep)
+        .filter_map(|(fact, keep)| keep.then_some(fact))
         .collect()
 }
 
@@ -2269,6 +2321,41 @@ mod tests {
             "only the post-retraction assertion should survive"
         );
         assert_eq!(result[0].tx_count, 6);
+    }
+
+    #[test]
+    fn test_net_asserted_preserves_canonical_float_identity() {
+        let entity = uuid::Uuid::new_v4();
+        let attr = ":measure";
+        let window = (1_000_i64, VALID_TIME_FOREVER);
+        let facts = vec![
+            make_assert(entity, attr, Value::Float(f64::NAN), 1, window.0, window.1),
+            make_retract(
+                entity,
+                attr,
+                Value::Float(f64::from_bits(0x7FF0_0000_0000_0001)),
+                2,
+            ),
+            make_assert(entity, attr, Value::Float(-0.0), 3, window.0, window.1),
+            make_assert(entity, attr, Value::Float(0.0), 4, window.0, window.1),
+        ];
+
+        let result = net_asserted_facts(facts);
+        assert_eq!(
+            result.len(),
+            2,
+            "NaNs must coalesce while signed zero stays distinct"
+        );
+        assert!(result.iter().any(|fact| {
+            fact.value
+                .as_float()
+                .is_some_and(|value| value == 0.0 && value.is_sign_negative())
+        }));
+        assert!(result.iter().any(|fact| {
+            fact.value
+                .as_float()
+                .is_some_and(|value| value == 0.0 && value.is_sign_positive())
+        }));
     }
 
     /// A single retraction wipes all valid-time windows of the same EAV triple,

@@ -21,6 +21,9 @@ pub struct PatternMatcher {
     storage: MatcherStorage,
     /// The `:db/valid-at` value for this query context (Value::Null when not set).
     pub(crate) valid_at_value: Value,
+    /// Whether real fact matches must retain per-fact temporal metadata for a
+    /// following pseudo-attribute pattern in the same query plan.
+    retain_fact_metadata: bool,
 }
 
 impl PatternMatcher {
@@ -28,6 +31,7 @@ impl PatternMatcher {
         PatternMatcher {
             storage: MatcherStorage::Owned(storage),
             valid_at_value: Value::Null,
+            retain_fact_metadata: false,
         }
     }
 
@@ -39,15 +43,28 @@ impl PatternMatcher {
         PatternMatcher {
             storage: MatcherStorage::Slice(facts),
             valid_at_value: Value::Null,
+            retain_fact_metadata: false,
         }
     }
 
     /// Constructs a matcher with an explicit `:db/valid-at` binding value.
     /// Used by the executor when the query has a known `valid_at` point.
+    #[cfg(test)]
     pub(crate) fn from_slice_with_valid_at(facts: Arc<[Fact]>, valid_at: Value) -> Self {
+        Self::from_slice_with_valid_at_and_metadata(facts, valid_at, false)
+    }
+
+    /// Constructs a matcher that retains hidden fact metadata only when the
+    /// query actually contains per-fact pseudo-attribute patterns.
+    pub(crate) fn from_slice_with_valid_at_and_metadata(
+        facts: Arc<[Fact]>,
+        valid_at: Value,
+        retain_fact_metadata: bool,
+    ) -> Self {
         PatternMatcher {
             storage: MatcherStorage::Slice(facts),
             valid_at_value: valid_at,
+            retain_fact_metadata,
         }
     }
 
@@ -99,23 +116,22 @@ impl PatternMatcher {
                 if !self.match_component(&pattern.value, &fact.value, &mut bindings) {
                     return None;
                 }
-                // Store hidden fact-metadata keys so that pseudo-attr patterns in the
-                // same planner-preserved fact bundle can read per-fact temporal/tx
-                // metadata without cross-joining against every fact for the entity.
-                // Keys are prefixed with `__f` and namespaced by entity UUID to avoid
-                // collisions across entities. They are never referenced in :find, so they
-                // are silently filtered out during result extraction.
-                let eid = fact.entity.to_string();
-                bindings.insert(format!("__fvf_{}", eid), Value::Integer(fact.valid_from));
-                bindings.insert(format!("__fvt_{}", eid), Value::Integer(fact.valid_to));
-                bindings.insert(
-                    format!("__ftc_{}", eid),
-                    Value::Integer(fact.tx_count.cast_signed()),
-                );
-                bindings.insert(
-                    format!("__fti_{}", eid),
-                    Value::Integer(fact.tx_id.cast_signed()),
-                );
+                if self.retain_fact_metadata {
+                    // Store hidden fact-metadata keys only for queries that contain a
+                    // following per-fact pseudo-attribute pattern. Ordinary matches must
+                    // not pay four UUID-string allocations per result row.
+                    let eid = fact.entity.to_string();
+                    bindings.insert(format!("__fvf_{}", eid), Value::Integer(fact.valid_from));
+                    bindings.insert(format!("__fvt_{}", eid), Value::Integer(fact.valid_to));
+                    bindings.insert(
+                        format!("__ftc_{}", eid),
+                        Value::Integer(fact.tx_count.cast_signed()),
+                    );
+                    bindings.insert(
+                        format!("__fti_{}", eid),
+                        Value::Integer(fact.tx_id.cast_signed()),
+                    );
+                }
             }
             AttributeSpec::Pseudo(pseudo) => {
                 // Pseudo-attribute: skip stored attribute match; bind fact metadata
@@ -708,6 +724,44 @@ mod tests {
         let results = matcher.match_pattern(&pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].get("?e"), Some(&Value::Ref(alice_id)));
+        assert!(
+            results[0].keys().all(|key| !key.starts_with("__f")),
+            "ordinary matches must not retain hidden temporal metadata"
+        );
+    }
+
+    #[test]
+    fn test_match_retains_metadata_only_when_requested() {
+        let storage = FactStorage::new();
+        let alice_id = Uuid::new_v4();
+        storage
+            .transact(
+                vec![(
+                    alice_id,
+                    ":person/name".to_string(),
+                    Value::String("Alice".to_string()),
+                )],
+                None,
+            )
+            .unwrap();
+        let facts: Arc<[_]> = Arc::from(storage.get_all_facts().unwrap());
+        let matcher =
+            PatternMatcher::from_slice_with_valid_at_and_metadata(facts, Value::Null, true);
+        let pattern = Pattern::new(
+            EdnValue::Symbol("?e".to_string()),
+            EdnValue::Keyword(":person/name".to_string()),
+            EdnValue::Symbol("?name".to_string()),
+        );
+
+        let results = matcher.match_pattern(&pattern);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]
+                .keys()
+                .filter(|key| key.starts_with("__f"))
+                .count(),
+            4
+        );
     }
 
     #[test]

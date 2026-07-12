@@ -262,6 +262,95 @@ impl IndexedDbBackend {
             .ok_or_else(|| JsValue::from_str(&format!("IndexedDB page {page_id} is missing")))
     }
 
+    /// Load one required page plus any valid numeric neighbors returned from
+    /// the same IndexedDB range request. Missing or malformed neighbors are
+    /// ignored because they were speculative; the required page remains a
+    /// strict authority read.
+    pub(crate) async fn load_page_window(
+        &self,
+        required_page: u64,
+        start_page: u64,
+        page_count: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, JsValue> {
+        if page_count == 0 {
+            return Err(JsValue::from_str("IndexedDB page window must not be empty"));
+        }
+        let last_page = start_page
+            .checked_add(page_count - 1)
+            .ok_or_else(|| JsValue::from_str("IndexedDB page window overflows u64"))?;
+        if required_page < start_page || required_page > last_page {
+            return Err(JsValue::from_str(
+                "IndexedDB required page is outside its speculative window",
+            ));
+        }
+        validate_page_id(start_page)?;
+        validate_page_id(last_page)?;
+
+        #[cfg(test)]
+        self.record_read_for_test(page_count, false);
+
+        let tx = self
+            .db
+            .transaction_with_str_and_mode(&self.store_name, IdbTransactionMode::Readonly)?;
+        let store = tx.object_store(&self.store_name)?;
+        let authority_request = store.get(&JsValue::from_f64(0.0))?;
+        let lower = JsValue::from_f64(start_page as f64);
+        let upper = JsValue::from_f64(last_page as f64);
+        let range = IdbKeyRange::bound(&lower, &upper)?;
+        let keys_request = store.get_all_keys_with_key(range.as_ref())?;
+        let values_request = store.get_all_with_key(range.as_ref())?;
+        let authority_promise = request_to_promise(authority_request.as_ref());
+        let keys_promise = request_to_promise(keys_request.as_ref());
+        let values_promise = request_to_promise(values_request.as_ref());
+
+        let authority_value = JsFuture::from(authority_promise).await?;
+        let observed_authority = decode_optional_page_zero(authority_value)?;
+        self.ensure_pinned_authority(&observed_authority)?;
+        let keys: Array = JsFuture::from(keys_promise)
+            .await?
+            .dyn_into()
+            .map_err(|_| JsValue::from_str("IndexedDB page-window keys result is not an Array"))?;
+        let values: Array = JsFuture::from(values_promise)
+            .await?
+            .dyn_into()
+            .map_err(|_| {
+                JsValue::from_str("IndexedDB page-window values result is not an Array")
+            })?;
+        if keys.length() != values.length() {
+            return Err(JsValue::from_str(
+                "IndexedDB page-window keys and values have different lengths",
+            ));
+        }
+
+        #[cfg(test)]
+        self.record_returned_pages_for_test(u64::from(values.length()));
+
+        let capacity = usize::try_from(values.length())
+            .map_err(|_| JsValue::from_str("IndexedDB page window exceeds addressable memory"))?;
+        let mut pages = Vec::with_capacity(capacity);
+        let mut required_found = false;
+        for offset in 0..values.length() {
+            let page_id = match decode_numeric_page_key(keys.get(offset)) {
+                Ok(page_id) => page_id,
+                Err(error) => return Err(error),
+            };
+            match decode_page_value(page_id, values.get(offset)) {
+                Ok(page) => {
+                    required_found |= page_id == required_page;
+                    pages.push((page_id, page));
+                }
+                Err(error) if page_id == required_page => return Err(error),
+                Err(_) => {}
+            }
+        }
+        if !required_found {
+            return Err(JsValue::from_str(&format!(
+                "IndexedDB page {required_page} is missing"
+            )));
+        }
+        Ok(pages)
+    }
+
     /// Count numeric page records without materializing the key set.
     ///
     /// The store remains numeric-only for compatibility with prior browser
@@ -908,6 +997,39 @@ mod tests {
         assert_eq!(counters.pages_requested, 4);
         assert_eq!(counters.pages_returned, 4);
         assert_eq!(counters.full_store_reads, 0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn speculative_page_window_requires_only_the_demanded_page() {
+        let db_name = format!("vicia-idb-page-window-{}", js_sys::Math::random());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open page-window test database");
+        idb.replace_all_pages(vec![(0, page(20)), (1, page(21)), (2, page(22))])
+            .await
+            .expect("seed page-window pages");
+        idb.reset_read_counters_for_test();
+
+        let pages = idb
+            .load_page_window(2, 1, 3)
+            .await
+            .expect("load required page with a missing speculative neighbor");
+        assert_eq!(
+            pages
+                .iter()
+                .map(|(page_id, _)| *page_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let counters = idb.read_counters_for_test();
+        assert_eq!(counters.transactions, 1);
+        assert_eq!(counters.pages_requested, 3);
+        assert_eq!(counters.pages_returned, 2);
+
+        assert!(
+            idb.load_page_window(3, 1, 3).await.is_err(),
+            "the required page remains strict even when neighbors are speculative"
+        );
     }
 
     #[wasm_bindgen_test]

@@ -33,6 +33,24 @@ pub(crate) enum QueryAccessPlan {
 }
 
 impl QueryAccessPlan {
+    /// Number of neighboring pages worth speculatively fetching after one
+    /// sparse browser miss. Entity lookups favor low over-read; attribute
+    /// ranges favor fewer IndexedDB/WASM callback round trips.
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    pub(crate) fn browser_demand_batch_pages(&self) -> u64 {
+        match self {
+            Self::FullScan => 0,
+            Self::Selective { lookups }
+                if lookups
+                    .iter()
+                    .any(|lookup| matches!(lookup, QueryLookup::Attribute(_))) =>
+            {
+                64
+            }
+            Self::Selective { .. } => 8,
+        }
+    }
+
     pub(crate) fn for_query(query: &DatalogQuery) -> Self {
         if query.uses_rules() {
             return Self::FullScan;
@@ -74,6 +92,17 @@ impl QueryAccessPlan {
         let Self::Selective { lookups } = self else {
             return storage.get_all_facts();
         };
+
+        // A single index range cannot contain cross-lookup duplicates. Return
+        // it directly instead of cloning every fact identity into a HashSet.
+        // This is the common browser path for exact-entity and single-attribute
+        // reads, including Vetch foreground authority queries.
+        if let [lookup] = lookups.as_slice() {
+            return match lookup {
+                QueryLookup::Entity(entity) => storage.get_facts_by_entity(entity),
+                QueryLookup::Attribute(attribute) => storage.get_facts_by_attribute(attribute),
+            };
+        }
 
         type LedgerIdentity = (Uuid, String, Vec<u8>, i64, i64, u64, u64, bool);
 
