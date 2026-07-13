@@ -3,8 +3,9 @@
 Status: H0 measurement, H2 bounded transaction-pinned current reads, and H3
 interactive/maintenance capability separation completed on 2026-07-13. The
 typed commit facade remains deferred because it is not a current Vetch blocker.
-H4 remains conditional on measured projection-refresh evidence; H5 adoption is
-the next open slice.
+H4 remains conditional on measured projection-refresh evidence. H5-A Vetch
+capability adoption completed on 2026-07-14; public example and raw API
+compatibility guidance remains as H5-B.
 
 Related authority:
 
@@ -657,6 +658,36 @@ If the condition is absent, close H4 as rejected and keep the public API
 smaller.
 
 ### H5 — Adoption, documentation, and compatibility decision
+
+#### H5-A — Vetch capability adoption
+
+Status: complete on 2026-07-14.
+
+Vetch's foreground authority worker now owns a persistent
+`BrowserInteractiveLedger`. Its request protocol exposes only bounded `query`
+and `executeAtomic`; every read declares row, byte, and temporal-selection
+budgets, and every write is a bounded atomic command list. Read-view selection
+owns current, any-valid-time, `asOf`, and exact valid-time coordinates, so
+Vetch no longer embeds temporal authority in Datalog strings.
+
+The disposable lifecycle worker now opens `BrowserMaintenanceLedger` for
+prepare, verified export, strict import, and idle maintenance. No foreground
+handle exposes portability or maintenance, and no lifecycle handle exposes
+query or write methods. Existing Vetch canvas, decision, GO, Braindump, and
+Condense adapters were migrated without changing their fact vocabulary or
+bi-temporal meaning. Wide proof reads were split into bounded identifier
+discovery plus exact-entity batches where required.
+
+The complete browser package was generated from clean Vicia source `c958ea3`.
+Its real Chrome suite passed 74/74 tests before the package and provenance
+receipt were synchronized into Vetch. Vetch's complete 16-smoke authority
+chain, TypeScript typecheck, and production build pass against that package.
+Vicia's full native test suite, formatting check, and warning-denied library
+Clippy also pass.
+
+H5-A deliberately preserves the raw `Minigraf` and `BrowserDb` compatibility
+surfaces. Their long-term support statement and public migration examples are
+H5-B; they are not a condition for Vetch to use the safer capability boundary.
 
 - Update browser/native examples to use the high-level facade for ordinary
   work.
