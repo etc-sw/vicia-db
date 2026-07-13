@@ -29,6 +29,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Record B-tree fill ratio and repeated attribute/entity encoding cost. The receipt retains exact payload/structural/unused bytes and conservative restart-10/16 prefix estimates for every index and fill candidate.
 - [ ] Reduce the 1M fixture from 338 MiB without changing the public API or v11 format.
 - [x] Correct the fill-selection evidence contract. The clean `vicia.storage-layout.v2` full receipt uses rotated fresh children, nearest-rank p95 with separate max/MAD, receipt-owned gates, and mutation-audited validation; no fill candidate passed every gate, so production remains at 75.
+- [x] Bound initial checkpoint serialized-index ownership. Reusing the lazy B-tree serializer reduces fill-75 checkpoint p50 from 5,032.714 to 4,505.694 ms and median peak RSS delta from 947.625 to 744.750 MiB without changing v11 bytes; phase timing attributes remaining tail to pending index sort and EAVT/AEVT/AVET builds rather than sync.
 - [x] Measure `1M base + 1/10/100/1K pending` checkpoint latency and peak RSS. The clean `vicia.checkpoint-construction.v2` receipt records 20 interleaved fresh samples per variant; checkpoint p95 is 2.630/3.023/3.370/9.864 ms and HWM-backed recompact RSS delta stays at 177.000–177.875 MiB.
 
 ## Regression gates
@@ -40,4 +41,4 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-- Attribute high-fill checkpoint tail samples to fact packing, EAVT/AEVT/AVET/VAET sort/build, integrity catalog publication, or sync. Use that evidence to stabilize fill 85 first; do not change the production fill until a clean full receipt passes every storage-layout v2 gate.
+- Stabilize pending index sort and EAVT/AEVT/AVET build variance at fill 75/85. Publication sync is not the bottleneck; do not change the production fill until a clean full receipt passes every storage-layout v2 gate.

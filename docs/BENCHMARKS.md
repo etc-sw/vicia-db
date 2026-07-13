@@ -1523,6 +1523,17 @@ catalog publication, or sync before changing B-tree finalization policy. Raw
 evidence is under
 `benchmarks/baselines/storage-layout/2026-07-13-hal7800-v2-full/receipt.json`.
 
+The follow-up clean run at source `aad95a7` adds per-sample phase timing and
+uses the lazy, byte-equivalent B-tree serializer for the initial checkpoint,
+matching the already-bounded recompact path. At production fill 75, checkpoint
+p50 fell from 5,032.714 to 4,505.694 ms and median peak RSS delta fell from
+947.625 to 744.750 MiB. Point and aggregate results remained exact. No higher
+fill was selected because checkpoint p95 still exceeded 115% of p50. Comparing
+the fill-75 median and p95 samples attributes the tail primarily to pending
+index sort (1,089.3 vs 1,946.0 ms) and the three populated B-tree builds, not
+publication sync (~1 ms). The receipt is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-lazy-full/receipt.json`.
+
 The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
