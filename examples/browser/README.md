@@ -31,30 +31,45 @@ Open `http://localhost:8080/examples/browser/` in Chrome or Firefox.
 - Exports the `.graph` blob and imports it into a fresh in-memory database.
 - Logs all results to the browser console (open with F12).
 
-## Bounded persistent use
+## Capability-scoped persistent use
 
-The small demo deliberately keeps the original synchronous export flow. For a
-large v11 authority database, use the generation-aware paged API and its
-asynchronous verified export:
+The small demo deliberately keeps the original raw compatibility flow. For an
+authority database, use the interactive capability for atomic foreground
+writes and bounded reads:
 
 ```js
-const db = await BrowserDb.openPaged("my-vicia-db");
-const result = await db.execute(
-  "(query [:find ?name :where [?e :person/name ?name]])",
+const ledger = await BrowserInteractiveLedger.open("my-vicia-db");
+await ledger.executeAtomic([
+  '(transact [[:alice :person/name "Alice"]])',
+]);
+const view = ledger.readView();
+const result = await view.query(
+  "(query [:find ?name :where [:alice :person/name ?name]])",
+  16,
+  8192,
 );
-const graphBytes = await db.exportGraphAsync();
 ```
 
-`openPaged()` bootstraps bounded catalog/manifest metadata and fetches verified
-fact/index pages when queries demand them. `exportGraphAsync()` reads and
-serialises the complete published prefix through the same v11 verifier;
-synchronous
-`exportGraph()` remains the eager/in-memory compatibility API. The 1M paged
-matrix measures `openPaged()` at a 17.8 ms five-run maximum with 51.1 MiB
-maximum 200 ms sampled PSS growth across open plus six point probes. Import,
-full export, maintenance, and a legacy v10 database's first paged migration
-remain O(total) work and belong in a disposable DedicatedWorker; see
-`docs/BENCHMARKS.md` A5-6d.
+`BrowserInteractiveLedger.open()` always uses the generation-aware paged path.
+It has no import, export, or maintenance methods. Those O(total) operations
+belong in a disposable DedicatedWorker that holds the same caller-owned Web
+Lock and opens a separate capability:
+
+```js
+const maintenance = await BrowserMaintenanceLedger.open("my-vicia-db");
+const outcome = await maintenance.runIdleMaintenance();
+const graphBytes = await maintenance.exportGraph();
+```
+
+The underlying paged path bootstraps bounded catalog/manifest metadata and
+fetches verified fact/index pages when reads demand them. Verified export
+serialises the complete published prefix through the same v11 verifier.
+`BrowserDb`, `openPaged()`, and `exportGraphAsync()` remain supported raw
+compatibility APIs. The 1M paged matrix measures `openPaged()` at a 17.8 ms
+five-run maximum with 51.1 MiB maximum 200 ms sampled PSS growth across open
+plus six point probes. Import, full export, maintenance, and a legacy v10
+database's first paged migration remain O(total) work; see `docs/BENCHMARKS.md`
+A5-6d.
 
 The recorded matrix is reproducible after building WASM and serving the repo:
 

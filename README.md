@@ -88,6 +88,44 @@ cargo add minigraf
 
 ## Quick Start
 
+Use capability-scoped handles for ordinary application work. The interactive
+handle can write and create bounded, transaction-pinned read views, but cannot
+run maintenance, backup, or full export. Open the maintenance handle only in an
+idle lifetime after the interactive handle has been dropped.
+
+```rust
+use minigraf::{InteractiveLedger, MaintenanceLedger, ReadViewOptions};
+
+{
+    let ledger = InteractiveLedger::open("myapp.graph")?;
+    ledger.execute_write(r#"(transact [[:alice :person/name "Alice"]
+                                       [:alice :friend :bob]
+                                       [:bob :person/name "Bob"]])"#)?;
+
+    let view = ledger.read_view(ReadViewOptions::default())?;
+    let _result = view.query(
+        r#"(query [:find ?name
+                   :where [:alice :friend ?friend]
+                          [?friend :person/name ?name]])"#,
+        16,
+    )?;
+}
+
+{
+    let maintenance = MaintenanceLedger::open("myapp.graph")?;
+    maintenance.run_idle_maintenance()?;
+    let backup = maintenance.backup_to("myapp-backup.graph")?;
+    assert!(backup.tx_count >= 1);
+}
+# Ok::<(), anyhow::Error>(())
+```
+
+### Raw compatibility and advanced Datalog
+
+`Minigraf` remains the supported unrestricted surface for rule registration,
+prepared queries, semantic bulk forget, REPL-style execution, and migrations
+from existing callers.
+
 ```rust
 use minigraf::{Minigraf, OpenOptions};
 

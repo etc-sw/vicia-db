@@ -1,9 +1,10 @@
 # Vetch-Oriented High-Level Ledger API Plan
 
-Status: H0 measured and H2 bounded transaction-pinned current reads completed
-on 2026-07-13. The typed commit facade remains deferred because it is not a
-current Vetch blocker. H3 interactive/maintenance capability separation is the
-next open slice.
+Status: H0 measurement, H2 bounded transaction-pinned current reads, and H3
+interactive/maintenance capability separation completed on 2026-07-13. The
+typed commit facade remains deferred because it is not a current Vetch blocker.
+H4 remains conditional on measured projection-refresh evidence; H5 adoption is
+the next open slice.
 
 Related authority:
 
@@ -572,18 +573,53 @@ Chrome paged suite (71/71). Canonical evidence is stored at
 
 ### H3 — Interactive and maintenance capability split
 
-- Publish separate interactive and maintenance constructors/facades.
-- Keep paged open mandatory for the browser interactive path.
-- Route maintenance, verified export/import, and full integrity work through
-  the disposable-worker contract.
-- Preserve the existing low-level methods for compatibility.
+Status: complete. Native and browser bindings expose distinct capability types
+while preserving `Minigraf` and `BrowserDb` as additive compatibility surfaces.
+
+Native `InteractiveLedger` exposes only transact/retract writes, explicit write
+transactions, bounded transaction-pinned read views, and the current cursor.
+Its file-backed lifetime does not checkpoint on drop: acknowledged WAL work
+remains durable and is replayed by a later `MaintenanceLedger` lifetime.
+`MaintenanceLedger` owns idle maintenance, exact backup, and complete fact-log
+export and has no foreground execute or read-view method.
+
+Browser `BrowserInteractiveLedger.open()` and
+`BrowserMaintenanceLedger.open()` both select the generation-aware paged
+IndexedDB path. The interactive type exposes `executeAtomic()` plus bounded
+read-view constructors and no maintenance or portability methods. The
+maintenance type exposes idle maintenance and verified export/strict import,
+and no execute or read methods. Vetch must still open the maintenance type in a
+disposable DedicatedWorker under the same caller-owned Web Lock.
+
+- Publish separate interactive and maintenance constructors/facades. ✅
+- Keep paged open mandatory for the browser interactive path. ✅
+- Route maintenance and verified export/import through the
+  disposable-worker capability. ✅
+- Preserve the existing low-level methods for compatibility. ✅
 
 Gate:
 
 - ordinary examples cannot accidentally call recompact or full export through
-  the interactive type;
-- maintenance remains atomic and previous-state safe under fault injection;
-- no foreground benchmark invokes O(total) work.
+  the interactive type; ✅
+- maintenance remains atomic and previous-state safe under fault injection; ✅
+- no foreground benchmark invokes O(total) work. ✅
+
+#### H3 receipt and verdict — 2026-07-13
+
+Rust compile-fail documentation proves that the interactive type cannot call
+maintenance and the maintenance type cannot execute writes. Focused native
+tests prove bounded reads, write-only transactions, WAL preservation across the
+interactive lifetime, and explicit maintenance publication. The generated
+`minigraf.d.ts` is checked by
+`scripts/validate-browser-capability-surface.mjs`, including the retained raw
+compatibility methods.
+
+The real Chrome suite passes 74/74 tests. Its H3 regressions prove atomic
+interactive write plus bounded read, mandatory paged persistent constructors,
+and maintenance-owned export/import. Existing fault-injected browser tests
+continue to prove that failed replacement preserves the previous live and
+durable authority. H3 changes no file-format bytes, Datalog semantics, or
+bi-temporal fact identity.
 
 ### H4 — Incremental change pages, only if measured
 

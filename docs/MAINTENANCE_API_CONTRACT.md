@@ -3,11 +3,13 @@
 Status: Q3-B native contract, A5-4 browser atomic compact maintenance, and the
 A5-6d 1M disposable-worker lifecycle boundary.
 
-`Minigraf::run_idle_maintenance()` and browser
-`BrowserDb.runIdleMaintenance()` are the public maintenance hooks in this
-line. They exist so an embedding application can move recompact work out of
-foreground receipt capture without depending on `PersistentFactStorage`,
-`CheckpointOutcome`, or raw recompact internals.
+`MaintenanceLedger::run_idle_maintenance()` and browser
+`BrowserMaintenanceLedger.runIdleMaintenance()` are the preferred maintenance
+hooks for new embedding code. `Minigraf::run_idle_maintenance()` and
+`BrowserDb.runIdleMaintenance()` remain supported on the raw compatibility
+surfaces. These hooks move recompact work out of foreground receipt capture
+without exposing `PersistentFactStorage`, `CheckpointOutcome`, or raw recompact
+internals.
 
 This document is caller guidance, not a new storage algorithm. It does not add
 background threads, sidecar files, a server mode, a new query surface, or a raw
@@ -61,15 +63,23 @@ Do not call the hook while a `WriteTransaction` is active on the same thread.
 The API rejects that case to avoid deadlock. Cross-thread callers serialize
 behind the normal write lock.
 
-For BrowserDb, keep foreground writes behind the caller-owned Web Lock, but do
-not run O(total) maintenance inside a long-lived authority worker. After write
-advice requests maintenance, end use of the foreground handle. A disposable
-DedicatedWorker acquires the same lock, opens through `openPaged()`, runs
+For capability-scoped native use, drop `InteractiveLedger` before opening
+`MaintenanceLedger` on the same path. Interactive drop deliberately performs no
+hidden checkpoint: WAL-backed writes remain durable, and the maintenance open
+replays them before an explicit idle-maintenance call publishes page 0 and
+retires the WAL. Raw `Minigraf` keeps its legacy best-effort drop checkpoint for
+backwards compatibility.
+
+For browser use, keep foreground writes behind the caller-owned Web Lock, but
+do not run O(total) maintenance inside a long-lived authority worker. After
+write advice requests maintenance, end use of `BrowserInteractiveLedger`. A
+disposable DedicatedWorker acquires the same lock, opens
+`BrowserMaintenanceLedger` through its mandatory paged constructor, runs
 maintenance, posts the outcome, and terminates after either success or failure;
-the next foreground operation reopens a fresh paged handle. The same-handle
-guard still rejects every read, export, or second mutation while a durability
-mutation is in flight; cross-handle and cross-tab writer ownership remains
-Vetch policy.
+the next foreground operation reopens a fresh interactive handle. The raw
+same-handle guard still rejects every read, export, or second mutation while a
+durability mutation is in flight; cross-handle and cross-tab writer ownership
+remains Vetch policy.
 
 ## Outcome Semantics
 
