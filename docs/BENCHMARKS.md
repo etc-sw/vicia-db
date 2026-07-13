@@ -1783,6 +1783,34 @@ The clean leaf receipts are preserved under
 the storage-layout receipt is preserved under
 `benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/`.
 
+The derived `vicia.storage-layout-variance.v1` report ties every checkpoint
+p95/max observation back to its diagnostic phases, sample number, and rotated
+execution position. Sync is the dominant positive phase delta for both p95 and
+max at all four high-fill candidates. Their eight observations are distributed
+across positions 0–3 with no position holding half, so the report classifies
+the checkpoint tail as host-I/O variance rather than admitting another
+construction change. This does not authorize removing or weakening fact,
+data, or publish sync.
+
+The point failure is separate and systematic. Relative to fill 75, point p50
+rises 23.05% at fill 85, 32.63% at fill 90, and 49.31% at fill 100; fill 95
+stays within the p50 boundary but exceeds the p95 boundary by 33.59%. The next
+risk probe therefore owns point-path density attribution, not checkpoint or
+current-aggregate tuning. The report, its source SHA-256, validator, and
+mutation audit retain `selectedFillPercent = null` and production fill 75.
+
+```bash
+node scripts/analyze-storage-layout-variance.mjs \
+  benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/receipt.json \
+  benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/variance.json
+node scripts/validate-storage-layout-variance.mjs \
+  benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/receipt.json \
+  benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/variance.json
+node scripts/audit-storage-layout-variance-validator.mjs \
+  benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/receipt.json \
+  benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/variance.json
+```
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full

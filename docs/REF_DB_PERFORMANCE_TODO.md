@@ -36,6 +36,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Replace full-leaf read materialization with a restart-aware page-backed cursor. Raw leaves use slot-directory binary search; prefix leaves binary-search restart-16 records and reconstruct only the selected block before continuing one entry at a time. The clean 1M receipt reduces point batch p95 from 0.02050 to 0.01087 ms, keeps RSS delta unchanged at 1.125 MiB, and records zero full-leaf `Vec` entries/bytes. Aggregate p50 improves only 3.10%, from 432.492 to 419.073 ms, so this slice does not authorize v12 rollout.
 - [x] Decode current-attribute AEVT entries as borrowed postcard projections. The clean 1M receipt emits exactly 1,000,000 projected entries, decodes zero owned `AevtKey`s in the projected stream, keeps all full-leaf materialization metrics at zero, and holds RSS delta to 1.250 MiB. Diagnostic projection decode time improves 25.27% (177.422 to 132.585 ms), but aggregate p50 improves only 1.28% (419.073 to 413.713 ms), below the 10%/230 ms gate. Point p95 is 0.01584 ms: below the absolute 0.050 ms limit but above the recorded 0.01087 ms cursor receipt even though the point probe never enters the projection path. Retain the durable projection; keep v12 rollout open.
 - [x] Attribute current-read phases and repair the measured reducer. The diagnostic-only 1M probe assigns 22.84% of query time to `reduce_current_entry`; the accepted repair reuses one inline value/window state and promotes to the existing map only for multi-value entities. The clean same-fixture receipt reduces aggregate p50 from 355.045 to 282.403 ms (20.46%), keeps p95/p50 at 102.82%, improves point p95 from 0.01496 to 0.01363 ms, holds query RSS to 1.250 MiB, and retains exactly 1,000,000 projected entries with zero owned AEVT decode or full-leaf materialization. The clean storage-layout rerun and mutation audit pass structurally, but no high-fill candidate passes every rollout gate, so v12 and Vetch package rollout remain open.
+- [x] Isolate the remaining v12 rollout variance. The reproducible `vicia.storage-layout-variance.v1` report maps checkpoint p95/max samples to phase medians and rotated order. Sync owns both observations for all four high-fill candidates without a fixed-position bias, so checkpoint construction is not admitted for another repair and durability sync remains unchanged. Point p50 exceeds fill 75 by 23.05%/32.63%/49.31% at fill 85/90/100, while fill 95 is a p95-only failure; the next risk probe is point-path density attribution.
 
 ## Regression gates
 
@@ -46,19 +47,23 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-### Slice: isolate the remaining v12 rollout variance
+### Slice: attribute point-path density cost
 
-- Keep the accepted inline reducer and stop current-read aggregate tuning; its
-  dedicated leaf-read gate is closed.
-- Use the clean storage-layout receipt's per-sample checkpoint phase counters
-  and rotated execution order to determine whether the fill-90/95/100 tail is
-  owned by fact/index construction, sync, integrity catalog work, or host I/O
-  outliers. Separately inspect point samples because the leaf-read point gate
-  passes while the cross-fill relative gate does not.
-- Admit one further implementation only if the same production phase explains
-  the failure across high-fill candidates. Do not relax the 115% tail or 20%
-  point-regression gates, rerun until green, change v12 bytes, or add an API,
-  cache, prefetch layer, or dependency to mask variance.
+- Add diagnostic-only point probes that separate internal-node descent,
+  leaf-slot comparisons, prefix restart search/reconstruction, key projection
+  decode, and exact fact resolution. Keep timers outside the repeated gate
+  samples.
+- Run the same deterministic exact-entity point set against byte-identical
+  fill-75/85/90/95/100 fixtures and record visited tree height, leaf codec,
+  entries/restarts examined, comparison count, and fact-page reads beside each
+  latency sample.
+- Admit one implementation only when one production phase or structural count
+  grows with fill and explains the p50 regression at fill 85/90/100. Stop with
+  measurement evidence if the cost is below timer resolution or remains host
+  variance.
+- Do not tune checkpoint or current-attribute aggregate code, weaken sync,
+  relax the 20% point gate, change v12 bytes, or add an API, cache, prefetch
+  layer, or dependency.
 - Keep `selectedFillPercent = null`, production fill 75, and the current Vetch
   browser package until one clean mutation-audited full receipt passes every
   storage-layout gate. Replace the complete package only after that receipt and
