@@ -19,7 +19,7 @@ use crate::query::datalog::executor::{DatalogExecutor, OwnedAggregateStep, Query
 use crate::query::datalog::functions::FunctionRegistry;
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
-use crate::query::datalog::types::{DatalogCommand, ForgetSource};
+use crate::query::datalog::types::{DatalogCommand, ForgetSource, ValidAt};
 use crate::storage::delta_growth::DeltaMaintenanceDecision;
 use crate::storage::persistent_facts::{
     BrowserPageRange, BrowserV11BootstrapPlan, PersistentFactStorage,
@@ -33,6 +33,7 @@ use wasm_bindgen_futures::JsFuture;
 
 const BROWSER_AGGREGATE_ENTRY_BUDGET: usize = 4_096;
 const BROWSER_AGGREGATE_RESIDENT_PAGE_LIMIT: usize = 192;
+const BROWSER_READ_VIEW_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
 async fn yield_browser_task() -> Result<(), JsValue> {
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
@@ -130,6 +131,14 @@ pub struct BrowserDb {
     inner: Rc<RefCell<BrowserDbInner>>,
 }
 
+/// Browser selective-query handle pinned to one transaction and valid-time instant.
+#[wasm_bindgen]
+pub struct BrowserReadView {
+    inner: Rc<RefCell<BrowserDbInner>>,
+    tx_count: u64,
+    valid_at: ValidAt,
+}
+
 #[wasm_bindgen]
 impl BrowserDb {
     /// Open an in-memory database (no IndexedDB — for testing only).
@@ -161,6 +170,34 @@ impl BrowserDb {
                 paged_read_in_flight: false,
             })),
         })
+    }
+
+    /// Capture a selective foreground read view at the current transaction.
+    ///
+    /// The returned handle retains this transaction cursor and creation-time
+    /// valid-time point even if later writes advance the database.
+    #[wasm_bindgen(js_name = readView)]
+    pub fn read_view(&self) -> Result<BrowserReadView, JsValue> {
+        self.create_read_view(
+            None,
+            ValidAt::Timestamp(crate::graph::types::tx_id_now().cast_signed()),
+        )
+    }
+
+    /// Create a selective read view at explicit transaction and valid-time points.
+    #[wasm_bindgen(js_name = readViewAt)]
+    pub fn read_view_at(
+        &self,
+        as_of: u64,
+        valid_at_millis: i64,
+    ) -> Result<BrowserReadView, JsValue> {
+        self.create_read_view(Some(as_of), ValidAt::Timestamp(valid_at_millis))
+    }
+
+    /// Create a selective transaction-pinned view over every valid-time window.
+    #[wasm_bindgen(js_name = readViewAnyValidTime)]
+    pub fn read_view_any_valid_time(&self, as_of: u64) -> Result<BrowserReadView, JsValue> {
+        self.create_read_view(Some(as_of), ValidAt::AnyValidTime)
     }
 
     /// Open or create a database backed by IndexedDB.
@@ -800,7 +837,86 @@ impl BrowserDb {
     }
 }
 
+#[wasm_bindgen]
+impl BrowserReadView {
+    /// Transaction cursor pinned by this view.
+    #[wasm_bindgen(getter, js_name = txCursor)]
+    pub fn tx_cursor(&self) -> u64 {
+        self.tx_count
+    }
+
+    /// Execute one selective query and return a complete JSON result.
+    ///
+    /// Both limits are mandatory. Oversized results are rejected, never
+    /// truncated, and queries without an indexed seed are rejected before I/O.
+    pub async fn query(
+        &self,
+        datalog: String,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<String, JsValue> {
+        if max_bytes == 0 || max_bytes > BROWSER_READ_VIEW_MAX_RESULT_BYTES {
+            return Err(JsValue::from_str(&format!(
+                "read-view max_bytes must be in 1..={BROWSER_READ_VIEW_MAX_RESULT_BYTES}; got {max_bytes}"
+            )));
+        }
+        let command = crate::db::prepare_read_view_query(
+            &datalog,
+            self.tx_count,
+            self.valid_at.clone(),
+            max_rows,
+        )
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let db = BrowserDb {
+            inner: Rc::clone(&self.inner),
+        };
+        db.ensure_usable()?;
+        let guarded = db.begin_paged_read()?;
+        let result = db.execute_read_command(command).await;
+        if guarded {
+            db.finish_paged_read();
+        }
+        let result = result?;
+        if let QueryResult::QueryResults { results, .. } = &result
+            && results.len() > max_rows
+        {
+            return Err(JsValue::from_str(&format!(
+                "read-view result has {} rows, exceeding max_rows {max_rows}; result was rejected without truncation",
+                results.len()
+            )));
+        }
+        let json = query_result_to_json(result);
+        if json.len() > max_bytes {
+            return Err(JsValue::from_str(&format!(
+                "read-view result has {} bytes, exceeding max_bytes {max_bytes}; result was rejected without truncation",
+                json.len()
+            )));
+        }
+        Ok(json)
+    }
+}
+
 impl BrowserDb {
+    fn create_read_view(
+        &self,
+        as_of: Option<u64>,
+        valid_at: ValidAt,
+    ) -> Result<BrowserReadView, JsValue> {
+        self.ensure_usable()?;
+        let current = self.inner.borrow().fact_storage.current_tx_count();
+        let tx_count = as_of.unwrap_or(current);
+        if tx_count > current {
+            return Err(JsValue::from_str(&format!(
+                "read-view as_of {tx_count} is newer than current transaction {current}"
+            )));
+        }
+        Ok(BrowserReadView {
+            inner: Rc::clone(&self.inner),
+            tx_count,
+            valid_at,
+        })
+    }
+
     fn ensure_usable(&self) -> Result<(), JsValue> {
         let inner = self.inner.borrow();
         if inner.durability_poisoned {
@@ -2101,6 +2217,30 @@ mod tests {
                 "entity-set query staging pages must be released"
             );
         });
+        drop(inner);
+
+        idb.reset_read_counters_for_test();
+        let view_db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open cold paged read-view handle");
+        idb.reset_read_counters_for_test();
+        let view = view_db.read_view().expect("capture paged read view");
+        let viewed = view
+            .query(
+                format!("(query [:find ?value :where (or {branches})])"),
+                entity_indexes.len(),
+                32 * 1024,
+            )
+            .await
+            .expect("execute exact entity-set read view");
+        let viewed: serde_json::Value = serde_json::from_str(&viewed).expect("read-view JSON");
+        assert_eq!(
+            viewed["results"].as_array().map(Vec::len),
+            Some(entity_indexes.len())
+        );
+        let view_counts = idb.read_counters_for_test();
+        assert_eq!(view_counts.full_store_reads, 0);
+        assert!(view_counts.pages_returned > 0);
     }
 
     #[wasm_bindgen_test]
@@ -4055,6 +4195,51 @@ mod tests {
         assert_eq!(noop["durability"], "noop");
         assert_eq!(noop["maintenance_pending"], false);
         assert_eq!(noop["advice"], "none");
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_read_view_pins_cursor_and_rejects_incomplete_queries() {
+        let db = BrowserDb::open_in_memory().expect("open in memory");
+        db.execute(r#"(transact [[:proposal :proposal/status "draft"]])"#.to_string())
+            .await
+            .expect("seed");
+        let view = db.read_view().expect("read view");
+        assert_eq!(view.tx_cursor(), 1);
+
+        db.execute(r#"(retract [[:proposal :proposal/status "draft"]])"#.to_string())
+            .await
+            .expect("retract draft");
+        db.execute(r#"(transact [[:proposal :proposal/status "accepted"]])"#.to_string())
+            .await
+            .expect("accept");
+
+        let pinned = view
+            .query(
+                "(query [:find ?status :where [:proposal :proposal/status ?status]])".to_string(),
+                4,
+                4_096,
+            )
+            .await
+            .expect("pinned query");
+        let pinned: serde_json::Value = serde_json::from_str(&pinned).unwrap();
+        assert_eq!(pinned["results"][0][0], "draft");
+
+        assert!(
+            view.query("(query [:find ?e :where [?e ?a ?v]])".to_string(), 4, 4_096,)
+                .await
+                .is_err(),
+            "unindexed foreground query must be rejected"
+        );
+        assert!(
+            view.query(
+                "(query [:find ?status :where [:proposal :proposal/status ?status]])".to_string(),
+                4,
+                1,
+            )
+            .await
+            .is_err(),
+            "oversized JSON must be rejected, not truncated"
+        );
     }
 
     #[wasm_bindgen_test]

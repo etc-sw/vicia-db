@@ -508,7 +508,27 @@ Gate:
 
 ### H2 — Bounded current reads and consistent read views
 
-Status: next candidate, narrowed by H0 to transaction-pinned multi-query reads.
+Status: transaction-pinned query boundary implemented; structured current-reader
+facade and Vetch fixture admission remain open.
+
+The implemented native `ReadView` captures its cursor while serialized with
+batch publication, then injects that cursor and one valid-time selection into
+every query. Browser `BrowserReadView` provides current-time, explicit
+`readViewAt`, and any-valid-time constructors over the same rule. Both paths
+require an indexed seed and explicit row budgets; browser results also require
+an explicit byte budget. Temporal or result-limit clauses inside the Datalog
+source are rejected because the view owns those authority choices. Oversized
+results fail as incomplete rather than being truncated.
+
+This closes the H0 interleaving defect without introducing the broader
+`ViciaLedger` facade or a second query engine. The real-Chrome regression proves
+that a paged exact-entity view performs demand reads without a full-store read.
+H2 remains open until the typed `current.entities`/`refsTo` surface and exact
+Vetch fixture equivalence are present. The current row/byte checks are result
+admission bounds; a non-aggregate attribute query can still materialize its
+selective range before the oversized-result rejection. The typed current-reader
+cursor must close that remaining peak-work bound rather than presenting this
+query facade as the final bounded-current API.
 
 - Expose exact entity/attribute reads through the indexed current-view path.
 - Add browser prepared/bound query parity if H0 proves repeated parsing is

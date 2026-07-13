@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native `ReadView` and browser `BrowserReadView` pin one transaction cursor and valid-time selection across multiple selective Datalog queries. The foreground boundary requires explicit result budgets, rejects unindexed plans and query-local temporal overrides before I/O, and rejects oversized results instead of truncating them. Browser views retain the paged generation-checked demand path and add explicit timestamp and any-valid-time constructors; raw expressive Datalog remains unchanged.
 - File format v12 adds adaptive page-local prefix-compressed B+tree leaves with restart interval 16. Each leaf keeps the raw v11 representation unless prefix encoding is smaller; readers accept both codecs and fail closed on malformed prefix or restart records. Existing v11 graphs open byte-exact and retain cheap v11 delta checkpoints, while caller-scheduled idle maintenance performs the COW v12 publication. The final uncontended 1M fill-90 receipt shrinks the graph from 301.363 to 269.586 MiB and, after bounded checkpoint construction improvements, records a 3,775.192/4,256.684 ms checkpoint p50/p95 with a passing 112.75% tail. Vetch rollout remains gated on the repeated point-read gate and real-browser WASM execution.
 
 ### Fixed

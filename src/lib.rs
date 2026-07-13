@@ -98,7 +98,8 @@ pub mod browser;
 pub use db::{BackupOutcome, OpenOptionsWithPath};
 pub use db::{
     MaintenanceAdvice, MaintenanceCheckpointEffect, MaintenanceDeltaEffect, MaintenanceOutcome,
-    Minigraf, OpenOptions, WriteTransaction,
+    Minigraf, OpenOptions, READ_VIEW_MAX_ROWS, ReadView, ReadViewOptions, ReadViewValidAt,
+    WriteTransaction,
 };
 /// Vicia DB compatibility name for the primary embedded database handle.
 ///

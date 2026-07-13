@@ -83,7 +83,6 @@ impl QueryAccessPlan {
     /// Browser storage uses this pre-I/O classification to choose between a
     /// bounded demand-read loop and an explicit full-scan path. It must not
     /// infer a full scan from a failed selective lookup.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
     pub(crate) fn is_full_scan(&self) -> bool {
         matches!(self, Self::FullScan)
     }

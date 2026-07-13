@@ -56,6 +56,7 @@ pub(crate) const BROWSER_ATOMIC_MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const BROWSER_ATOMIC_MAX_TOKENS: usize = BROWSER_ATOMIC_MAX_FACTS * 8;
 use crate::graph::FactStorage;
 use crate::graph::types::Value;
+use crate::query::datalog::access_plan::QueryAccessPlan;
 use crate::query::datalog::evaluator::DEFAULT_MAX_DERIVED_FACTS;
 use crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS;
 use crate::query::datalog::executor::DatalogExecutor;
@@ -66,8 +67,112 @@ use crate::query::datalog::functions::{
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
 use crate::query::datalog::types::{
-    AttributeSpec, DatalogCommand, ForgetSource, ForgetSpec, Transaction,
+    AsOf, AttributeSpec, DatalogCommand, ForgetSource, ForgetSpec, Transaction, ValidAt,
 };
+
+/// Largest result admitted by the foreground read-view API.
+pub const READ_VIEW_MAX_ROWS: usize = 10_000;
+
+/// Valid-time selection pinned by a [`ReadView`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadViewValidAt {
+    /// Pin validity to the wall-clock instant at which the view is created.
+    Now,
+    /// Pin validity to an explicit Unix millisecond timestamp.
+    Timestamp(i64),
+    /// Include every valid-time window.
+    AnyValidTime,
+}
+
+/// Options used to create a transaction-pinned [`ReadView`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadViewOptions {
+    /// Transaction cursor to pin. `None` captures the current cursor.
+    pub as_of: Option<u64>,
+    /// Valid-time selection shared by every query in the view.
+    pub valid_at: ReadViewValidAt,
+}
+
+impl Default for ReadViewOptions {
+    fn default() -> Self {
+        Self {
+            as_of: None,
+            valid_at: ReadViewValidAt::Now,
+        }
+    }
+}
+
+/// A result-bounded, transaction-pinned query view.
+///
+/// Every query uses the same transaction and valid-time coordinates. Queries
+/// must have an indexed entity or attribute seed and an explicit result bound;
+/// use [`Minigraf::execute`] for intentionally unbounded or historical Datalog.
+pub struct ReadView<'a> {
+    db: &'a Minigraf,
+    tx_count: u64,
+    valid_at: ValidAt,
+}
+
+pub(crate) fn prepare_read_view_query(
+    input: &str,
+    tx_count: u64,
+    valid_at: ValidAt,
+    max_rows: usize,
+) -> Result<DatalogCommand> {
+    if max_rows == 0 || max_rows > READ_VIEW_MAX_ROWS {
+        bail!("read-view max_rows must be in 1..={READ_VIEW_MAX_ROWS}; got {max_rows}");
+    }
+
+    let command = parse_datalog_command(input).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let DatalogCommand::Query(mut query) = command else {
+        bail!("read views accept query commands only");
+    };
+    if query.as_of.is_some() || query.valid_at.is_some() {
+        bail!("read-view queries cannot override the view's transaction or valid-time selection");
+    }
+    if query.max_results.is_some() {
+        bail!("read-view queries cannot declare :max-results; use the read-view budget");
+    }
+    if QueryAccessPlan::for_query(&query).is_full_scan() {
+        bail!("read-view query requires an indexed entity or attribute seed");
+    }
+
+    query.as_of = Some(AsOf::Counter(tx_count));
+    query.valid_at = Some(valid_at);
+    query.max_results = Some(max_rows);
+    Ok(DatalogCommand::Query(query))
+}
+
+impl ReadView<'_> {
+    /// Return the transaction cursor shared by every query in this view.
+    pub fn tx_count(&self) -> u64 {
+        self.tx_count
+    }
+
+    /// Execute one selective query with an explicit complete-result bound.
+    ///
+    /// The method rejects results larger than `max_rows`; it never truncates.
+    pub fn query(&self, input: &str, max_rows: usize) -> Result<QueryResult> {
+        let command =
+            prepare_read_view_query(input, self.tx_count, self.valid_at.clone(), max_rows)?;
+        let mut executor = DatalogExecutor::new_with_rules_and_functions(
+            self.db.inner.fact_storage.clone(),
+            self.db.inner.rules.clone(),
+            self.db.inner.functions.clone(),
+        );
+        executor.set_limits(self.db.inner.options.max_derived_facts, max_rows);
+        let result = executor.execute(command)?;
+        if let QueryResult::QueryResults { results, .. } = &result
+            && results.len() > max_rows
+        {
+            bail!(
+                "read-view result has {} rows, exceeding max_rows {max_rows}; result was rejected without truncation",
+                results.len()
+            );
+        }
+        Ok(result)
+    }
+}
 use crate::storage::backend::MemoryBackend;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::backend::file::FileBackend;
@@ -1547,6 +1652,41 @@ impl Minigraf {
     /// regardless of how many facts the batch contains.
     pub fn current_tx_count(&self) -> u64 {
         self.inner.fact_storage.current_tx_count()
+    }
+
+    /// Create a result-bounded read view pinned to one transaction and valid-time point.
+    ///
+    /// If `options.as_of` is absent, the current transaction counter is
+    /// captured. A future cursor is rejected instead of being treated as an
+    /// alias for current state.
+    pub fn read_view(&self, options: ReadViewOptions) -> Result<ReadView<'_>> {
+        if is_write_tx_active() {
+            bail!("cannot create a ReadView while this thread holds a WriteTransaction");
+        }
+        // Linearize cursor capture after any in-flight batch publication. The
+        // guard is not retained: later writes receive larger tx_counts and are
+        // excluded by the pinned :as-of selector.
+        let guard = self.inner.write_lock.lock().map_err(|_| {
+            anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
+        })?;
+        let current = self.inner.fact_storage.current_tx_count();
+        let tx_count = options.as_of.unwrap_or(current);
+        if tx_count > current {
+            bail!("read-view as_of {tx_count} is newer than current transaction {current}");
+        }
+        let valid_at = match options.valid_at {
+            ReadViewValidAt::Now => {
+                ValidAt::Timestamp(crate::graph::types::tx_id_now().cast_signed())
+            }
+            ReadViewValidAt::Timestamp(timestamp) => ValidAt::Timestamp(timestamp),
+            ReadViewValidAt::AnyValidTime => ValidAt::AnyValidTime,
+        };
+        drop(guard);
+        Ok(ReadView {
+            db: self,
+            tx_count,
+            valid_at,
+        })
     }
 
     /// Session-protocol status snapshot (A6). Crate-internal: the public
@@ -3960,6 +4100,112 @@ mod tests {
             result.is_ok(),
             "query with :max-results should parse and execute"
         );
+    }
+
+    #[test]
+    fn read_view_pins_one_transaction_across_multiple_queries() {
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(r#"(transact [[:proposal :proposal/status "draft"]])"#)
+            .unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+        assert_eq!(view.tx_count(), 1);
+
+        db.execute(r#"(retract [[:proposal :proposal/status "draft"]])"#)
+            .unwrap();
+        db.execute(r#"(transact [[:proposal :proposal/status "accepted"]])"#)
+            .unwrap();
+
+        for _ in 0..2 {
+            let result = view
+                .query(
+                    "(query [:find ?status :where [:proposal :proposal/status ?status]])",
+                    4,
+                )
+                .unwrap();
+            let QueryResult::QueryResults { results, .. } = result else {
+                panic!("expected query results");
+            };
+            assert_eq!(results, vec![vec![Value::String("draft".to_owned())]]);
+        }
+
+        let current = db
+            .read_view(ReadViewOptions::default())
+            .unwrap()
+            .query(
+                "(query [:find ?status :where [:proposal :proposal/status ?status]])",
+                4,
+            )
+            .unwrap();
+        let QueryResult::QueryResults { results, .. } = current else {
+            panic!("expected query results");
+        };
+        assert_eq!(results, vec![vec![Value::String("accepted".to_owned())]]);
+    }
+
+    #[test]
+    fn read_view_rejects_competing_authority_and_unbounded_plans() {
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(r#"(transact [[:card :card/title "One"]])"#)
+            .unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+
+        assert!(
+            view.query(
+                "(query [:find ?title :as-of 1 :where [:card :card/title ?title]])",
+                4,
+            )
+            .is_err()
+        );
+        assert!(
+            view.query("(query [:find ?e :where [?e ?a ?v]])", 4)
+                .is_err()
+        );
+        assert!(
+            view.query("(transact [[:card :card/title \"Two\"]])", 4)
+                .is_err()
+        );
+        assert!(
+            db.read_view(ReadViewOptions {
+                as_of: Some(2),
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn read_view_pins_explicit_valid_time() {
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(
+            r#"(transact {:valid-from "2023-01-01" :valid-to "2023-06-30"} [[:alice :employment/status :active]])"#,
+        )
+        .unwrap();
+        let view = db
+            .read_view(ReadViewOptions {
+                as_of: None,
+                valid_at: ReadViewValidAt::Timestamp(1_681_516_800_000),
+            })
+            .unwrap();
+        let result = view
+            .query(
+                "(query [:find ?status :where [:alice :employment/status ?status]])",
+                4,
+            )
+            .unwrap();
+        let QueryResult::QueryResults { results, .. } = result else {
+            panic!("expected query results");
+        };
+        assert_eq!(results, vec![vec![Value::Keyword(":active".to_owned())]]);
+    }
+
+    #[test]
+    fn read_view_rejects_oversized_complete_result_without_truncation() {
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(r#"(transact [[:one :card/space :space] [:two :card/space :space]])"#)
+            .unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+        let result = view.query("(query [:find ?card :where [?card :card/space :space]])", 1);
+        assert!(result.is_err(), "an incomplete result must be rejected");
     }
 
     // ── read-only handle drop must not modify the file ────────────────────────
