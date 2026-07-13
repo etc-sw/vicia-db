@@ -4,8 +4,8 @@
 default:
     @just --list
 
-# Build the browser WASM package from this checkout and atomically install it
-# into Vetch's local @vicia-db/browser package boundary.
+# Build and verify the browser WASM package against Vicia's format matrix and
+# Vetch's consumer gates, then atomically install it into the local package.
 #
 # Default target: sibling ~/projects/vetch-app checkout.
 # Worktree verification: just sync /absolute/path/to/vetch-worktree
