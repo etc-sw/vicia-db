@@ -338,6 +338,7 @@ pub fn build_btree(
 ) -> Result<(u64, u64)> {
     build_btree_serialized_results(
         sorted_entries.map(Ok),
+        Ok,
         backend,
         cache,
         start_page_id,
@@ -354,6 +355,7 @@ pub(crate) fn build_btree_with_options(
 ) -> Result<(u64, u64)> {
     build_btree_serialized_results(
         sorted_entries.map(Ok),
+        Ok,
         backend,
         cache,
         start_page_id,
@@ -371,9 +373,9 @@ pub(crate) fn build_btree_from_key_entries<K: Serialize>(
     build_btree_serialized_results(
         sorted_entries.map(|(key, fact_ref)| {
             let entry_bytes = postcard::to_allocvec(&(&key, &fact_ref))?;
-            let key_bytes = postcard::to_allocvec(&key)?;
-            Ok((entry_bytes, key_bytes))
+            Ok((entry_bytes, key))
         }),
+        |key| postcard::to_allocvec(&key).map_err(Into::into),
         backend,
         cache,
         start_page_id,
@@ -381,8 +383,9 @@ pub(crate) fn build_btree_from_key_entries<K: Serialize>(
     )
 }
 
-fn build_btree_serialized_results(
-    sorted_entries: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
+fn build_btree_serialized_results<K>(
+    sorted_entries: impl Iterator<Item = Result<(Vec<u8>, K)>>,
+    mut serialize_first_key: impl FnMut(K) -> Result<Vec<u8>>,
     backend: &mut dyn StorageBackend,
     cache: &PageCache,
     start_page_id: u64,
@@ -399,7 +402,7 @@ fn build_btree_serialized_results(
     let mut next_page = start_page_id;
 
     for entry in sorted_entries {
-        let (entry_bytes, key_bytes) = entry?;
+        let (entry_bytes, key) = entry?;
         let (_, _, prefix_entry_len) = prefix_record_layout(
             cur_entries.last().map(Vec::as_slice),
             cur_entries.len(),
@@ -427,7 +430,7 @@ fn build_btree_serialized_results(
         }
 
         if cur_first_key.is_none() {
-            cur_first_key = Some(key_bytes);
+            cur_first_key = Some(serialize_first_key(key)?);
         }
         let (_, _, prefix_entry_len) = prefix_record_layout(
             cur_entries.last().map(Vec::as_slice),
