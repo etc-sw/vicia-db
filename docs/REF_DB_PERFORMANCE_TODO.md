@@ -28,6 +28,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Attribute bytes to fact pages and each EAVT/AEVT/AVET/VAET index. The clean `vicia.storage-layout.v1` full receipt accounts for every published v11 page; at production fill 75 the 1M fixture is 61.875 MiB facts, 96.551 MiB EAVT, 96.551 MiB AEVT, 97.410 MiB AVET, and 0.004 MiB VAET.
 - [x] Record B-tree fill ratio and repeated attribute/entity encoding cost. The receipt retains exact payload/structural/unused bytes and conservative restart-10/16 prefix estimates for every index and fill candidate.
 - [ ] Reduce the 1M fixture from 338 MiB without changing the public API or v11 format.
+- [x] Correct the fill-selection evidence contract. The clean `vicia.storage-layout.v2` full receipt uses rotated fresh children, nearest-rank p95 with separate max/MAD, receipt-owned gates, and mutation-audited validation; no fill candidate passed every gate, so production remains at 75.
 - [x] Measure `1M base + 1/10/100/1K pending` checkpoint latency and peak RSS. The clean `vicia.checkpoint-construction.v2` receipt records 20 interleaved fresh samples per variant; checkpoint p95 is 2.630/3.023/3.370/9.864 ms and HWM-backed recompact RSS delta stays at 177.000–177.875 MiB.
 
 ## Regression gates
@@ -39,4 +40,4 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-- Reduce the 1M v11 fixture without changing the public API or format; checkpoint construction now meets its memory and latency gates, so external sorted runs remain deferred.
+- Attribute high-fill checkpoint tail samples to fact packing, EAVT/AEVT/AVET/VAET sort/build, integrity catalog publication, or sync. Use that evidence to stabilize fill 85 first; do not change the production fill until a clean full receipt passes every storage-layout v2 gate.

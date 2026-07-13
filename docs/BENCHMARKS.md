@@ -1505,7 +1505,25 @@ just pending-isolation-full
 
 ### v11 storage layout and B-tree fill isolation
 
-`vicia.storage-layout.v1` walks the published v11 image page by page and
+`vicia.storage-layout.v2` supersedes the v1 selection contract. It uses
+nearest-rank percentiles (`ceil(p * N) - 1`), reports max and MAD separately,
+and rotates `75/85/90/95/100` across fresh checkpoint and query children so
+candidate order and session retention cannot decide the fill policy. The
+validator recomputes every summary and gate from raw samples and audits its own
+rejection behavior against mutated receipts.
+
+The clean v2 1M run at source `bd5c0a1` selected no replacement for fill 75.
+Fill 85 reduced the image to 316.992 MiB and passed checkpoint, point, and RSS
+gates, but its aggregate p95 was 605.201 ms against a 524.824 ms p50, narrowly
+above the 115% tail gate. Fill 100 retained the 276.727 MiB layout but failed
+checkpoint (4,834.386/6,407.882 ms p50/p95), point, and aggregate gates.
+Production therefore remains at fill 75. The next measurement must attribute
+the slow checkpoint samples to fact packing, each index sort/build, integrity
+catalog publication, or sync before changing B-tree finalization policy. Raw
+evidence is under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v2-full/receipt.json`.
+
+The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
 estimates at restart intervals 10 and 16. The diagnostic API and fill override
