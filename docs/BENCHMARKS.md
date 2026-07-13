@@ -1713,12 +1713,39 @@ preserved under
 Raw receipts are preserved under
 `benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/`.
 
+The follow-up borrowed AEVT projection keeps that cursor boundary and decodes
+the existing `(AevtKey, FactRef)` postcard bytes into borrowed attribute/value
+views. The clean full receipt compares against the page-backed cursor candidate,
+not the older full-leaf baseline:
+
+| Metric | Page-backed cursor | Borrowed projection | Gate |
+|---|---:|---:|---:|
+| Point batch p95 | 0.01087 ms | 0.01584 ms | fail (absolute `<= 0.050 ms` passes; recorded no-regression gate fails) |
+| Aggregate p50 | 419.073 ms | 413.713 ms | fail (1.28%, requires 10% or `<= 230 ms`) |
+| Aggregate p95/p50 | 101.87% | 104.80% | pass (`<= 115%`) |
+| Query RSS delta | 1.125 MiB | 1.250 MiB | pass (`<= baseline + 2 MiB`) |
+| Projected emitted / owned AEVT decode | n/a | 1,000,000 / 0 | pass |
+| Peak full-leaf entries / struct bytes / payload bytes | 0 / 0 / 0 | 0 / 0 / 0 | pass |
+
+Projection decode time in the diagnostic probe falls from 177.422 ms to
+132.585 ms (25.27%), while end-to-end aggregate p50 improves only 5.360 ms.
+The remaining aggregate cost is therefore outside owned AEVT leaf-key decode;
+the next measurement must split reducer/entity flush and aggregate-sink time
+before another implementation slice. The point workload never enters the
+projection path (`aevtProjectionDecodes = 0` in its probe), so its recorded
+no-regression failure is retained as host-level gate evidence rather than
+attributed to this cursor. v12 rollout remains open, and no browser package or
+canonical storage-layout evidence is replaced from this receipt.
+
+The clean projection receipts are preserved under
+`benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/`.
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full
 just leaf-read-path-compare \
-  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/baseline.json \
-  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/candidate.json
+  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/baseline.json \
+  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/candidate.json
 ```
 
 ---
