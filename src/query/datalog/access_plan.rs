@@ -87,9 +87,20 @@ impl QueryAccessPlan {
         matches!(self, Self::FullScan)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn read_facts(&self, storage: &FactStorage) -> Result<Vec<Fact>> {
+        self.read_facts_bounded(storage, usize::MAX)
+    }
+
+    /// Execute this access plan while retaining at most `max_facts` complete
+    /// ledger records. The first excess record is an error, never truncation.
+    pub(crate) fn read_facts_bounded(
+        &self,
+        storage: &FactStorage,
+        max_facts: usize,
+    ) -> Result<Vec<Fact>> {
         let Self::Selective { lookups } = self else {
-            return storage.get_all_facts();
+            return storage.get_all_facts_bounded(max_facts);
         };
 
         // A single index range cannot contain cross-lookup duplicates. Return
@@ -98,8 +109,12 @@ impl QueryAccessPlan {
         // reads, including Vetch foreground authority queries.
         if let [lookup] = lookups.as_slice() {
             return match lookup {
-                QueryLookup::Entity(entity) => storage.get_facts_by_entity(entity),
-                QueryLookup::Attribute(attribute) => storage.get_facts_by_attribute(attribute),
+                QueryLookup::Entity(entity) => {
+                    storage.get_facts_by_entity_bounded(entity, max_facts)
+                }
+                QueryLookup::Attribute(attribute) => {
+                    storage.get_facts_by_attribute_bounded(attribute, max_facts)
+                }
             };
         }
 
@@ -123,11 +138,20 @@ impl QueryAccessPlan {
 
         for lookup in lookups {
             let candidates = match lookup {
-                QueryLookup::Entity(entity) => storage.get_facts_by_entity(entity)?,
-                QueryLookup::Attribute(attribute) => storage.get_facts_by_attribute(attribute)?,
+                QueryLookup::Entity(entity) => {
+                    storage.get_facts_by_entity_bounded(entity, max_facts)?
+                }
+                QueryLookup::Attribute(attribute) => {
+                    storage.get_facts_by_attribute_bounded(attribute, max_facts)?
+                }
             };
             for fact in candidates {
                 if seen.insert(ledger_identity(&fact)) {
+                    if facts.len() >= max_facts {
+                        anyhow::bail!(
+                            "query source work exceeds max-results {max_facts}; incomplete result rejected"
+                        );
+                    }
                     facts.push(fact);
                 }
             }

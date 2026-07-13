@@ -111,6 +111,8 @@ pub(crate) struct OwnedAttributeAggregateSession {
     find: Vec<FindSpec>,
     entity_var: Option<String>,
     value_var: Option<String>,
+    max_results: usize,
+    visited_entries: usize,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
@@ -128,9 +130,13 @@ impl OwnedAttributeAggregateSession {
             .ok_or_else(|| anyhow!("aggregate session already completed"))?;
         let entity_var = self.entity_var.as_deref();
         let value_var = self.value_var.as_deref();
+        let probe_budget = self
+            .max_results
+            .saturating_add(1)
+            .saturating_sub(self.visited_entries);
         let step = self.storage.step_current_attribute_cursor(
             &mut self.cursor,
-            max_entries,
+            max_entries.min(probe_budget),
             &mut |entity, value| {
                 if entity_var == value_var && Value::Ref(entity) != *value {
                     return Ok(());
@@ -146,11 +152,22 @@ impl OwnedAttributeAggregateSession {
                 })
             },
         )?;
+        let entries = match step {
+            crate::graph::storage::CurrentAttributeStep::Yielded { entries } => entries,
+            crate::graph::storage::CurrentAttributeStep::Complete { entries } => entries,
+        };
+        self.visited_entries = self.visited_entries.saturating_add(entries);
+        if self.visited_entries > self.max_results {
+            anyhow::bail!(
+                "query source work exceeds max-results {}; incomplete result rejected",
+                self.max_results
+            );
+        }
         match step {
             crate::graph::storage::CurrentAttributeStep::Yielded { entries } => {
                 Ok(OwnedAggregateStep::Yielded { entries })
             }
-            crate::graph::storage::CurrentAttributeStep::Complete => {
+            crate::graph::storage::CurrentAttributeStep::Complete { .. } => {
                 let sink = self
                     .sink
                     .take()
@@ -236,6 +253,8 @@ impl DatalogExecutor {
             find: query.find.clone(),
             entity_var: entity_var.map(str::to_owned),
             value_var: value_var.map(str::to_owned),
+            max_results: query.max_results.unwrap_or(self.max_results),
+            visited_entries: 0,
         }))
     }
 
@@ -426,19 +445,33 @@ impl DatalogExecutor {
     /// Step 1 uses selective index-backed fetches for up to 128 distinct concrete entities,
     /// or up to 4 mixed/attribute lookups; otherwise it falls back to `get_all_facts()`.
     /// Step 2 (caching `net_asserted_facts()`) remains a future optimisation opportunity.
-    fn filter_facts_for_query(&self, query: &DatalogQuery) -> Result<Arc<[Fact]>> {
+    fn filter_facts_for_query(
+        &self,
+        query: &DatalogQuery,
+        max_results: usize,
+    ) -> Result<Arc<[Fact]>> {
         let now = self.read_now();
 
         let source_facts: Vec<Fact> = match (&self.facts_override, query.as_of.as_ref()) {
-            (Some(facts), Some(as_of)) => {
-                crate::graph::storage::filter_facts_as_of(facts.iter().cloned().collect(), as_of)
+            (Some(facts), as_of) => {
+                if facts.len() > max_results {
+                    anyhow::bail!(
+                        "query source work exceeds max-results {max_results}; incomplete result rejected"
+                    );
+                }
+                let facts = facts.iter().cloned().collect();
+                match as_of {
+                    Some(as_of) => crate::graph::storage::filter_facts_as_of(facts, as_of),
+                    None => facts,
+                }
             }
-            (Some(facts), None) => facts.iter().cloned().collect(),
             (None, Some(as_of)) => crate::graph::storage::filter_facts_as_of(
-                QueryAccessPlan::for_query(query).read_facts(&self.storage)?,
+                QueryAccessPlan::for_query(query).read_facts_bounded(&self.storage, max_results)?,
                 as_of,
             ),
-            (None, None) => QueryAccessPlan::for_query(query).read_facts(&self.storage)?,
+            (None, None) => {
+                QueryAccessPlan::for_query(query).read_facts_bounded(&self.storage, max_results)?
+            }
         };
 
         let tx_filtered = source_facts;
@@ -485,6 +518,8 @@ impl DatalogExecutor {
             ));
         }
 
+        let effective_max_results = query.max_results.unwrap_or(self.max_results);
+
         // Compute query-level valid_at value for :db/valid-at pseudo-attribute binding.
         let now = self.read_now();
         let valid_at_value = match &query.valid_at {
@@ -515,6 +550,7 @@ impl DatalogExecutor {
 
         if let Some((attribute, entity_var, value_var)) = owned_attribute_aggregate(&query) {
             let mut sink = AggregationSink::new(&query.find, &query.with_vars, &registry);
+            let mut visited = 0usize;
             let valid_time = match query.valid_at {
                 Some(ValidAt::AnyValidTime) => CurrentValidTime::Any,
                 Some(ValidAt::Timestamp(timestamp)) => CurrentValidTime::At(timestamp),
@@ -526,6 +562,12 @@ impl DatalogExecutor {
                 query.as_of.as_ref(),
                 valid_time,
                 &mut |entity, value| {
+                    visited = visited.saturating_add(1);
+                    if visited > effective_max_results {
+                        anyhow::bail!(
+                            "query source work exceeds max-results {effective_max_results}; incomplete result rejected"
+                        );
+                    }
                     if entity_var == value_var && Value::Ref(entity) != *value {
                         return Ok(());
                     }
@@ -548,7 +590,7 @@ impl DatalogExecutor {
         }
 
         // Apply temporal filters before pattern matching
-        let filtered_facts = self.filter_facts_for_query(&query)?;
+        let filtered_facts = self.filter_facts_for_query(&query, effective_max_results)?;
         let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
             filtered_facts.clone(),
             valid_at_value.clone(),
@@ -584,11 +626,12 @@ impl DatalogExecutor {
         for (clause, hint) in planned {
             match clause {
                 WhereClause::Pattern(p) => {
-                    bindings = matcher.match_with_hint_seeded(
+                    bindings = matcher.match_with_hint_seeded_bounded(
                         bindings,
                         &p,
                         hint.as_ref().unwrap_or(&optimizer::IndexHint::Eavt),
-                    );
+                        effective_max_results,
+                    )?;
                 }
                 WhereClause::Expr { expr, binding: out } => {
                     bindings = bindings
@@ -625,6 +668,7 @@ impl DatalogExecutor {
             query.as_of.clone(),
             query.valid_at.clone(),
             &registry,
+            effective_max_results,
         )?;
         drop(rules_guard);
 
@@ -685,7 +729,7 @@ impl DatalogExecutor {
             // not inside the per-binding filter closure.
             let not_exclusion_sets: Vec<NotExclusionEntry> = not_clauses
                 .iter()
-                .map(|not_body| {
+                .map(|not_body| -> Result<NotExclusionEntry> {
                     let has_expr = not_body
                         .iter()
                         .any(|c| matches!(c, WhereClause::Expr { .. }));
@@ -698,14 +742,18 @@ impl DatalogExecutor {
                         .collect();
                     if patterns.is_empty() {
                         // Expr-only body: no pre-computation possible.
-                        return None;
+                        return Ok(None);
                     }
                     let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
                         filtered_facts.clone(),
                         valid_at_value.clone(),
                         clauses_use_per_fact_pseudo_attr(not_body),
                     );
-                    let body_bindings = matcher.match_patterns(&patterns);
+                    let body_bindings = matcher.match_patterns_bounded(
+                        &patterns,
+                        vec![Binding::new()],
+                        effective_max_results,
+                    )?;
                     // Store all body bindings as sorted (key, value) vecs for probing.
                     // Normalize values (e.g. keyword entities → Ref) so that probe keys from
                     // the outer binding match body bindings regardless of representation.
@@ -722,9 +770,9 @@ impl DatalogExecutor {
                             kv
                         })
                         .collect();
-                    Some((has_expr, exclusion_set))
+                    Ok(Some((has_expr, exclusion_set)))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
 
             // --- Not-join bodies ---
             // Each entry: Some((has_expr, key_vars, HashSet)) where key_vars are the join_vars
@@ -738,7 +786,7 @@ impl DatalogExecutor {
             // entity fields as Value::Ref). `has_expr` is computed once here, not per-binding.
             let not_join_exclusion_sets: Vec<NotJoinExclusionEntry> = not_join_clauses
                 .iter()
-                .map(|(join_vars, nj_clauses)| {
+                .map(|(join_vars, nj_clauses)| -> Result<NotJoinExclusionEntry> {
                     let has_expr = nj_clauses
                         .iter()
                         .any(|c| matches!(c, WhereClause::Expr { .. }));
@@ -750,16 +798,20 @@ impl DatalogExecutor {
                         })
                         .collect();
                     if patterns.is_empty() {
-                        return None;
+                        return Ok(None);
                     }
                     let matcher = PatternMatcher::from_slice_with_valid_at_and_metadata(
                         filtered_facts.clone(),
                         valid_at_value.clone(),
                         clauses_use_per_fact_pseudo_attr(nj_clauses),
                     );
-                    let body_bindings = matcher.match_patterns(&patterns);
+                    let body_bindings = matcher.match_patterns_bounded(
+                        &patterns,
+                        vec![Binding::new()],
+                        effective_max_results,
+                    )?;
                     if body_bindings.is_empty() {
-                        return Some((has_expr, join_vars.clone(), HashSet::new()));
+                        return Ok(Some((has_expr, join_vars.clone(), HashSet::new())));
                     }
                     let key_vars: Vec<String> = join_vars
                         .iter()
@@ -779,9 +831,9 @@ impl DatalogExecutor {
                             kv
                         })
                         .collect();
-                    Some((has_expr, key_vars, exclusion_set))
+                    Ok(Some((has_expr, key_vars, exclusion_set)))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
 
             bindings
                 .into_iter()
@@ -932,6 +984,11 @@ impl DatalogExecutor {
 
         let results =
             apply_post_processing(not_filtered, &query.find, &query.with_vars, &registry)?;
+        if results.len() > effective_max_results {
+            anyhow::bail!(
+                "query result exceeds max-results {effective_max_results}; incomplete result rejected"
+            );
+        }
 
         Ok(QueryResult::QueryResults {
             vars: query.find.iter().map(|s| s.display_name()).collect(),
@@ -972,7 +1029,8 @@ impl DatalogExecutor {
         }
 
         // Apply temporal filters before evaluating recursive rules
-        let filtered_facts = self.filter_facts_for_query(&query)?;
+        let effective_max_results = query.max_results.unwrap_or(self.max_results);
+        let filtered_facts = self.filter_facts_for_query(&query, effective_max_results)?;
 
         // Convert to FactStorage for StratifiedEvaluator (needs mutable accumulation)
         // TODO (post-1.0): use FactStorage::new_noindex() once profiling confirms rules-path
@@ -984,7 +1042,6 @@ impl DatalogExecutor {
 
         // Compute effective limits: per-query override takes precedence over executor default.
         let effective_max_derived = query.max_derived_facts.unwrap_or(self.max_derived_facts);
-        let effective_max_results = query.max_results.unwrap_or(self.max_results);
 
         // Apply magic sets rewriting for demand-driven recursive evaluation.
         // Returns None for all-free queries — zero overhead path.
@@ -1076,11 +1133,12 @@ impl DatalogExecutor {
         for (clause, hint) in planned {
             match clause {
                 WhereClause::Pattern(p) => {
-                    bindings = matcher.match_with_hint_seeded(
+                    bindings = matcher.match_with_hint_seeded_bounded(
                         bindings,
                         &p,
                         hint.as_ref().unwrap_or(&optimizer::IndexHint::Eavt),
-                    );
+                        effective_max_results,
+                    )?;
                 }
                 WhereClause::Expr { expr, binding: out } => {
                     bindings = bindings
@@ -1117,6 +1175,7 @@ impl DatalogExecutor {
             query.as_of.clone(),
             query.valid_at.clone(),
             &registry,
+            effective_max_results,
         )?;
         drop(rules_guard);
 
@@ -2059,6 +2118,7 @@ fn project_find_specs(bindings: &[Binding], find_specs: &[FindSpec]) -> Vec<Vec<
 /// 2. Nested Or/OrJoin → apply_or_clauses (recursive)
 /// 3. Not/NotJoin → post-filter
 /// 4. Expr → apply_expr_clauses
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_branch(
     branch: &[WhereClause],
     incoming: Vec<Binding>,
@@ -2067,6 +2127,7 @@ pub(crate) fn evaluate_branch(
     as_of: Option<AsOf>,
     valid_at: Option<ValidAt>,
     registry: &FunctionRegistry,
+    max_results: usize,
 ) -> anyhow::Result<Vec<Binding>> {
     use crate::query::datalog::evaluator::rule_invocation_to_pattern;
     use crate::query::datalog::matcher::PatternMatcher;
@@ -2107,7 +2168,7 @@ pub(crate) fn evaluate_branch(
     let bindings = if patterns.is_empty() {
         incoming
     } else {
-        matcher.match_patterns_seeded(&patterns, incoming)
+        matcher.match_patterns_bounded(&patterns, incoming, max_results)?
     };
 
     if bindings.is_empty() {
@@ -2123,6 +2184,7 @@ pub(crate) fn evaluate_branch(
         as_of.clone(),
         valid_at.clone(),
         registry,
+        max_results,
     )?;
 
     if bindings.is_empty() {
@@ -2187,6 +2249,7 @@ pub(crate) fn evaluate_branch(
 /// Non-Or/OrJoin clauses are ignored (handled elsewhere).
 /// For `Or`: union results from all branches (deduplicated by full binding map).
 /// For `OrJoin`: union results, then project out branch-private variables.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_or_clauses(
     clauses: &[WhereClause],
     mut bindings: Vec<Binding>,
@@ -2195,6 +2258,7 @@ pub(crate) fn apply_or_clauses(
     as_of: Option<AsOf>,
     valid_at: Option<ValidAt>,
     registry: &FunctionRegistry,
+    max_results: usize,
 ) -> anyhow::Result<Vec<Binding>> {
     for clause in clauses {
         match clause {
@@ -2232,6 +2296,7 @@ pub(crate) fn apply_or_clauses(
                             as_of.clone(),
                             valid_at.clone(),
                             registry,
+                            max_results,
                         )?;
                         for b in branch_result {
                             let mut key: Vec<_> = b
@@ -2241,6 +2306,11 @@ pub(crate) fn apply_or_clauses(
                                 .collect();
                             key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                             if seen.insert(key) {
+                                if result.len() >= max_results {
+                                    anyhow::bail!(
+                                        "query binding work exceeds max-results {max_results}; incomplete result rejected"
+                                    );
+                                }
                                 result.push(b);
                             }
                         }
@@ -2266,6 +2336,7 @@ pub(crate) fn apply_or_clauses(
                         as_of.clone(),
                         valid_at.clone(),
                         registry,
+                        max_results,
                     )?;
                     for b in branch_result {
                         // Deduplicate on user-visible variables only (exclude internal `__` keys).
@@ -2276,6 +2347,11 @@ pub(crate) fn apply_or_clauses(
                             .collect();
                         key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                         if seen_keys.insert(key) {
+                            if union_bindings.len() >= max_results {
+                                anyhow::bail!(
+                                    "query binding work exceeds max-results {max_results}; incomplete result rejected"
+                                );
+                            }
                             union_bindings.push(b);
                         }
                     }
@@ -2343,6 +2419,11 @@ pub(crate) fn apply_or_clauses(
                                 merged.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             dedup_key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                             if seen_result.insert(dedup_key) {
+                                if result.len() >= max_results {
+                                    anyhow::bail!(
+                                        "query binding work exceeds max-results {max_results}; incomplete result rejected"
+                                    );
+                                }
                                 result.push(merged);
                             }
                         }
@@ -2392,6 +2473,7 @@ pub(crate) fn apply_or_clauses(
                         as_of.clone(),
                         valid_at.clone(),
                         registry,
+                        max_results,
                     )?;
                     for mut b in branch_result {
                         if !join_vars.iter().all(|v| b.contains_key(v)) {
@@ -2403,6 +2485,11 @@ pub(crate) fn apply_or_clauses(
                             b.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                         key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                         if seen_proj.insert(key) {
+                            if projected.len() >= max_results {
+                                anyhow::bail!(
+                                    "query binding work exceeds max-results {max_results}; incomplete result rejected"
+                                );
+                            }
                             projected.push(b);
                         }
                     }
@@ -2436,6 +2523,11 @@ pub(crate) fn apply_or_clauses(
                                 merged.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             dedup_key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                             if seen_result.insert(dedup_key) {
+                                if result.len() >= max_results {
+                                    anyhow::bail!(
+                                        "query binding work exceeds max-results {max_results}; incomplete result rejected"
+                                    );
+                                }
                                 result.push(merged);
                             }
                         }
@@ -2752,6 +2844,15 @@ mod tests {
             anyhow::bail!("injected committed index read failure")
         }
 
+        fn visit_eavt_entries(
+            &self,
+            _: &EavtKey,
+            _: Option<&EavtKey>,
+            _: &mut dyn FnMut(&EavtKey, FactRef) -> anyhow::Result<bool>,
+        ) -> anyhow::Result<bool> {
+            anyhow::bail!("injected committed index read failure")
+        }
+
         fn visit_aevt_entries(
             &self,
             _: &AevtKey,
@@ -2780,6 +2881,7 @@ mod tests {
 
     struct InMemoryCommittedIndexReader {
         indexes: Indexes,
+        visits: Arc<AtomicUsize>,
     }
 
     fn range_refs<K: Ord + Clone>(
@@ -2799,6 +2901,31 @@ mod tests {
         }
     }
 
+    fn visit_entries<K: Ord + Clone>(
+        index: &std::collections::BTreeMap<K, FactRef>,
+        start: &K,
+        end: Option<&K>,
+        visits: &AtomicUsize,
+        visit: &mut dyn FnMut(&K, FactRef) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        if let Some(end) = end {
+            for (key, fact_ref) in index.range(start.clone()..end.clone()) {
+                visits.fetch_add(1, Ordering::SeqCst);
+                if !visit(key, *fact_ref)? {
+                    return Ok(false);
+                }
+            }
+        } else {
+            for (key, fact_ref) in index.range(start.clone()..) {
+                visits.fetch_add(1, Ordering::SeqCst);
+                if !visit(key, *fact_ref)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     impl CommittedIndexReader for InMemoryCommittedIndexReader {
         fn range_scan_eavt(
             &self,
@@ -2814,6 +2941,24 @@ mod tests {
             end: Option<&AevtKey>,
         ) -> anyhow::Result<Vec<FactRef>> {
             Ok(range_refs(&self.indexes.aevt, start, end))
+        }
+
+        fn visit_eavt_entries(
+            &self,
+            start: &EavtKey,
+            end: Option<&EavtKey>,
+            visit: &mut dyn FnMut(&EavtKey, FactRef) -> anyhow::Result<bool>,
+        ) -> anyhow::Result<bool> {
+            visit_entries(&self.indexes.eavt, start, end, &self.visits, visit)
+        }
+
+        fn visit_aevt_entries(
+            &self,
+            start: &AevtKey,
+            end: Option<&AevtKey>,
+            visit: &mut dyn FnMut(&AevtKey, FactRef) -> anyhow::Result<bool>,
+        ) -> anyhow::Result<bool> {
+            visit_entries(&self.indexes.aevt, start, end, &self.visits, visit)
         }
 
         fn range_scan_avet(
@@ -2835,9 +2980,10 @@ mod tests {
 
     fn storage_with_no_full_scan_committed_facts(
         facts: Vec<Fact>,
-    ) -> (FactStorage, Arc<AtomicUsize>) {
+    ) -> (FactStorage, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let storage = FactStorage::new();
         let stream_calls = Arc::new(AtomicUsize::new(0));
+        let visits = Arc::new(AtomicUsize::new(0));
         let mut indexes = Indexes::new();
 
         for (index, fact) in facts.iter().enumerate() {
@@ -2854,9 +3000,12 @@ mod tests {
             facts,
             stream_calls: stream_calls.clone(),
         }));
-        storage.set_committed_index_reader(Arc::new(InMemoryCommittedIndexReader { indexes }));
+        storage.set_committed_index_reader(Arc::new(InMemoryCommittedIndexReader {
+            indexes,
+            visits: visits.clone(),
+        }));
 
-        (storage, stream_calls)
+        (storage, stream_calls, visits)
     }
 
     #[test]
@@ -3417,7 +3566,7 @@ mod tests {
             0,
             crate::graph::types::VALID_TIME_FOREVER,
         );
-        let (storage, stream_calls) = storage_with_no_full_scan_committed_facts(vec![fact]);
+        let (storage, stream_calls, _) = storage_with_no_full_scan_committed_facts(vec![fact]);
         let executor = DatalogExecutor::new(storage);
         let command = parse_datalog_command(&format!(
             r#"(query [:find ?v :as-of 1 :valid-at :any-valid-time :where [#uuid "{entity}" :bench/ref ?v]])"#
@@ -3459,7 +3608,7 @@ mod tests {
                 )
             })
             .collect();
-        let (storage, stream_calls) = storage_with_no_full_scan_committed_facts(facts);
+        let (storage, stream_calls, _) = storage_with_no_full_scan_committed_facts(facts);
         let executor = DatalogExecutor::new(storage);
         let query = DatalogQuery {
             find: vec![FindSpec::Variable("?value".to_string())],
@@ -3530,7 +3679,7 @@ mod tests {
                 crate::graph::types::VALID_TIME_FOREVER,
             ),
         ];
-        let (storage, stream_calls) = storage_with_no_full_scan_committed_facts(facts);
+        let (storage, stream_calls, _) = storage_with_no_full_scan_committed_facts(facts);
         let executor = DatalogExecutor::new(storage);
         let command = parse_datalog_command(
             "(query [:find ?e :as-of 1 :valid-at :any-valid-time :where [?e :bench/ref ?v]])",
@@ -3548,6 +3697,43 @@ mod tests {
             stream_calls.load(Ordering::SeqCst),
             0,
             "attribute-bound as-of query should avoid committed full scan"
+        );
+    }
+
+    #[test]
+    fn max_results_stops_committed_attribute_visitation_at_max_plus_one() {
+        let facts = (1u128..=32)
+            .map(|entity| {
+                Fact::with_valid_time(
+                    Uuid::from_u128(entity),
+                    ":bounded/value".to_string(),
+                    Value::Integer(i64::try_from(entity).unwrap()),
+                    1000,
+                    1,
+                    0,
+                    crate::graph::types::VALID_TIME_FOREVER,
+                )
+            })
+            .collect();
+        let (storage, stream_calls, visits) = storage_with_no_full_scan_committed_facts(facts);
+        let executor = DatalogExecutor::new(storage);
+        let command = parse_datalog_command(
+            "(query [:find ?e :as-of 1 :valid-at :any-valid-time :where [?e :bounded/value ?v] :max-results 2])",
+        )
+        .unwrap();
+
+        let result = executor.execute(command);
+
+        assert!(result.is_err(), "an incomplete bounded result must fail");
+        assert_eq!(
+            visits.load(Ordering::SeqCst),
+            3,
+            "committed visitation must stop at max-results plus one"
+        );
+        assert_eq!(
+            stream_calls.load(Ordering::SeqCst),
+            0,
+            "bounded visitation must not fall back to a committed full scan"
         );
     }
 
@@ -3704,7 +3890,10 @@ mod tests {
             stream_calls: stream_calls.clone(),
             fail_resolve: true,
         }));
-        storage.set_committed_index_reader(Arc::new(InMemoryCommittedIndexReader { indexes }));
+        storage.set_committed_index_reader(Arc::new(InMemoryCommittedIndexReader {
+            indexes,
+            visits: Arc::new(AtomicUsize::new(0)),
+        }));
         let executor = DatalogExecutor::new(storage);
         let command = parse_datalog_command(&format!(
             r#"(query [:find ?v :where [#uuid "{entity}" :bench/name ?v]])"#
@@ -4588,7 +4777,7 @@ mod tests {
             max_results: None,
         };
 
-        let facts = executor.filter_facts_for_query(&query).unwrap();
+        let facts = executor.filter_facts_for_query(&query, usize::MAX).unwrap();
         assert_eq!(facts.len(), 1, "expected exactly 1 net-asserted fact");
         assert_eq!(facts[0].attribute, ":person/age");
     }
@@ -4642,7 +4831,9 @@ mod tests {
             max_derived_facts: None,
             max_results: None,
         };
-        let facts_inside = executor.filter_facts_for_query(&query_inside).unwrap();
+        let facts_inside = executor
+            .filter_facts_for_query(&query_inside, usize::MAX)
+            .unwrap();
         assert_eq!(facts_inside.len(), 2, "both facts visible at t=1500");
 
         // Query outside the window: only the open-ended name fact should be visible
@@ -4655,7 +4846,9 @@ mod tests {
             max_derived_facts: None,
             max_results: None,
         };
-        let facts_outside = executor.filter_facts_for_query(&query_outside).unwrap();
+        let facts_outside = executor
+            .filter_facts_for_query(&query_outside, usize::MAX)
+            .unwrap();
         assert_eq!(
             facts_outside.len(),
             1,
@@ -4684,7 +4877,7 @@ mod tests {
             _ => panic!("expected query"),
         };
 
-        let facts = executor.filter_facts_for_query(&query).unwrap();
+        let facts = executor.filter_facts_for_query(&query, usize::MAX).unwrap();
         assert_eq!(
             facts.len(),
             2,
@@ -5575,6 +5768,7 @@ mod expr_eval_tests {
             None,
             Some(ValidAt::Timestamp(crate::graph::types::tx_id_now() as i64)),
             &FunctionRegistry::with_builtins(),
+            usize::MAX,
         )
         .unwrap();
         assert_eq!(ts_result.len(), 1, "timestamp valid_at should match");
@@ -5588,6 +5782,7 @@ mod expr_eval_tests {
             None,
             Some(ValidAt::AnyValidTime),
             &FunctionRegistry::with_builtins(),
+            usize::MAX,
         )
         .unwrap();
         assert_eq!(any_result.len(), 1, "any_valid_time should match");
@@ -5695,6 +5890,7 @@ mod expr_eval_tests {
             None,
             None,
             &FunctionRegistry::with_builtins(),
+            usize::MAX,
         )
         .unwrap();
         assert_eq!(result.len(), 0, "empty incoming should return empty");
@@ -5724,6 +5920,7 @@ mod expr_eval_tests {
             None,
             None,
             &FunctionRegistry::with_builtins(),
+            usize::MAX,
         )
         .unwrap();
         assert_eq!(
@@ -5924,6 +6121,7 @@ mod expr_eval_tests {
             None,
             None,
             &FunctionRegistry::with_builtins(),
+            usize::MAX,
         )
         .unwrap();
         // The expr is truthy so the binding passes through
@@ -5962,6 +6160,7 @@ mod expr_eval_tests {
             None,
             None,
             &FunctionRegistry::with_builtins(),
+            usize::MAX,
         )
         .unwrap();
         assert_eq!(

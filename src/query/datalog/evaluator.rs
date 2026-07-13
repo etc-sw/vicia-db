@@ -873,6 +873,7 @@ impl StratifiedEvaluator {
                         None,
                         None,
                         &fn_registry,
+                        self.max_results,
                     )?;
                     drop(registry_guard);
                     expanded

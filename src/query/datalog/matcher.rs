@@ -27,6 +27,20 @@ pub struct PatternMatcher {
 }
 
 impl PatternMatcher {
+    fn push_bounded(
+        results: &mut Vec<Bindings>,
+        binding: Bindings,
+        max_results: usize,
+    ) -> anyhow::Result<()> {
+        if results.len() >= max_results {
+            anyhow::bail!(
+                "query binding work exceeds max-results {max_results}; incomplete result rejected"
+            );
+        }
+        results.push(binding);
+        Ok(())
+    }
+
     pub fn new(storage: FactStorage) -> Self {
         PatternMatcher {
             storage: MatcherStorage::Owned(storage),
@@ -90,6 +104,21 @@ impl PatternMatcher {
         }
 
         results
+    }
+
+    pub(crate) fn match_pattern_bounded(
+        &self,
+        pattern: &Pattern,
+        max_results: usize,
+    ) -> anyhow::Result<Vec<Bindings>> {
+        let mut results = Vec::with_capacity(max_results.min(1024));
+        let facts = self.get_facts();
+        for fact in &*facts {
+            if let Some(bindings) = self.match_fact_against_pattern(fact, pattern) {
+                Self::push_bounded(&mut results, bindings, max_results)?;
+            }
+        }
+        Ok(results)
     }
 
     /// Try to match a single fact against a pattern
@@ -340,6 +369,46 @@ impl PatternMatcher {
         }
     }
 
+    pub(crate) fn match_with_hint_seeded_bounded(
+        &self,
+        seed: Vec<Bindings>,
+        pattern: &Pattern,
+        hint: &IndexHint,
+        max_results: usize,
+    ) -> anyhow::Result<Vec<Bindings>> {
+        if seed.is_empty() {
+            return Ok(vec![]);
+        }
+        if seed.len() > max_results {
+            anyhow::bail!(
+                "query binding work exceeds max-results {max_results}; incomplete result rejected"
+            );
+        }
+        if seed.len() == 1 && seed.first().is_some_and(HashMap::is_empty) {
+            let _ = hint;
+            self.match_pattern_bounded(pattern, max_results)
+        } else {
+            self.join_with_pattern_bounded(seed, pattern, max_results)
+        }
+    }
+
+    pub(crate) fn match_patterns_bounded(
+        &self,
+        patterns: &[Pattern],
+        mut seed: Vec<Bindings>,
+        max_results: usize,
+    ) -> anyhow::Result<Vec<Bindings>> {
+        if seed.len() > max_results {
+            anyhow::bail!(
+                "query binding work exceeds max-results {max_results}; incomplete result rejected"
+            );
+        }
+        for pattern in patterns {
+            seed = self.join_with_pattern_bounded(seed, pattern, max_results)?;
+        }
+        Ok(seed)
+    }
+
     /// Match a single pattern through an advisory planner hint.
     ///
     /// This deliberately scans the matcher's current snapshot. The old
@@ -356,6 +425,7 @@ impl PatternMatcher {
     /// For each seed binding, extends it by matching all patterns in sequence.
     /// Returns all extended bindings that satisfy every pattern.
     /// If `seed` is empty, returns empty. If `patterns` is empty, returns `seed` unchanged.
+    #[allow(dead_code)]
     pub(crate) fn match_patterns_seeded(
         &self,
         patterns: &[Pattern],
@@ -504,6 +574,110 @@ impl PatternMatcher {
         results
     }
 
+    fn join_with_pattern_bounded(
+        &self,
+        existing_bindings: Vec<Bindings>,
+        pattern: &Pattern,
+        max_results: usize,
+    ) -> anyhow::Result<Vec<Bindings>> {
+        if existing_bindings.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let is_pseudo = matches!(&pattern.attribute, AttributeSpec::Pseudo(_));
+        let join_var = if is_pseudo {
+            None
+        } else {
+            let entity_var = match &pattern.entity {
+                EdnValue::Symbol(symbol)
+                    if symbol.starts_with('?')
+                        && existing_bindings
+                            .first()
+                            .is_some_and(|binding| binding.contains_key(symbol)) =>
+                {
+                    Some(symbol.clone())
+                }
+                _ => None,
+            };
+            entity_var.or_else(|| match &pattern.value {
+                EdnValue::Symbol(symbol)
+                    if symbol.starts_with('?')
+                        && existing_bindings
+                            .first()
+                            .is_some_and(|binding| binding.contains_key(symbol)) =>
+                {
+                    Some(symbol.clone())
+                }
+                _ => None,
+            })
+        };
+
+        let Some(join_var) = join_var else {
+            let mut results = Vec::with_capacity(max_results.min(1024));
+            for existing in existing_bindings {
+                let matches = self.match_pattern_with_bindings_bounded(
+                    pattern,
+                    &existing,
+                    max_results.saturating_sub(results.len()),
+                )?;
+                for binding in matches {
+                    Self::push_bounded(&mut results, binding, max_results)?;
+                }
+            }
+            return Ok(results);
+        };
+
+        let candidates = self.match_pattern_bounded(pattern, max_results)?;
+        let mut build_side: HashMap<Value, Vec<Bindings>> = HashMap::new();
+        for binding in candidates {
+            if let Some(value) = binding.get(&join_var) {
+                build_side
+                    .entry(Self::normalize_join_value(value))
+                    .or_default()
+                    .push(binding);
+            }
+        }
+
+        let mut results = Vec::with_capacity(max_results.min(1024));
+        for existing in existing_bindings {
+            let Some(probe) = existing.get(&join_var) else {
+                let matches = self.match_pattern_with_bindings_bounded(
+                    pattern,
+                    &existing,
+                    max_results.saturating_sub(results.len()),
+                )?;
+                for binding in matches {
+                    Self::push_bounded(&mut results, binding, max_results)?;
+                }
+                continue;
+            };
+            if let Some(matches) = build_side.get(&Self::normalize_join_value(probe)) {
+                for candidate in matches {
+                    let mut merged = existing.clone();
+                    let mut consistent = true;
+                    for (variable, value) in candidate {
+                        if variable.starts_with("__f") {
+                            merged.insert(variable.clone(), value.clone());
+                        } else if let Some(existing_value) = merged.get(variable) {
+                            if Self::normalize_join_value(existing_value)
+                                != Self::normalize_join_value(value)
+                            {
+                                consistent = false;
+                                break;
+                            }
+                        } else {
+                            merged.insert(variable.clone(), value.clone());
+                        }
+                    }
+                    if consistent {
+                        Self::push_bounded(&mut results, merged, max_results)?;
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
     /// Normalize a binding value for use as a hash-join key.
     ///
     /// Converts `Value::Keyword(k)` → `Value::Ref(uuid)` so that entity references
@@ -561,6 +735,21 @@ impl PatternMatcher {
 
         // Default: scan all facts
         self.match_pattern_with_bindings_scan(pattern, existing)
+    }
+
+    fn match_pattern_with_bindings_bounded(
+        &self,
+        pattern: &Pattern,
+        existing: &Bindings,
+        max_results: usize,
+    ) -> anyhow::Result<Vec<Bindings>> {
+        let results = self.match_pattern_with_bindings(pattern, existing);
+        if results.len() > max_results {
+            anyhow::bail!(
+                "query binding work exceeds max-results {max_results}; incomplete result rejected"
+            );
+        }
+        Ok(results)
     }
 
     /// Default join implementation: iterate all facts and try to match.

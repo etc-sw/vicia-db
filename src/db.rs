@@ -963,6 +963,18 @@ fn wal_replay_memory_diagnostics(
 
 // ─── Inner ────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CheckpointPolicy {
+    Automatic,
+    ExplicitMaintenance,
+}
+
+impl CheckpointPolicy {
+    fn permits_automatic(self) -> bool {
+        self == Self::Automatic
+    }
+}
+
 struct Inner {
     /// The shared in-memory fact store. Cloning is cheap (Arc-based).
     fact_storage: FactStorage,
@@ -976,10 +988,9 @@ struct Inner {
     write_lock: Mutex<WriteContext>,
     /// Configuration options.
     options: OpenOptions,
-    /// Raw handles keep their legacy best-effort close checkpoint. Interactive
-    /// capability handles leave WAL-backed work for an explicit maintenance
-    /// lifetime instead of hiding I/O in drop.
-    checkpoint_on_drop: bool,
+    /// Raw handles retain legacy automatic checkpointing. Capability handles
+    /// leave publication to an explicit maintenance call.
+    checkpoint_policy: CheckpointPolicy,
     #[cfg(any(test, feature = "bench-internals"))]
     wal_replay_memory_diagnostics: WalReplayMemoryDiagnostics,
 }
@@ -990,7 +1001,9 @@ impl Drop for Inner {
         // Errors are silently ignored (can't propagate from Drop).
         // Skip if wal_checkpoint_threshold is usize::MAX — that sentinel suppresses
         // all checkpointing (used by benchmarks to keep WAL entries pending).
-        if !self.checkpoint_on_drop || self.options.wal_checkpoint_threshold == usize::MAX {
+        if !self.checkpoint_policy.permits_automatic()
+            || self.options.wal_checkpoint_threshold == usize::MAX
+        {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let ctx = self
@@ -1040,21 +1053,31 @@ impl InteractiveLedger {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
         Ok(Self {
-            db: Minigraf::open_with_options_and_drop_policy(path, options, false)?,
+            db: Minigraf::open_with_options_and_checkpoint_policy(
+                path,
+                options,
+                CheckpointPolicy::ExplicitMaintenance,
+            )?,
         })
     }
 
     /// Open an in-memory interactive ledger.
     pub fn in_memory() -> Result<Self> {
         Ok(Self {
-            db: Minigraf::in_memory()?,
+            db: Minigraf::in_memory_with_checkpoint_policy(
+                OpenOptions::default(),
+                CheckpointPolicy::ExplicitMaintenance,
+            )?,
         })
     }
 
     /// Open an in-memory interactive ledger with custom options.
     pub fn in_memory_with_options(options: OpenOptions) -> Result<Self> {
         Ok(Self {
-            db: Minigraf::in_memory_with_options(options)?,
+            db: Minigraf::in_memory_with_checkpoint_policy(
+                options,
+                CheckpointPolicy::ExplicitMaintenance,
+            )?,
         })
     }
 
@@ -1128,7 +1151,11 @@ impl MaintenanceLedger {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
-            db: Minigraf::open(path)?,
+            db: Minigraf::open_with_options_and_checkpoint_policy(
+                path,
+                OpenOptions::default(),
+                CheckpointPolicy::ExplicitMaintenance,
+            )?,
         })
     }
 
@@ -1136,14 +1163,21 @@ impl MaintenanceLedger {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
         Ok(Self {
-            db: Minigraf::open_with_options(path, options)?,
+            db: Minigraf::open_with_options_and_checkpoint_policy(
+                path,
+                options,
+                CheckpointPolicy::ExplicitMaintenance,
+            )?,
         })
     }
 
     /// Open an in-memory maintenance ledger.
     pub fn in_memory() -> Result<Self> {
         Ok(Self {
-            db: Minigraf::in_memory()?,
+            db: Minigraf::in_memory_with_checkpoint_policy(
+                OpenOptions::default(),
+                CheckpointPolicy::ExplicitMaintenance,
+            )?,
         })
     }
 
@@ -1256,14 +1290,14 @@ impl Minigraf {
     /// or WAL replay fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with_options(path: impl AsRef<Path>, opts: OpenOptions) -> Result<Self> {
-        Self::open_with_options_and_drop_policy(path, opts, true)
+        Self::open_with_options_and_checkpoint_policy(path, opts, CheckpointPolicy::Automatic)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn open_with_options_and_drop_policy(
+    fn open_with_options_and_checkpoint_policy(
         path: impl AsRef<Path>,
         opts: OpenOptions,
-        checkpoint_on_drop: bool,
+        checkpoint_policy: CheckpointPolicy,
     ) -> Result<Self> {
         let db_path = path.as_ref().to_path_buf();
 
@@ -1310,7 +1344,7 @@ impl Minigraf {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(ctx),
                 options: opts,
-                checkpoint_on_drop,
+                checkpoint_policy,
                 #[cfg(any(test, feature = "bench-internals"))]
                 wal_replay_memory_diagnostics: replay.memory,
             }),
@@ -1334,6 +1368,13 @@ impl Minigraf {
     ///
     /// Returns an error if the in-memory storage backend fails to initialise.
     pub fn in_memory_with_options(opts: OpenOptions) -> Result<Self> {
+        Self::in_memory_with_checkpoint_policy(opts, CheckpointPolicy::Automatic)
+    }
+
+    fn in_memory_with_checkpoint_policy(
+        opts: OpenOptions,
+        checkpoint_policy: CheckpointPolicy,
+    ) -> Result<Self> {
         let backend = MemoryBackend::new();
         let pfs = PersistentFactStorage::new(backend, opts.page_cache_size)?;
         let fact_storage = pfs.storage().clone();
@@ -1349,7 +1390,7 @@ impl Minigraf {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(WriteContext::Memory),
                 options: opts,
-                checkpoint_on_drop: true,
+                checkpoint_policy,
                 #[cfg(any(test, feature = "bench-internals"))]
                 wal_replay_memory_diagnostics: WalReplayMemoryDiagnostics::default(),
             }),
@@ -1525,6 +1566,7 @@ impl Minigraf {
             let should_checkpoint = WriteTransaction::wal_write_stamped_batch(
                 &mut ctx,
                 &self.inner.options,
+                self.inner.checkpoint_policy,
                 tx_count,
                 &stamped,
             )?;
@@ -1665,6 +1707,7 @@ impl Minigraf {
         let should_checkpoint = WriteTransaction::wal_write_stamped_batch(
             ctx,
             &self.inner.options,
+            self.inner.checkpoint_policy,
             tx_count,
             &stamped,
         )?;
@@ -3026,6 +3069,7 @@ impl<'a> WriteTransaction<'a> {
             let should_checkpoint = Self::wal_write_stamped_batch(
                 &mut self.guard,
                 &self.inner.options,
+                self.inner.checkpoint_policy,
                 tx_count,
                 &stamped,
             )?;
@@ -3059,6 +3103,7 @@ impl<'a> WriteTransaction<'a> {
     fn wal_write_stamped_batch(
         ctx: &mut WriteContext,
         opts: &OpenOptions,
+        checkpoint_policy: CheckpointPolicy,
         tx_count: u64,
         facts: &[Fact],
     ) -> Result<bool> {
@@ -3084,7 +3129,8 @@ impl<'a> WriteTransaction<'a> {
                 pfs.mark_dirty();
                 *wal_entry_count = wal_entry_count.saturating_add(1);
 
-                Ok(*wal_entry_count >= opts.wal_checkpoint_threshold)
+                Ok(checkpoint_policy.permits_automatic()
+                    && *wal_entry_count >= opts.wal_checkpoint_threshold)
             }
         }
     }
@@ -4515,11 +4561,24 @@ mod tests {
         db.execute(r#"(transact [[:a :v 1] [:b :v 2] [:c :v 3]])"#)
             .unwrap();
 
-        // Confirms the field parses cleanly and the query succeeds
+        let exact = db.execute("(query [:find ?v :where [:a :v ?v] :max-results 1])");
+        assert!(exact.is_ok(), "an exact max-results budget should succeed");
+
         let result = db.execute("(query [:find ?e :where [?e :v ?v] :max-results 1])");
         assert!(
-            result.is_ok(),
-            "query with :max-results should parse and execute"
+            result.is_err(),
+            "a query exceeding max-results must fail without truncation"
+        );
+        let error = result.err().expect("error should be present").to_string();
+        assert!(
+            error.contains("max-results"),
+            "error should name the budget"
+        );
+
+        let aggregate = db.execute("(query [:find (count ?e) :where [?e :v ?v] :max-results 1])");
+        assert!(
+            aggregate.is_err(),
+            "max-results must bound aggregate source work, not only output rows"
         );
     }
 
@@ -5289,22 +5348,69 @@ mod capability_tests {
     fn maintenance_ledger_reopens_after_interactive_lifetime() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("capability-split.graph");
+        let options = OpenOptions {
+            wal_checkpoint_threshold: 1,
+            ..OpenOptions::default()
+        };
         {
-            let ledger = InteractiveLedger::open(&path).unwrap();
+            let ledger = InteractiveLedger::open_with_options(&path, options.clone()).unwrap();
             ledger
                 .execute_write(r#"(transact [[:card/a :card/title "A"]])"#)
                 .unwrap();
+            assert!(
+                Minigraf::wal_path_for(&path).exists(),
+                "interactive writes must not checkpoint at the WAL threshold"
+            );
+
+            let mut transaction = ledger.begin_write().unwrap();
+            transaction
+                .execute_write(r#"(transact [[:card/a :card/status :current]])"#)
+                .unwrap();
+            transaction.commit().unwrap();
+            assert!(
+                Minigraf::wal_path_for(&path).exists(),
+                "interactive transaction commits must not checkpoint"
+            );
         }
         let wal_path = Minigraf::wal_path_for(&path);
         assert!(
             wal_path.exists(),
             "interactive drop must leave durable WAL work for maintenance"
         );
+        {
+            let maintenance = MaintenanceLedger::open_with_options(&path, options).unwrap();
+            assert_eq!(maintenance.current_tx_count(), 2);
+        }
+        assert!(
+            wal_path.exists(),
+            "maintenance drop must not publish without an explicit call"
+        );
+
         let maintenance = MaintenanceLedger::open(&path).unwrap();
         let outcome = maintenance.run_idle_maintenance().unwrap();
         assert_eq!(outcome.checkpoint, MaintenanceCheckpointEffect::Published);
         assert!(!wal_path.exists());
-        assert_eq!(maintenance.export_fact_log().unwrap().len(), 1);
-        assert_eq!(maintenance.current_tx_count(), 1);
+        assert_eq!(maintenance.export_fact_log().unwrap().len(), 2);
+        assert_eq!(maintenance.current_tx_count(), 2);
+    }
+
+    #[test]
+    fn raw_minigraf_retains_threshold_checkpoint_compatibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("raw-auto-checkpoint.graph");
+        let db = Minigraf::open_with_options(
+            &path,
+            OpenOptions {
+                wal_checkpoint_threshold: 1,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+        db.execute(r#"(transact [[:card/a :card/title "A"]])"#)
+            .unwrap();
+        assert!(
+            !Minigraf::wal_path_for(&path).exists(),
+            "raw Minigraf must retain legacy automatic checkpointing"
+        );
     }
 }

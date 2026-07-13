@@ -252,10 +252,14 @@ pub(crate) enum CurrentAttributeStep {
         not(all(target_arch = "wasm32", feature = "browser")),
         allow(dead_code)
     )]
-    Yielded {
+    Yielded { entries: usize },
+    Complete {
+        #[cfg_attr(
+            not(all(target_arch = "wasm32", feature = "browser")),
+            allow(dead_code)
+        )]
         entries: usize,
     },
-    Complete,
 }
 
 pub(crate) enum CurrentEntityAttributeStep {
@@ -645,6 +649,23 @@ impl FactStorage {
         // Then pending facts (post-checkpoint, in memory)
         all.extend(d.pending.facts());
         Ok(all)
+    }
+
+    /// Visit at most `max_facts` ledger records without materializing an
+    /// unbounded committed or pending snapshot. The first excess record fails
+    /// closed so authority-relevant queries never observe a truncated prefix.
+    pub(crate) fn get_all_facts_bounded(&self, max_facts: usize) -> Result<Vec<Fact>> {
+        let mut facts = Vec::with_capacity(max_facts.min(1024));
+        self.for_each_fact(|fact| {
+            if facts.len() >= max_facts {
+                anyhow::bail!(
+                    "query source work exceeds max-results {max_facts}; incomplete result rejected"
+                );
+            }
+            facts.push(fact);
+            Ok(())
+        })?;
+        Ok(facts)
     }
 
     /// Visit all facts in deterministic storage order without materializing a
@@ -1129,6 +1150,16 @@ fn next_string_prefix(s: &str) -> Option<String> {
 
 /// Production helpers on FactStorage: index-driven entity/attribute lookups used by the query executor.
 impl FactStorage {
+    fn push_bounded_query_fact(facts: &mut Vec<Fact>, fact: Fact, max_facts: usize) -> Result<()> {
+        if facts.len() >= max_facts {
+            anyhow::bail!(
+                "query source work exceeds max-results {max_facts}; incomplete result rejected"
+            );
+        }
+        facts.push(fact);
+        Ok(())
+    }
+
     /// Get all facts for a specific entity (index-driven).
     pub(crate) fn get_facts_by_entity(&self, entity_id: &EntityId) -> Result<Vec<Fact>> {
         use crate::storage::index::EavtKey;
@@ -1204,6 +1235,70 @@ impl FactStorage {
         Ok(facts)
     }
 
+    /// Bounded entity-history lookup for query execution.
+    pub(crate) fn get_facts_by_entity_bounded(
+        &self,
+        entity_id: &EntityId,
+        max_facts: usize,
+    ) -> Result<Vec<Fact>> {
+        use crate::storage::index::EavtKey;
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        let start = EavtKey {
+            entity: *entity_id,
+            attribute: String::new(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        };
+        let end = EavtKey {
+            entity: uuid::Uuid::from_u128(entity_id.as_u128().wrapping_add(1)),
+            attribute: String::new(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        };
+        let mut facts = Vec::with_capacity(max_facts.min(1024));
+        for id in d.pending.range_eavt(&start, &end) {
+            Self::push_bounded_query_fact(&mut facts, d.pending.get(id)?.to_fact(), max_facts)?;
+        }
+        if let Some(reader) = &d.committed_index_reader {
+            let mut refs = Vec::new();
+            reader.visit_current_eavt_entries(&start, Some(&end), &mut |_, fact_ref| {
+                if facts.len().saturating_add(refs.len()) >= max_facts {
+                    anyhow::bail!(
+                        "query source work exceeds max-results {max_facts}; incomplete result rejected"
+                    );
+                }
+                refs.push(fact_ref);
+                Ok(true)
+            })?;
+            refs.sort_unstable();
+            for fact_ref in refs {
+                Self::push_bounded_query_fact(
+                    &mut facts,
+                    resolve_fact_ref(&d, fact_ref)?,
+                    max_facts,
+                )?;
+            }
+            return Ok(facts);
+        }
+        if let Some(reader) = &d.committed {
+            reader.for_each_fact(&mut |fact| {
+                if fact.entity == *entity_id {
+                    Self::push_bounded_query_fact(&mut facts, fact, max_facts)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(facts)
+    }
+
     /// Get every fact record (assertions and retractions, all valid-time
     /// windows) for one exact EAV triple. Index-driven via the entity scan;
     /// used by `(forget ...)` to discover the windows to close.
@@ -1222,6 +1317,7 @@ impl FactStorage {
     }
 
     /// Get all facts for a specific attribute (index-driven).
+    #[allow(dead_code)]
     pub(crate) fn get_facts_by_attribute(&self, attribute: &Attribute) -> Result<Vec<Fact>> {
         use crate::storage::index::AevtKey;
         let d = self.data.read().unwrap_or_else(|e| e.into_inner());
@@ -1280,6 +1376,69 @@ impl FactStorage {
             }
         }
 
+        Ok(facts)
+    }
+
+    /// Bounded attribute-history lookup for query execution.
+    pub(crate) fn get_facts_by_attribute_bounded(
+        &self,
+        attribute: &Attribute,
+        max_facts: usize,
+    ) -> Result<Vec<Fact>> {
+        use crate::storage::index::AevtKey;
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        let start = AevtKey {
+            attribute: attribute.clone(),
+            entity: uuid::Uuid::nil(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        };
+        let end = next_string_prefix(attribute).map(|attribute| AevtKey {
+            attribute,
+            entity: uuid::Uuid::nil(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        });
+        let mut facts = Vec::with_capacity(max_facts.min(1024));
+        for id in d.pending.range_aevt(&start, end.as_ref()) {
+            Self::push_bounded_query_fact(&mut facts, d.pending.get(id)?.to_fact(), max_facts)?;
+        }
+        if let Some(reader) = &d.committed_index_reader {
+            let mut refs = Vec::new();
+            reader.visit_current_aevt_entries(&start, end.as_ref(), &mut |_, fact_ref| {
+                if facts.len().saturating_add(refs.len()) >= max_facts {
+                    anyhow::bail!(
+                        "query source work exceeds max-results {max_facts}; incomplete result rejected"
+                    );
+                }
+                refs.push(fact_ref);
+                Ok(true)
+            })?;
+            refs.sort_unstable();
+            for fact_ref in refs {
+                let fact = resolve_fact_ref(&d, fact_ref)?;
+                if &fact.attribute == attribute {
+                    Self::push_bounded_query_fact(&mut facts, fact, max_facts)?;
+                }
+            }
+            return Ok(facts);
+        }
+        if let Some(reader) = &d.committed {
+            reader.for_each_fact(&mut |fact| {
+                if fact.attribute == *attribute {
+                    Self::push_bounded_query_fact(&mut facts, fact, max_facts)?;
+                }
+                Ok(())
+            })?;
+        }
         Ok(facts)
     }
 
@@ -1370,7 +1529,7 @@ impl FactStorage {
         visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
     ) -> Result<CurrentAttributeStep> {
         if cursor.complete {
-            return Ok(CurrentAttributeStep::Complete);
+            return Ok(CurrentAttributeStep::Complete { entries: 0 });
         }
         let d = self.data.read().unwrap_or_else(|error| error.into_inner());
         if d.publication_generation != cursor.publication_generation {
@@ -1545,7 +1704,7 @@ impl FactStorage {
         }
         flush_entity(cursor, visit)?;
         cursor.complete = true;
-        Ok(CurrentAttributeStep::Complete)
+        Ok(CurrentAttributeStep::Complete { entries: processed })
     }
 
     /// Visit the net-asserted current view for one attribute without building
@@ -1563,7 +1722,7 @@ impl FactStorage {
         loop {
             if matches!(
                 self.step_current_attribute_cursor(&mut cursor, usize::MAX, visit)?,
-                CurrentAttributeStep::Complete
+                CurrentAttributeStep::Complete { .. }
             ) {
                 return Ok(());
             }
@@ -3765,7 +3924,7 @@ mod tests {
         let step = storage
             .step_current_attribute_cursor(&mut cursor, usize::MAX, &mut |_, _| Ok(()))
             .unwrap();
-        assert!(matches!(step, CurrentAttributeStep::Complete));
+        assert!(matches!(step, CurrentAttributeStep::Complete { .. }));
         let diagnostics = cursor.diagnostics();
         assert_eq!(diagnostics.pending_entries_visited, 0);
         assert_eq!(diagnostics.committed_entries_visited, 0);
@@ -3810,7 +3969,7 @@ mod tests {
                     Ok(())
                 })
                 .unwrap();
-            if matches!(step, CurrentAttributeStep::Complete) {
+            if matches!(step, CurrentAttributeStep::Complete { .. }) {
                 break;
             }
         }
@@ -3860,7 +4019,7 @@ mod tests {
                     Ok(())
                 })
                 .unwrap();
-            if matches!(step, CurrentAttributeStep::Complete) {
+            if matches!(step, CurrentAttributeStep::Complete { .. }) {
                 return (values, cursor.diagnostics());
             }
         }

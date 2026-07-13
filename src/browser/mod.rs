@@ -4703,6 +4703,39 @@ mod tests {
             .is_err(),
             "oversized JSON must be rejected, not truncated"
         );
+
+        let dense = BrowserDb::open_in_memory().expect("open dense fixture");
+        let facts = (0..32)
+            .map(|index| format!("[:item/{index} :item/group :all]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        dense
+            .execute(format!("(transact [{facts}])"))
+            .await
+            .expect("seed dense fixture");
+        let dense_view = dense.read_view().expect("dense read view");
+        assert!(
+            dense_view
+                .query(
+                    "(query [:find ?item :where [?item :item/group :all]])".to_string(),
+                    1,
+                    4_096,
+                )
+                .await
+                .is_err(),
+            "max_rows must reject during selective result generation"
+        );
+        assert!(
+            dense_view
+                .query(
+                    "(query [:find (count ?item) :where [?item :item/group :all]])".to_string(),
+                    1,
+                    4_096,
+                )
+                .await
+                .is_err(),
+            "max_rows must also bound aggregate source work"
+        );
     }
 
     #[wasm_bindgen_test]
