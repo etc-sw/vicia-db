@@ -67,7 +67,7 @@ const INTERNAL_HEADER_SIZE: usize = 12;
 const SLOT_SIZE: usize = 4;
 /// Production bulk-build fill percentage. This changes packing policy only;
 /// every resulting page retains the same v11 byte format.
-pub(crate) const DEFAULT_BTREE_FILL_PERCENT: u8 = 75;
+pub(crate) const DEFAULT_BTREE_FILL_PERCENT: u8 = 90;
 
 #[derive(Clone, Copy)]
 pub(crate) struct BtreeBuildOptions {
@@ -1291,8 +1291,8 @@ mod tests {
             "300 entries must need multiple pages; got {}",
             pages_written
         );
-        // With 300 entries at 75% fill factor (~3072 bytes/leaf), we always get multiple
-        // leaf pages, so the root MUST be an internal node.
+        // With 300 entries at the production fill factor, we always get multiple leaf
+        // pages, so the root MUST be an internal node.
         assert_eq!(
             root_page[0], PAGE_TYPE_INTERNAL,
             "300 entries should produce an internal node root, got page type 0x{:02x}",

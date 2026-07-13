@@ -1534,6 +1534,18 @@ index sort (1,089.3 vs 1,946.0 ms) and the three populated B-tree builds, not
 publication sync (~1 ms). The receipt is retained under
 `benchmarks/baselines/storage-layout/2026-07-13-hal7800-lazy-full/receipt.json`.
 
+The next clean run at source `9c03d24` replaces the four simultaneous pending
+typed-key vectors with one reusable fact-position sort buffer and one canonical
+value encoding per fact. At fill 75, median checkpoint peak RSS falls from
+744.750 to 281.250 MiB and peak typed-key ownership falls from 1,000,000 entries
+to one streamed entry. In the same rotated run, fill 90 passes every receipt-owned
+gate: its 301.363 MiB image is 14.6% smaller than fill 75, checkpoint p50/p95 is
+5,013.869/5,717.048 ms versus 5,347.251/7,118.443 ms at fill 75, point p50 is
+0.027 ms, and aggregate p50 is 489.099 ms. Production bulk-build fill therefore
+moves from 75 to 90 without changing the public API or v11 page format. Raw
+evidence is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-reference-sort-full/receipt.json`.
+
 The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
