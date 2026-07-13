@@ -1807,6 +1807,37 @@ VICIA_BENCH_RECEIPT=target/h0-browser.json \
   /path-served-under-repo/1m.graph 20
 ```
 
+### H2 bounded typed current readers
+
+`vicia.current-reader.v1` measures the two H2 public selection boundaries on a
+checkpointed Ref-valued fixture: exact `(entity, attribute)` EAVT reads and
+exact `(target, attribute)` VAET reverse-reference reads. The full profile
+builds 1,000,000 facts, selects one middle fact, and records 20 observations
+per reader. A separate diagnostics probe owns the structural gates.
+
+| 1M typed read | p50 | p95 | leaf pages | projected emitted | owned key decode | full-leaf peak |
+|---|---:|---:|---:|---:|---:|---:|
+| `currentEntities` | 0.014407 ms | 0.050095 ms | 1 | 1 EAVT | 0 | 0 |
+| `refsTo` | 0.010912 ms | 0.028309 ms | 1 | 1 VAET | 0 | 0 |
+
+Both reads pass the 10 ms p95 foreground budget and the stricter structural
+contract: at most two leaf pages, no owned projected key decode, and zero
+full-leaf entries, struct bytes, or decoded payload bytes. The validator
+mutation audit proves that altered fixture shape, latency, leaf scope,
+materialization, owned-key count, or projected emission is rejected. Native
+and real-Chrome tests separately prove exact Vetch caller-fixture equivalence,
+transaction pinning, bi-temporal retractions, layered base/delta merge, and
+bounded resume when pending work exhausts a step before the committed
+candidate is consumed.
+
+The clean full receipt from source `2a0ef75` is preserved at
+`benchmarks/baselines/current-reader/2026-07-13-hal7800-h2-full/receipt.json`.
+
+```bash
+just current-reader-smoke
+just current-reader-full
+```
+
 ---
 
 ## Reproducing

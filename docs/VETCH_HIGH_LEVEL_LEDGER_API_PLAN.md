@@ -1,8 +1,9 @@
 # Vetch-Oriented High-Level Ledger API Plan
 
-Status: H0 measured on 2026-07-13; the first demonstrated public gap is a
-consistent transaction-pinned read view. The typed commit facade remains
-planned but is not a current Vetch blocker.
+Status: H0 measured and H2 bounded transaction-pinned current reads completed
+on 2026-07-13. The typed commit facade remains deferred because it is not a
+current Vetch blocker. H3 interactive/maintenance capability separation is the
+next open slice.
 
 Related authority:
 
@@ -508,8 +509,9 @@ Gate:
 
 ### H2 — Bounded current reads and consistent read views
 
-Status: transaction-pinned query boundary and bounded typed `current.entities`
-implemented; `refsTo` and Vetch fixture admission remain open.
+Status: complete. Native and browser read views pin one transaction and
+valid-time selection across bounded Datalog, typed entity reads, and typed
+reverse-reference reads.
 
 The implemented native `ReadView` captures its cursor while serialized with
 batch publication, then injects that cursor and one valid-time selection into
@@ -529,22 +531,44 @@ projection, merge the resident delta in index order, and preserve scoped and
 unscoped retract, `asOf`, and `validAt` semantics. Requests are bounded to 128
 ids, 32 attributes, 256 distinct pairs, 10,000 complete rows, and 65,536
 historical entries; browser results also retain the 8 MiB structured-result
-ceiling. Exceeding any bound rejects without truncation. H2 remains open until
-the typed `refsTo` surface and exact Vetch fixture equivalence are present.
+ceiling. Exceeding any bound rejects without truncation.
+
+`ReadView::refs_to` and browser `BrowserReadView.refsTo()` scan the exact VAET
+`(target, attribute)` range through the same borrowed raw/prefix-leaf boundary.
+They merge resident delta history without owned on-disk `VaetKey` decoding,
+return source UUIDs in deterministic order, and preserve scoped/unscoped
+retractions plus `asOf` and `validAt` selection. The Vetch current-card,
+current-space membership, proposal status/verdict, receipt, and agent-brief
+fixture produces the same results through typed readers and raw Datalog.
 
 - Expose exact entity/attribute reads through the indexed current-view path. ✅
 - Add browser prepared/bound query parity if H0 proves repeated parsing is
-  material.
-- Add consistent `asOf` and `validAt` read-view selection.
-- Return structured bounded results.
-- Reject incomplete result truncation and unindexed foreground plans.
+  material. Not admitted by H0.
+- Add consistent `asOf` and `validAt` read-view selection. ✅
+- Return structured bounded results. ✅
+- Reject incomplete result truncation and unindexed foreground plans. ✅
 
 Gate:
 
 - current-card, current-space membership, proposal status, receipt, and
-  agent-brief fixtures match raw Datalog results;
-- exact reads remain selective at the 1M baseline;
-- one multi-query read view cannot mix transaction cursors.
+  agent-brief fixtures match raw Datalog results; ✅
+- exact reads remain selective at the 1M baseline; ✅
+- one multi-query read view cannot mix transaction cursors. ✅
+
+#### H2 receipt and verdict — 2026-07-13
+
+The clean `vicia.current-reader.v1` full receipt builds a checkpointed 1M-Ref
+fixture and samples each typed reader 20 times. `currentEntities` records
+`0.014/0.050 ms` p50/p95; `refsTo` records `0.011/0.028 ms`. Each exact read
+visits one leaf and emits one projected entry. Owned EAVT/VAET key decodes and
+all three full-leaf materialization metrics remain zero. The validator rejects
+latency, leaf-scope, materialization, owned-key, emission, fixture-shape, and
+dirty-source mutations.
+
+The same fixture contract passes native raw-Datalog equivalence and the real
+Chrome paged suite (71/71). Canonical evidence is stored at
+`benchmarks/baselines/current-reader/2026-07-13-hal7800-h2-full/` from source
+`2a0ef75`.
 
 ### H3 — Interactive and maintenance capability split
 

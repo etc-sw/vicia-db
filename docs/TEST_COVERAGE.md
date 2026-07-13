@@ -1,11 +1,11 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: pending/WAL memory ownership accounting (July 2026), 1303 native tests + 62 browser WASM tests in source
+**Last Updated**: H2 bounded typed current readers (July 2026), 1344 native tests + 71 browser WASM tests in source
 
 ## Test Summary
 
-**Total Tests**: 1303 ✅ (1291 passing, 12 ignored)
-- ✅ 880 unit tests (lib — includes canonical pending ownership, `PendingFactId` overflow, tiered sorted-run ordering, pending-isolation cursor/WAL-drop/fail-closed aggregate guards, and exact pending/WAL ownership accounting guards)
+**Total Tests**: 1344 ✅ (1332 passing, 12 ignored)
+- ✅ 918 unit tests (lib — includes canonical pending ownership, allocation-free AEVT/EAVT/VAET projections, bounded current entity/reverse-reference readers, raw/prefix leaf range and resume guards, Vetch fixture equivalence, and exact pending/WAL ownership accounting guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
@@ -46,6 +46,7 @@
 - ✅ 1 header extension gate test (integration, Vetch delta storage — v10 extension module gate)
 - ✅ Agent-brief read-path benchmark harness (bench, Vetch Q1-A — current/as-of/prepared/export receipt-read surfaces; not counted as a test)
 - ✅ H0 Vetch ledger caller-contract harness (bench — four typed caller fixtures, exact atomic-write preparation timing, full-history/one-cursor proof, stale-verdict serialized rejection, multi-read cursor-mixing probe, native 10K/1M receipts, and real-Chrome IndexedDB stage receipt; not counted as a test)
+- ✅ H2 bounded current-reader harness (`vicia.current-reader.v1` — native 10K/1M exact EAVT/VAET selection, latency/leaf/decode/materialization gates, clean provenance, and validator mutation audit; not counted as a test)
 - ✅ `vicia.pending-isolation.v3` benchmark harness (bench — ID-only cursor isolation, canonical overlay ownership, per-index sorted-run bounds, peak decoded-WAL batch ownership, allocator trim, and post-drop RSS decomposition in a fresh child; not counted as a test)
 - ✅ Self-checking 1M paged-browser matrix harness (bench, Vetch A5-6d — import, fresh `openPaged` cold/warm probes, verified async export, 1,024-write threshold, maintenance reclaim, and post-maintenance reopen; not counted as a test)
 - ✅ 4 index corruption tests (integration, v11 public API — header/catalog corruption rejects open; exact fact/EAVT pages fail closed on first selective query)
@@ -56,9 +57,9 @@
 - ✅ 5 magic sets tests (integration, #289 — demand-driven recursive evaluation correctness: bound transitive closure, all-free closure, subset invariant, multi-hop, mutual recursion)
 - ✅ 2 Vicia API alias tests (integration, Vicia DB V2 — `ViciaDb` in-memory usage, legacy `Minigraf` interoperability, file-backed checkpoint/reopen)
 - ✅ 15 doc tests (9 passing, 6 ignored: doc examples referencing internal types that cannot compile as standalone rustdoc tests)
-- ➕ 62 browser-WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh`. A5-4 covers maintenance/failure ordering; A5-5 adds both-producer tagged portability and shared corruption/recovery; A5-6b adds durable v10→v11 migration and verified export; A5-6c adds bounded metadata-only open, cold/warm demand reads, exact page-0 stale-handle rejection, corrupt-page failure, sparse rollback/import/write/forget/maintenance convergence, asynchronous verified export, full-scan staging release, callback cleanup, and legacy recovery compatibility. The strict paged-import tests add complete v10 migration/reopen plus exact-state preservation for every non-exportable truncated recovery mutation; planner regressions prove same-entity per-fact transaction correlation and 128-entity paged reads without range prefetch. Three atomic-write regressions cover mixed retract/assert transaction identity, invalid-command rollback, and IndexedDB-abort recovery. All 62 passed in the final Chrome run. The same script is enforced by the Browser WASM CI job.)
+- ➕ 71 browser-WASM tests (`wasm-bindgen-test`, headless Chrome — **not counted in the native total**; run via `CHROMEDRIVER=/path/to/chromedriver ./scripts/test-browser-wasm.sh`. A5-4 covers maintenance/failure ordering; A5-5 adds both-producer tagged portability and shared corruption/recovery; A5-6b adds durable v10→v11 migration and verified export; A5-6c adds bounded metadata-only open, cold/warm demand reads, exact page-0 stale-handle rejection, corrupt-page failure, sparse rollback/import/write/forget/maintenance convergence, asynchronous verified export, full-scan staging release, callback cleanup, and legacy recovery compatibility. The strict paged-import tests add complete v10 migration/reopen plus exact-state preservation for every non-exportable truncated recovery mutation; planner regressions prove same-entity per-fact transaction correlation and 128-entity paged reads without range prefetch. H2 adds transaction-pinned structured current-entity and reverse-reference reads plus exact Vetch fixture equivalence. Three atomic-write regressions cover mixed retract/assert transaction identity, invalid-command rollback, and IndexedDB-abort recovery. All 71 passed in the final Chrome run. The same script is enforced by the Browser WASM CI job.)
 
-**Status**: ✅ **All 1291 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
+**Status**: ✅ **All 1332 non-ignored native tests passing** (12 ignored: 6 internal-type doc examples, 1 nightly concurrency stress, 1 nightly smoke, 1 Q2-B manual 1M recompact measurement, 1 delta-cadence measurement, 1 A7/A8 full kill -9 gate, 1 A2 1M-base since-tail gate fixture)
 
 ## Wave 3 Reliability Completion Status: ✅ COMPLETE
 
