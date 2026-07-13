@@ -478,13 +478,13 @@ fn build_btree_serialized_results(
     }
 }
 
-/// Merge two already-sorted `Vec`s into a single sorted iterator.
-///
-/// Used by `PersistentFactStorage::save()` to merge committed B+tree entries
-/// with new pending entries before building the replacement B+tree.
-pub fn merge_sorted_vecs<T: Ord>(a: Vec<T>, b: Vec<T>) -> impl Iterator<Item = T> {
-    let mut ai = a.into_iter().peekable();
-    let mut bi = b.into_iter().peekable();
+/// Merge two already-sorted iterators without materializing either input.
+pub fn merge_sorted_iters<T: Ord>(
+    a: impl Iterator<Item = T>,
+    b: impl Iterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    let mut ai = a.peekable();
+    let mut bi = b.peekable();
     std::iter::from_fn(move || match (ai.peek(), bi.peek()) {
         (Some(_), Some(_)) => {
             if ai.peek() <= bi.peek() {
@@ -1301,16 +1301,18 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_sorted_vecs() {
+    fn test_merge_sorted_iters() {
         let a = vec![1u32, 3, 5, 7];
         let b = vec![2u32, 4, 6, 8];
-        let merged: Vec<u32> = merge_sorted_vecs(a, b).collect();
+        let merged: Vec<u32> = merge_sorted_iters(a.into_iter(), b.into_iter()).collect();
         assert_eq!(merged, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
-    fn test_merge_sorted_vecs_empty_left() {
-        let merged: Vec<u32> = merge_sorted_vecs(vec![], vec![1u32, 2, 3]).collect();
+    fn test_merge_sorted_iters_empty_left() {
+        let merged: Vec<u32> =
+            merge_sorted_iters(Vec::<u32>::new().into_iter(), vec![1u32, 2, 3].into_iter())
+                .collect();
         assert_eq!(merged, vec![1, 2, 3]);
     }
 
@@ -1382,10 +1384,10 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_sorted_vecs_duplicates() {
+    fn test_merge_sorted_iters_duplicates() {
         let a = vec![1u32, 3, 3, 5];
         let b = vec![2u32, 3, 4];
-        let merged: Vec<u32> = merge_sorted_vecs(a, b).collect();
+        let merged: Vec<u32> = merge_sorted_iters(a.into_iter(), b.into_iter()).collect();
         assert_eq!(merged, vec![1, 2, 3, 3, 3, 4, 5]);
     }
 
