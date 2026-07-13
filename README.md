@@ -91,7 +91,11 @@ cargo add minigraf
 Use capability-scoped handles for ordinary application work. The interactive
 handle can write and create bounded, transaction-pinned read views, but cannot
 run maintenance, backup, or full export. Open the maintenance handle only in an
-idle lifetime after the interactive handle has been dropped.
+idle lifetime after the interactive handle has been dropped. Interactive writes
+never hide threshold or drop checkpoint work; publication occurs only when the
+maintenance lifetime explicitly requests it. Read-view row bounds stop source
+and result generation at the first excess entry and reject the incomplete query
+without truncation.
 
 ```rust
 use minigraf::{InteractiveLedger, MaintenanceLedger, ReadViewOptions};

@@ -621,6 +621,29 @@ continue to prove that failed replacement preserves the previous live and
 durable authority. H3 changes no file-format bytes, Datalog semantics, or
 bi-temporal fact identity.
 
+#### H3 boundary repair receipt — 2026-07-14
+
+`max_rows`/`:max-results` is now enforced while selective index entries, full
+scan facts, join bindings, `or` branches, and aggregate inputs are generated.
+The first entry beyond the bound aborts the query without returning a partial
+prefix; the committed selective regression proves a bound of two stops after
+exactly three index visits. Native and browser aggregate paths apply the same
+source-work bound, so a one-row aggregate cannot hide an unbounded foreground
+scan.
+
+Native capability handles now carry an explicit checkpoint policy.
+`InteractiveLedger` never triggers threshold or drop checkpointing, including
+explicit write-transaction commit. `MaintenanceLedger` also publishes nothing
+merely by opening or dropping; only its explicit maintenance operation owns
+publication. Raw `Minigraf` retains its legacy threshold and close behavior for
+compatibility. Threshold-one WAL regressions pin all three lifetimes.
+
+Verification passed the full native suite (1351 tests: 1339 passing, 12
+ignored), formatting, warning-denied library Clippy, browser WASM compilation,
+generated capability-surface validation, and 74/74 real-Chrome tests. File
+format bytes, public method signatures, Datalog syntax, and bi-temporal
+semantics remain unchanged.
+
 ### H4 — Incremental change pages, only if measured
 
 Promotion condition:
