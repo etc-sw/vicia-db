@@ -4091,9 +4091,9 @@ fn required_index<T>(slice: &[T], index: usize) -> &T {
 impl<'a> PendingIndexOrder<'a> {
     fn new(facts: &'a [Fact], refs: &'a [FactRef]) -> Self {
         debug_assert_eq!(facts.len(), refs.len());
-        let uniform_attribute = facts.first().map_or(true, |first| {
-            facts.iter().all(|fact| fact.attribute == first.attribute)
-        });
+        let uniform_attribute = facts
+            .first()
+            .is_none_or(|first| facts.iter().all(|fact| fact.attribute == first.attribute));
         Self {
             facts,
             refs,
