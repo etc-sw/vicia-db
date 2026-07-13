@@ -1,17 +1,17 @@
 # Minigraf Test Coverage Report
 
-**Last Updated**: H3 bounded-work and explicit-checkpoint boundary repair (July 2026), 1351 native tests + 74 browser WASM tests in source
+**Last Updated**: A6 session storage fail-closed repair (July 2026), 1354 native tests + 74 browser WASM tests in source
 
 ## Test Summary
 
-**Total Tests**: 1351 ✅ (1339 passing, 12 ignored)
-- ✅ 923 unit tests (lib — includes canonical pending ownership, allocation-free AEVT/EAVT/VAET projections, generation-time `max-results` enforcement with exact max-plus-one committed visitation, bounded current entity/reverse-reference readers, explicit interactive/maintenance checkpoint policies, raw/prefix leaf range and resume guards, Vetch fixture equivalence, and exact pending/WAL ownership accounting guards)
+**Total Tests**: 1354 ✅ (1342 passing, 12 ignored)
+- ✅ 924 unit tests (lib — includes canonical pending ownership, allocation-free AEVT/EAVT/VAET projections, generation-time `max-results` enforcement with exact max-plus-one committed visitation, bounded current entity/reverse-reference readers, explicit interactive/maintenance checkpoint policies, raw/prefix leaf range and resume guards, Vetch fixture equivalence, and exact pending/WAL ownership accounting guards)
 - ✅ 12 bi-temporal tests (integration)
 - ✅ 11 complex query tests (integration)
 - ✅ 9 recursive rules tests (integration)
 - ✅ 12 concurrency tests (integration, 1 ignored: nightly stress)
 - ✅ 22 WAL / crash recovery tests (integration — includes the A7-found header-only-WAL tx-counter regression)
-- ✅ 24 session protocol tests (integration, A6 — framed pipe NDJSON, tagged values, child-process gate runs; A2 export_since, A8 forgotten frames, and A9 live-writer backup receipts/errors)
+- ✅ 26 session protocol tests (integration, A6 — framed pipe NDJSON, tagged values, child-process gate runs; recoverable pre-apply WAL rejection, fatal committed-read exit with exact error id, WAL replay after restart, A2 export_since, A8 forgotten frames, and A9 live-writer backup receipts/errors)
 - ✅ 2 kill -9 durability harness tests (integration, A7 — default smoke + `#[ignore]`d 2,400-cycle nightly gate)
 - ✅ 2 cross-platform compat tests (integration, Phase 8.1)
 - ✅ 6 index tests (integration, Phase 6.1)

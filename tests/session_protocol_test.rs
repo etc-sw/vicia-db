@@ -362,6 +362,12 @@ mod child_process {
             let status = self.child.wait().expect("child exit");
             assert!(status.success(), "session child must exit 0 on EOF");
         }
+
+        fn wait_for_failure(mut self) {
+            drop(self.stdin);
+            let status = self.child.wait().expect("child failure exit");
+            assert!(!status.success(), "fatal storage error must exit non-zero");
+        }
     }
 
     /// The A6 gate: one external process holds one session open and runs 10k
@@ -398,6 +404,32 @@ mod child_process {
         let garbage = session.round_trip("}{ definitely not json");
         assert_eq!(garbage["ok"], false);
         assert_eq!(garbage["error"]["kind"], "protocol");
+        let pong = session.round_trip("{\"op\":\"ping\"}");
+        assert_eq!(pong["result"]["type"], "pong");
+        session.close();
+    }
+
+    #[test]
+    fn rejected_wal_write_is_storage_error_and_session_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("recoverable-wal.graph");
+        let mut session = ChildSession::spawn(&["--file", db_path.to_str().unwrap()]);
+        let oversized = "x".repeat(5_000);
+        let rejected = session.round_trip(
+            &json!({
+                "op": "execute",
+                "datalog": format!(r#"(transact [[:too-large :value "{oversized}"]])"#),
+                "id": "oversized",
+            })
+            .to_string(),
+        );
+        assert_eq!(rejected["ok"], false);
+        assert_eq!(rejected["id"], "oversized");
+        assert_eq!(rejected["error"]["kind"], "storage");
+
+        let accepted = session
+            .round_trip("{\"op\":\"execute\",\"datalog\":\"(transact [[:small :value 1]])\"}");
+        assert_eq!(accepted["ok"], true);
         let pong = session.round_trip("{\"op\":\"ping\"}");
         assert_eq!(pong["result"]["type"], "pong");
         session.close();
@@ -444,6 +476,50 @@ mod child_process {
         );
         assert_eq!(status["result"]["pending_facts"], 0);
         reopened.close();
+    }
+
+    #[test]
+    fn fatal_committed_read_exits_after_frame_and_wal_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("fatal-read.graph");
+        {
+            let db = Minigraf::open(&db_path).unwrap();
+            let mut seed = String::from("(transact [");
+            for index in 0..400 {
+                seed.push_str(&format!("[:seed/e{index} :seed/value {index}]"));
+            }
+            seed.push_str("])");
+            db.execute(&seed).unwrap();
+            db.checkpoint().unwrap();
+        }
+        let published_image = std::fs::read(&db_path).unwrap();
+        assert!(
+            published_image.len() > 4096,
+            "fixture must span multiple pages"
+        );
+
+        let mut session = ChildSession::spawn(&["--file", db_path.to_str().unwrap()]);
+        let acknowledged = session.round_trip(
+            "{\"op\":\"execute\",\"datalog\":\"(transact [[:wal/survivor :value 1]])\"}",
+        );
+        assert_eq!(acknowledged["ok"], true);
+        assert_eq!(acknowledged["result"]["durability"], "applied");
+
+        std::fs::write(&db_path, &published_image[..4096]).unwrap();
+        let failed = session.round_trip(
+            "{\"op\":\"execute\",\"datalog\":\"(query [:find ?v :where [:seed/e399 :seed/value ?v]])\",\"id\":77}",
+        );
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["id"], 77);
+        assert_eq!(failed["error"]["kind"], "storage");
+        session.wait_for_failure();
+
+        std::fs::write(&db_path, &published_image).unwrap();
+        let reopened = Minigraf::open(&db_path).unwrap();
+        let facts = reopened.export_fact_log_since(1).unwrap();
+        assert_eq!(facts.len(), 1, "acknowledged WAL fact must replay");
+        assert_eq!(facts[0].attribute, ":value");
+        assert_eq!(reopened.current_tx_count(), 2);
     }
 
     #[test]

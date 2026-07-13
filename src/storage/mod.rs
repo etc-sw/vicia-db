@@ -23,6 +23,57 @@ pub mod persistent_facts;
 
 use anyhow::Result;
 
+/// Whether a storage failure leaves the current database handle safe to reuse.
+///
+/// This is crate-internal protocol evidence, not a public error taxonomy. The
+/// wrapper preserves the original display text while allowing the native
+/// session boundary to fail closed without matching error strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StorageFailureDisposition {
+    Recoverable,
+    Fatal,
+}
+
+#[derive(Debug)]
+struct StorageFailure {
+    disposition: StorageFailureDisposition,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for StorageFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for StorageFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn mark_storage_failure(
+    error: anyhow::Error,
+    disposition: StorageFailureDisposition,
+) -> anyhow::Error {
+    if error.downcast_ref::<StorageFailure>().is_some() {
+        error
+    } else {
+        anyhow::Error::new(StorageFailure {
+            disposition,
+            source: error,
+        })
+    }
+}
+
+pub(crate) fn storage_failure_disposition(
+    error: &anyhow::Error,
+) -> Option<StorageFailureDisposition> {
+    error
+        .downcast_ref::<StorageFailure>()
+        .map(|failure| failure.disposition)
+}
+
 /// Read a 4-byte little-endian u32 from `bytes` at `offset`.
 fn read_u32_le(bytes: &[u8], offset: usize) -> anyhow::Result<u32> {
     Ok(u32::from_le_bytes(

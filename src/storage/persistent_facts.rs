@@ -270,7 +270,12 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
         let page = self
             .page_cache
             .get_or_load(fact_ref.page_id, &self.backend_adapter)?;
-        crate::storage::packed_pages::read_slot(&page, fact_ref.slot_index)
+        crate::storage::packed_pages::read_slot(&page, fact_ref.slot_index).map_err(|error| {
+            crate::storage::mark_storage_failure(
+                error,
+                crate::storage::StorageFailureDisposition::Fatal,
+            )
+        })
     }
 
     fn stream_all(&self) -> anyhow::Result<Vec<crate::graph::types::Fact>> {

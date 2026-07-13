@@ -21,6 +21,8 @@ use crate::query::datalog::parser::parse_datalog_command;
 use serde_json::{Value as JVal, json};
 use std::io::{BufRead, Write};
 
+use crate::storage::{StorageFailureDisposition, storage_failure_disposition};
+
 /// A single caller-owned protocol session over any line-based transport.
 pub struct Session {
     db: Minigraf,
@@ -43,8 +45,9 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns an error only for transport failures (broken pipe) — protocol
-    /// and execution errors are reported in-band as error frames.
+    /// Returns an error for transport failures and after reporting a fatal
+    /// storage failure in-band. Protocol, parse, semantic execution, and
+    /// explicitly recoverable storage errors leave the session alive.
     pub fn run(&mut self, mut reader: impl BufRead, mut writer: impl Write) -> anyhow::Result<()> {
         let mut line = String::new();
         loop {
@@ -166,7 +169,13 @@ impl Session {
                 )
             }
             Ok(QueryResult::Ok) => write_ok(writer, id, json!({"type": "ok"})),
-            Err(e) => write_error(writer, id, "execution", &e.to_string()),
+            Err(error) => match storage_failure_disposition(&error) {
+                Some(StorageFailureDisposition::Recoverable) => {
+                    write_error(writer, id, "storage", &error.to_string())
+                }
+                Some(StorageFailureDisposition::Fatal) => write_fatal_storage(writer, id, &error),
+                None => write_error(writer, id, "execution", &error.to_string()),
+            },
         }
     }
 
@@ -201,7 +210,7 @@ impl Session {
                     "last_checkpoint_outcome": self.last_checkpoint_outcome,
                 }),
             ),
-            Err(e) => write_error(writer, id, "storage", &e.to_string()),
+            Err(error) => write_fatal_storage(writer, id, &error),
         }
     }
 
@@ -215,7 +224,7 @@ impl Session {
                     json!({"type": "checkpoint", "durability": "published"}),
                 )
             }
-            Err(e) => write_error(writer, id, "storage", &e.to_string()),
+            Err(error) => write_fatal_storage(writer, id, &error),
         }
     }
 
@@ -244,7 +253,7 @@ impl Session {
                     json!({"type": "maintenance", "checkpoint": checkpoint, "delta": delta, "advice": advice}),
                 )
             }
-            Err(e) => write_error(writer, id, "storage", &e.to_string()),
+            Err(error) => write_fatal_storage(writer, id, &error),
         }
     }
 
@@ -286,7 +295,13 @@ impl Session {
                     }),
                 )
             }
-            Err(error) => write_error(writer, id, "storage", &error.to_string()),
+            Err(error) => {
+                if storage_failure_disposition(&error) == Some(StorageFailureDisposition::Fatal) {
+                    write_fatal_storage(writer, id, &error)
+                } else {
+                    write_error(writer, id, "storage", &error.to_string())
+                }
+            }
         }
     }
 
@@ -323,7 +338,7 @@ impl Session {
                     }),
                 )
             }
-            Err(e) => write_error(writer, id, "storage", &e.to_string()),
+            Err(error) => write_fatal_storage(writer, id, &error),
         }
     }
 
@@ -394,4 +409,13 @@ fn write_error(writer: &mut impl Write, id: JVal, kind: &str, message: &str) -> 
     writeln!(writer, "{frame}")?;
     writer.flush()?;
     Ok(())
+}
+
+fn write_fatal_storage(
+    writer: &mut impl Write,
+    id: JVal,
+    error: &anyhow::Error,
+) -> anyhow::Result<()> {
+    write_error(writer, id, "storage", &error.to_string())?;
+    Err(anyhow::anyhow!("fatal session storage error: {error}"))
 }

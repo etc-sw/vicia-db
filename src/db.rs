@@ -1511,9 +1511,21 @@ impl Minigraf {
         );
 
         if is_write {
-            let mut ctx = self.inner.write_lock.lock().map_err(|_| {
-                anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
-            })?;
+            let mut ctx = self
+                .inner
+                .write_lock
+                .lock()
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "write lock is poisoned; database may be in an inconsistent state"
+                    )
+                })
+                .map_err(|error| {
+                    crate::storage::mark_storage_failure(
+                        error,
+                        crate::storage::StorageFailureDisposition::Fatal,
+                    )
+                })?;
 
             // Forget evaluates its embedded query under the write lock (the
             // matched state cannot move between query and closure), then
@@ -1569,17 +1581,37 @@ impl Minigraf {
                 self.inner.checkpoint_policy,
                 tx_count,
                 &stamped,
-            )?;
+            )
+            .map_err(|error| {
+                crate::storage::mark_storage_failure(
+                    error,
+                    crate::storage::StorageFailureDisposition::Recoverable,
+                )
+            })?;
 
             // WAL succeeded — now apply facts to shared FactStorage.
             for fact in &stamped {
-                let _ = self.inner.fact_storage.load_fact(fact.clone())?;
+                let _ = self
+                    .inner
+                    .fact_storage
+                    .load_fact(fact.clone())
+                    .map_err(|error| {
+                        crate::storage::mark_storage_failure(
+                            error,
+                            crate::storage::StorageFailureDisposition::Fatal,
+                        )
+                    })?;
             }
 
             // Trigger auto-checkpoint AFTER facts are in FactStorage so the
             // checkpoint captures the newly written facts.
             if should_checkpoint {
-                Minigraf::do_checkpoint(&self.inner.fact_storage, &mut ctx)?;
+                Minigraf::do_checkpoint(&self.inner.fact_storage, &mut ctx).map_err(|error| {
+                    crate::storage::mark_storage_failure(
+                        error,
+                        crate::storage::StorageFailureDisposition::Fatal,
+                    )
+                })?;
             }
 
             // Return the same QueryResult the executor would have returned.
@@ -1710,14 +1742,34 @@ impl Minigraf {
             self.inner.checkpoint_policy,
             tx_count,
             &stamped,
-        )?;
+        )
+        .map_err(|error| {
+            crate::storage::mark_storage_failure(
+                error,
+                crate::storage::StorageFailureDisposition::Recoverable,
+            )
+        })?;
 
         for fact in &stamped {
-            let _ = self.inner.fact_storage.load_fact(fact.clone())?;
+            let _ = self
+                .inner
+                .fact_storage
+                .load_fact(fact.clone())
+                .map_err(|error| {
+                    crate::storage::mark_storage_failure(
+                        error,
+                        crate::storage::StorageFailureDisposition::Fatal,
+                    )
+                })?;
         }
 
         if should_checkpoint {
-            Minigraf::do_checkpoint(&self.inner.fact_storage, ctx)?;
+            Minigraf::do_checkpoint(&self.inner.fact_storage, ctx).map_err(|error| {
+                crate::storage::mark_storage_failure(
+                    error,
+                    crate::storage::StorageFailureDisposition::Fatal,
+                )
+            })?;
         }
 
         Ok(QueryResult::Forgotten {
@@ -1767,9 +1819,19 @@ impl Minigraf {
     ///
     /// Returns an error if the write lock is poisoned or the checkpoint I/O fails.
     pub fn checkpoint(&self) -> Result<()> {
-        let mut ctx = self.inner.write_lock.lock().map_err(|_| {
-            anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
-        })?;
+        let mut ctx = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| {
+                anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
+            })
+            .map_err(|error| {
+                crate::storage::mark_storage_failure(
+                    error,
+                    crate::storage::StorageFailureDisposition::Fatal,
+                )
+            })?;
         Self::do_checkpoint(&self.inner.fact_storage, &mut ctx).map(|_| ())
     }
 
@@ -1820,16 +1882,31 @@ impl Minigraf {
             );
         }
 
-        let mut ctx = self.inner.write_lock.lock().map_err(|_| {
-            anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
-        })?;
+        let mut ctx = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| {
+                anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
+            })
+            .map_err(|error| {
+                crate::storage::mark_storage_failure(
+                    error,
+                    crate::storage::StorageFailureDisposition::Fatal,
+                )
+            })?;
         let source_path = match &*ctx {
             WriteContext::Memory => bail!("backup_to requires a file-backed database"),
             WriteContext::File { db_path, .. } => db_path.clone(),
         };
         let target = Self::validate_backup_target(&source_path, destination)?;
 
-        Self::do_checkpoint(&self.inner.fact_storage, &mut ctx)?;
+        Self::do_checkpoint(&self.inner.fact_storage, &mut ctx).map_err(|error| {
+            crate::storage::mark_storage_failure(
+                error,
+                crate::storage::StorageFailureDisposition::Fatal,
+            )
+        })?;
         let (tx_count, bytes) = match &mut *ctx {
             WriteContext::Memory => unreachable!("file-backed context checked above"),
             WriteContext::File { pfs, .. } => {

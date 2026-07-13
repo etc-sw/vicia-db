@@ -37,7 +37,15 @@ fn main() -> anyhow::Result<()> {
         let session_flag = args.iter().any(|a| a == "--session");
 
         let db = if let Some(path) = db_path {
-            OpenOptions::new().path(path).open()?
+            let mut options = OpenOptions::new();
+            if session_flag {
+                // The framed protocol owns checkpoint timing explicitly. The
+                // sentinel also suppresses raw Minigraf's best-effort Drop
+                // checkpoint so fatal exit always leaves acknowledged writes
+                // under WAL replay authority.
+                options.wal_checkpoint_threshold = usize::MAX;
+            }
+            options.path(path).open()?
         } else {
             Minigraf::in_memory()?
         };

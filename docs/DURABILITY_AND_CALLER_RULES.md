@@ -14,7 +14,10 @@ Backends covered:
 - **Native file-backed** — `InteractiveLedger::open("path.graph")` for
   foreground work and `MaintenanceLedger::open("path.graph")` for an explicit
   idle lifetime: single `.graph` file + WAL sidecar. `Minigraf::open()` remains
-  the raw 1.x compatibility surface.
+  the raw 1.x compatibility surface. The file-backed `minigraf --session`
+  process likewise uses an explicit-only checkpoint policy: threshold and drop
+  checkpoints are disabled, while protocol `checkpoint`, `maintenance`, and
+  `backup` remain available.
 - **Browser** — `BrowserInteractiveLedger.open(dbName)` for paged foreground
   work and `BrowserMaintenanceLedger.open(dbName)` in a disposable worker:
   IndexedDB-backed, write-through, no WAL. `BrowserDb` remains the raw 1.x
@@ -163,6 +166,7 @@ errors are out of its scope — this table is the browser classification).
 | `executeAtomic` | Empty/oversized batch, non-write command, parse/materialization error, or duplicate EAV fact | browser | Rejected during preflight — no transaction identity allocated, no live mutation, and no IndexedDB publication. |
 | `execute` | Fact exceeds `MAX_FACT_BYTES` (4080 B) | both | Rejected at serialization; store payloads externally, keep pointers (gap G4 policy). |
 | `execute` | WAL append fails (I/O) | native | Rejected — memory unchanged, database consistent. |
+| session operation | Fatal committed-read, lock, post-WAL apply/checkpoint, status, maintenance, export, or backup-source failure | native | One `storage` error frame is flushed, then the child exits nonzero without an implicit checkpoint. Restart and WAL replay restore previously acknowledged writes. Pre-apply WAL rejection and backup destination validation/copy/sync errors leave the child reusable. |
 | `execute` / `executeAtomic` / `checkpoint` | IndexedDB flush fails (quota, I/O) | browser | Durable state = old. Successful durable reload restores the live handle and rejects the operation; unreadable durable state poisons the whole handle until reopen. |
 | `checkpoint` | I/O failure | native | WAL retained, pending facts retained; safe to retry. Lock-poisoned errors indicate a panicked writer thread — treat the process as needing restart. |
 | `importGraph` | Blob shorter than page 0 / unparseable with no valid predecessor | browser | Rejected before any durable or live change. A trailing partial page is treated like native open: only complete pages enter recovery, so an interrupted newest candidate may fall back to the previous manifest. A physically missing page inside the declared prefix keeps `exportGraph` unavailable until a clean repair/maintenance image exists. |

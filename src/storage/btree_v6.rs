@@ -2089,15 +2089,23 @@ impl<B: StorageBackend> MutexStorageBackend<B> {
 
 impl<B: StorageBackend> StorageBackend for MutexStorageBackend<B> {
     fn read_page(&self, page_id: u64) -> anyhow::Result<Vec<u8>> {
-        let page = self
-            .backend
-            .lock()
-            .map_err(|e| anyhow!("MutexStorageBackend lock poisoned: {e}"))?
-            .read_page(page_id)?;
-        if let Some(base_integrity) = &self.base_integrity {
-            base_integrity.verify_page(page_id, &page)?;
-        }
-        Ok(page)
+        (|| {
+            let page = self
+                .backend
+                .lock()
+                .map_err(|e| anyhow!("MutexStorageBackend lock poisoned: {e}"))?
+                .read_page(page_id)?;
+            if let Some(base_integrity) = &self.base_integrity {
+                base_integrity.verify_page(page_id, &page)?;
+            }
+            Ok(page)
+        })()
+        .map_err(|error| {
+            crate::storage::mark_storage_failure(
+                error,
+                crate::storage::StorageFailureDisposition::Fatal,
+            )
+        })
     }
 
     #[allow(clippy::unimplemented)]

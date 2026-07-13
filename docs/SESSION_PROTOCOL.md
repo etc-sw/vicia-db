@@ -19,6 +19,10 @@ minigraf --session --file <path>   # file-backed database
 Or embed: `minigraf::session::Session::new(db).run(reader, writer)` over any
 line-based transport.
 
+File-backed CLI sessions disable threshold and drop checkpoints. Publication
+is owned only by explicit `checkpoint`, `maintenance`, and `backup` requests;
+acknowledged foreground writes otherwise remain under WAL replay authority.
+
 ## Framing
 
 - One JSON object per line (UTF-8, LF) in each direction.
@@ -85,11 +89,13 @@ writes after the response; those writes are absent from this backup.
 This assumes the documented one-owner model: the session's handle and its
 clones are the only writers for the source pathname.
 
-Schema errors are `protocol`; target conflicts and checkpoint/copy/sync errors
-are `storage`. A failure after checkpoint can leave the source newly
-checkpointed. A late directory-sync failure can also leave a complete but
-unacknowledged destination; inspect or remove that fresh path before retrying,
-never assume an error authorizes overwrite.
+Schema errors are `protocol`; target validation, conflicts, copy, and
+destination-sync errors are recoverable `storage` errors. A source checkpoint
+failure is fatal to the session because the current storage authority can no
+longer be trusted. A failure after a successful source checkpoint can leave the
+source newly checkpointed. A late directory-sync failure can also leave a
+complete but unacknowledged destination; inspect or remove that fresh path
+before retrying, never assume an error authorizes overwrite.
 
 ## forget (A8)
 
@@ -182,7 +188,7 @@ non-finite float identity.
 | `applied` | In memory and WAL-fsynced — survives kill -9 via replay. The level harrekki treats as "remembered". |
 | `maintenance_pending` | `applied`, and delta-growth thresholds currently advise maintenance — schedule a `maintenance` call. |
 | `published` | In the checkpointed durable image (checkpoint/maintenance) or in a fsynced, atomically published independent backup. |
-| rejected | Not a field: rejection is the error frame (`parse`/`execution`) — nothing was applied. |
+| rejected | Not a field: rejection is an error frame (`parse`, `execution`, or a recoverable pre-apply `storage` failure) — nothing was applied. |
 
 Per-backend semantics behind these values — what `execute`/`checkpoint`
 guarantee at return on native vs browser, and the browser caller rules —
@@ -195,10 +201,11 @@ are in `docs/DURABILITY_AND_CALLER_RULES.md`.
 | `protocol` | Malformed frame, missing/unknown op or field | continues |
 | `parse` | `datalog` text failed to parse | continues |
 | `execution` | Command parsed but failed to execute | continues |
-| `storage` | Checkpoint/maintenance/backup/status I-O or target conflict | continues; correct a backup path conflict first, and treat repeated backend errors as child-restart grounds |
+| `storage` | Storage validation, I/O, integrity, or synchronization failure | Pre-apply WAL validation/write failures and backup destination validation/copy/sync failures continue. Committed reads, status, checkpoint, maintenance, `export_since`, backup source checkpoint, lock poison, and any post-WAL apply/checkpoint failure emit this frame once and then exit nonzero. |
 
-Transport failure (broken pipe) exits the process; the daemon's restart +
-WAL replay is the recovery path either way.
+The caller may keep using the child only after a documented recoverable
+`storage` frame. EOF after a `storage` frame requires restart. Transport
+failure (broken pipe) also exits; restart + WAL replay is the recovery path.
 
 ## Status fields
 
@@ -220,8 +227,8 @@ WAL replay is the recovery path either way.
   databases.
 - `last_checkpoint_unix_ms` / `last_checkpoint_outcome` — the last
   checkpoint **this session** performed via `checkpoint`, `maintenance`, or `backup`
-  ops (`null` before the first one). Auto-checkpoints triggered by the WAL
-  threshold inside `execute` are not currently reported here.
+  ops (`null` before the first one). File-backed CLI sessions do not perform
+  threshold or drop checkpoints.
 
 ## Lifecycle
 
@@ -229,6 +236,9 @@ WAL replay is the recovery path either way.
   checkpoint** — WAL replay on next open is the durability contract; send
   `checkpoint` (or `maintenance`) first if you want the source checkpointed;
   use `backup` for an independent live-writer rollback point.
+- A fatal storage failure → emit exactly one `storage` error frame with the
+  request id, then exit nonzero without an implicit checkpoint. A restarted
+  child replays every previously acknowledged WAL-backed write.
 - SIGKILL at any point: acknowledged (`applied`) writes survive via WAL
   replay. Verified continuously by the A7 harness (planned).
 - One process per `.graph` file (advisory lock). All other access goes
