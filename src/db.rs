@@ -976,6 +976,10 @@ struct Inner {
     write_lock: Mutex<WriteContext>,
     /// Configuration options.
     options: OpenOptions,
+    /// Raw handles keep their legacy best-effort close checkpoint. Interactive
+    /// capability handles leave WAL-backed work for an explicit maintenance
+    /// lifetime instead of hiding I/O in drop.
+    checkpoint_on_drop: bool,
     #[cfg(any(test, feature = "bench-internals"))]
     wal_replay_memory_diagnostics: WalReplayMemoryDiagnostics,
 }
@@ -986,7 +990,7 @@ impl Drop for Inner {
         // Errors are silently ignored (can't propagate from Drop).
         // Skip if wal_checkpoint_threshold is usize::MAX — that sentinel suppresses
         // all checkpointing (used by benchmarks to keep WAL entries pending).
-        if self.options.wal_checkpoint_threshold == usize::MAX {
+        if !self.checkpoint_on_drop || self.options.wal_checkpoint_threshold == usize::MAX {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let ctx = self
@@ -1008,6 +1012,175 @@ impl Drop for Inner {
 // ─── Fact size validation (moved to WAL serialization) ────────────────────────
 
 // ─── Minigraf ─────────────────────────────────────────────────────────────────
+
+/// Foreground ledger capability for bounded reads and transact/retract writes.
+///
+/// This type intentionally has no maintenance, backup, or full-history export
+/// methods. Use [`MaintenanceLedger`] from an idle or disposable-worker
+/// lifetime for those operations. [`Minigraf`] remains the raw compatibility
+/// surface.
+///
+/// ```compile_fail
+/// use minigraf::InteractiveLedger;
+/// let ledger = InteractiveLedger::in_memory().unwrap();
+/// ledger.run_idle_maintenance();
+/// ```
+pub struct InteractiveLedger {
+    db: Minigraf,
+}
+
+impl InteractiveLedger {
+    /// Open or create a file-backed interactive ledger.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_options(path, OpenOptions::default())
+    }
+
+    /// Open or create a file-backed interactive ledger with custom options.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
+        Ok(Self {
+            db: Minigraf::open_with_options_and_drop_policy(path, options, false)?,
+        })
+    }
+
+    /// Open an in-memory interactive ledger.
+    pub fn in_memory() -> Result<Self> {
+        Ok(Self {
+            db: Minigraf::in_memory()?,
+        })
+    }
+
+    /// Open an in-memory interactive ledger with custom options.
+    pub fn in_memory_with_options(options: OpenOptions) -> Result<Self> {
+        Ok(Self {
+            db: Minigraf::in_memory_with_options(options)?,
+        })
+    }
+
+    /// Execute one transact or retract command.
+    ///
+    /// Queries belong to [`Self::read_view`]. Rules, bulk `forget`, and other
+    /// raw commands remain available through [`Minigraf`].
+    pub fn execute_write(&self, input: &str) -> Result<QueryResult> {
+        ensure_interactive_write_command(input)?;
+        self.db.execute(input)
+    }
+
+    /// Begin a multi-command foreground write transaction.
+    pub fn begin_write(&self) -> Result<InteractiveWriteTransaction<'_>> {
+        Ok(InteractiveWriteTransaction {
+            transaction: self.db.begin_write()?,
+        })
+    }
+
+    /// Create a bounded transaction-pinned read view.
+    pub fn read_view(&self, options: ReadViewOptions) -> Result<ReadView<'_>> {
+        self.db.read_view(options)
+    }
+
+    /// Return the current monotonic transaction cursor.
+    pub fn current_tx_count(&self) -> u64 {
+        self.db.current_tx_count()
+    }
+}
+
+/// Foreground write transaction that accepts only transact and retract commands.
+pub struct InteractiveWriteTransaction<'a> {
+    transaction: WriteTransaction<'a>,
+}
+
+impl InteractiveWriteTransaction<'_> {
+    /// Stage one transact or retract command in this transaction.
+    pub fn execute_write(&mut self, input: &str) -> Result<QueryResult> {
+        ensure_interactive_write_command(input)?;
+        self.transaction.execute(input)
+    }
+
+    /// Commit every staged change atomically.
+    pub fn commit(self) -> Result<()> {
+        self.transaction.commit()
+    }
+
+    /// Discard every staged change.
+    pub fn rollback(self) {
+        self.transaction.rollback();
+    }
+}
+
+/// Idle/portability capability for O(total) or storage-lifecycle operations.
+///
+/// This type intentionally has no foreground execute or read-view methods.
+/// Open it only for an idle/background lifetime after the interactive handle
+/// has been dropped.
+///
+/// ```compile_fail
+/// use minigraf::MaintenanceLedger;
+/// let ledger = MaintenanceLedger::in_memory().unwrap();
+/// ledger.execute_write("(transact [[:a :item/name \"A\"]])");
+/// ```
+pub struct MaintenanceLedger {
+    db: Minigraf,
+}
+
+impl MaintenanceLedger {
+    /// Open or create a file-backed maintenance ledger.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            db: Minigraf::open(path)?,
+        })
+    }
+
+    /// Open or create a file-backed maintenance ledger with custom options.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
+        Ok(Self {
+            db: Minigraf::open_with_options(path, options)?,
+        })
+    }
+
+    /// Open an in-memory maintenance ledger.
+    pub fn in_memory() -> Result<Self> {
+        Ok(Self {
+            db: Minigraf::in_memory()?,
+        })
+    }
+
+    /// Run caller-scheduled idle maintenance.
+    pub fn run_idle_maintenance(&self) -> Result<MaintenanceOutcome> {
+        self.db.run_idle_maintenance()
+    }
+
+    /// Create an exact checkpointed rollback copy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<BackupOutcome> {
+        self.db.backup_to(destination)
+    }
+
+    /// Export the complete append-only fact log.
+    pub fn export_fact_log(&self) -> Result<Vec<FactRecord>> {
+        self.db.export_fact_log()
+    }
+
+    /// Return the current monotonic transaction cursor.
+    pub fn current_tx_count(&self) -> u64 {
+        self.db.current_tx_count()
+    }
+}
+
+fn ensure_interactive_write_command(input: &str) -> Result<()> {
+    match parse_datalog_command(input).map_err(|error| anyhow::anyhow!("{error}"))? {
+        DatalogCommand::Transact(_) | DatalogCommand::Retract(_) => Ok(()),
+        DatalogCommand::Query(_) => {
+            bail!("interactive ledger queries require a bounded ReadView")
+        }
+        DatalogCommand::Rule(_) => bail!("rule registration requires the raw Minigraf surface"),
+        DatalogCommand::Forget(_) => {
+            bail!("bulk forget requires the raw or maintenance workflow")
+        }
+    }
+}
 
 /// The primary embedded graph database handle.
 ///
@@ -1083,6 +1256,15 @@ impl Minigraf {
     /// or WAL replay fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with_options(path: impl AsRef<Path>, opts: OpenOptions) -> Result<Self> {
+        Self::open_with_options_and_drop_policy(path, opts, true)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_with_options_and_drop_policy(
+        path: impl AsRef<Path>,
+        opts: OpenOptions,
+        checkpoint_on_drop: bool,
+    ) -> Result<Self> {
         let db_path = path.as_ref().to_path_buf();
 
         // Open the main .graph file
@@ -1128,6 +1310,7 @@ impl Minigraf {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(ctx),
                 options: opts,
+                checkpoint_on_drop,
                 #[cfg(any(test, feature = "bench-internals"))]
                 wal_replay_memory_diagnostics: replay.memory,
             }),
@@ -1166,6 +1349,7 @@ impl Minigraf {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(WriteContext::Memory),
                 options: opts,
+                checkpoint_on_drop: true,
                 #[cfg(any(test, feature = "bench-internals"))]
                 wal_replay_memory_diagnostics: WalReplayMemoryDiagnostics::default(),
             }),
@@ -5045,5 +5229,82 @@ mod wasi_tests {
             }
             _ => panic!("expected QueryResults"),
         }
+    }
+}
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn interactive_ledger_accepts_writes_and_requires_bounded_reads() {
+        let ledger = InteractiveLedger::in_memory().unwrap();
+        ledger
+            .execute_write(r#"(transact [[:card/a :card/title "A"]])"#)
+            .unwrap();
+        let view = ledger.read_view(ReadViewOptions::default()).unwrap();
+        let result = view
+            .query(
+                r#"(query [:find ?title :where [:card/a :card/title ?title]])"#,
+                4,
+            )
+            .unwrap();
+        match result {
+            QueryResult::QueryResults { results, .. } => assert_eq!(results.len(), 1),
+            _ => panic!("expected bounded query results"),
+        }
+        let cursor = ledger.current_tx_count();
+        assert!(
+            ledger
+                .execute_write(r#"(query [:find ?e :where [?e :card/title ?title]])"#)
+                .is_err()
+        );
+        assert!(
+            ledger
+                .execute_write(r#"(forget [[:card/a :card/title "A"]])"#)
+                .is_err()
+        );
+        assert_eq!(ledger.current_tx_count(), cursor);
+    }
+
+    #[test]
+    fn interactive_write_transaction_rejects_non_write_commands() {
+        let ledger = InteractiveLedger::in_memory().unwrap();
+        let mut transaction = ledger.begin_write().unwrap();
+        transaction
+            .execute_write(r#"(transact [[:card/a :card/title "A"]])"#)
+            .unwrap();
+        assert!(
+            transaction
+                .execute_write(r#"(query [:find ?title :where [:card/a :card/title ?title]])"#)
+                .is_err()
+        );
+        transaction
+            .execute_write(r#"(transact [[:card/a :card/status :current]])"#)
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(ledger.current_tx_count(), 1);
+    }
+
+    #[test]
+    fn maintenance_ledger_reopens_after_interactive_lifetime() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capability-split.graph");
+        {
+            let ledger = InteractiveLedger::open(&path).unwrap();
+            ledger
+                .execute_write(r#"(transact [[:card/a :card/title "A"]])"#)
+                .unwrap();
+        }
+        let wal_path = Minigraf::wal_path_for(&path);
+        assert!(
+            wal_path.exists(),
+            "interactive drop must leave durable WAL work for maintenance"
+        );
+        let maintenance = MaintenanceLedger::open(&path).unwrap();
+        let outcome = maintenance.run_idle_maintenance().unwrap();
+        assert_eq!(outcome.checkpoint, MaintenanceCheckpointEffect::Published);
+        assert!(!wal_path.exists());
+        assert_eq!(maintenance.export_fact_log().unwrap().len(), 1);
+        assert_eq!(maintenance.current_tx_count(), 1);
     }
 }

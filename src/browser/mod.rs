@@ -139,6 +139,109 @@ pub struct BrowserReadView {
     valid_at: ValidAt,
 }
 
+/// Foreground browser capability for atomic writes and bounded read views.
+///
+/// This type always opens persistent authority through the paged path and does
+/// not expose maintenance, import, or full export methods. `BrowserDb` remains
+/// the raw compatibility surface.
+#[wasm_bindgen]
+pub struct BrowserInteractiveLedger {
+    db: BrowserDb,
+}
+
+#[wasm_bindgen]
+impl BrowserInteractiveLedger {
+    /// Open a persistent interactive ledger through `BrowserDb.openPaged()`.
+    #[wasm_bindgen(js_name = open)]
+    pub async fn open(db_name: &str) -> Result<BrowserInteractiveLedger, JsValue> {
+        Ok(Self {
+            db: BrowserDb::open_paged(db_name).await?,
+        })
+    }
+
+    /// Open an in-memory interactive ledger for tests and ephemeral work.
+    #[wasm_bindgen(js_name = openInMemory)]
+    pub fn open_in_memory() -> Result<BrowserInteractiveLedger, JsValue> {
+        Ok(Self {
+            db: BrowserDb::open_in_memory()?,
+        })
+    }
+
+    /// Execute a bounded transact/retract command list as one atomic write.
+    #[wasm_bindgen(js_name = executeAtomic)]
+    pub async fn execute_atomic(&self, commands: Vec<String>) -> Result<String, JsValue> {
+        self.db.execute_atomic(commands).await
+    }
+
+    /// Capture a bounded selective read view at the current transaction.
+    #[wasm_bindgen(js_name = readView)]
+    pub fn read_view(&self) -> Result<BrowserReadView, JsValue> {
+        self.db.read_view()
+    }
+
+    /// Capture a bounded selective read view at explicit transaction and valid time.
+    #[wasm_bindgen(js_name = readViewAt)]
+    pub fn read_view_at(
+        &self,
+        as_of: u64,
+        valid_at_millis: i64,
+    ) -> Result<BrowserReadView, JsValue> {
+        self.db.read_view_at(as_of, valid_at_millis)
+    }
+
+    /// Capture a bounded selective read view across every valid-time window.
+    #[wasm_bindgen(js_name = readViewAnyValidTime)]
+    pub fn read_view_any_valid_time(&self, as_of: u64) -> Result<BrowserReadView, JsValue> {
+        self.db.read_view_any_valid_time(as_of)
+    }
+}
+
+/// Browser capability for disposable-worker maintenance and portability work.
+///
+/// This type has no foreground execute or read methods. Persistent opens use
+/// the paged bootstrap before an explicit O(total) operation begins.
+#[wasm_bindgen]
+pub struct BrowserMaintenanceLedger {
+    db: BrowserDb,
+}
+
+#[wasm_bindgen]
+impl BrowserMaintenanceLedger {
+    /// Open a persistent maintenance ledger through `BrowserDb.openPaged()`.
+    #[wasm_bindgen(js_name = open)]
+    pub async fn open(db_name: &str) -> Result<BrowserMaintenanceLedger, JsValue> {
+        Ok(Self {
+            db: BrowserDb::open_paged(db_name).await?,
+        })
+    }
+
+    /// Open an in-memory maintenance ledger for tests and ephemeral work.
+    #[wasm_bindgen(js_name = openInMemory)]
+    pub fn open_in_memory() -> Result<BrowserMaintenanceLedger, JsValue> {
+        Ok(Self {
+            db: BrowserDb::open_in_memory()?,
+        })
+    }
+
+    /// Run caller-scheduled idle maintenance.
+    #[wasm_bindgen(js_name = runIdleMaintenance)]
+    pub async fn run_idle_maintenance(&self) -> Result<String, JsValue> {
+        self.db.run_idle_maintenance().await
+    }
+
+    /// Export the complete verified `.graph` image.
+    #[wasm_bindgen(js_name = exportGraph)]
+    pub async fn export_graph(&self) -> Result<js_sys::Uint8Array, JsValue> {
+        self.db.export_graph_async().await
+    }
+
+    /// Atomically import a graph only when it can reopen as bounded paged authority.
+    #[wasm_bindgen(js_name = importGraph)]
+    pub async fn import_graph(&self, data: js_sys::Uint8Array) -> Result<(), JsValue> {
+        self.db.import_graph_for_paged_access(data).await
+    }
+}
+
 #[wasm_bindgen]
 impl BrowserDb {
     /// Open an in-memory database (no IndexedDB — for testing only).
@@ -4493,6 +4596,68 @@ mod tests {
         assert_eq!(noop["durability"], "noop");
         assert_eq!(noop["maintenance_pending"], false);
         assert_eq!(noop["advice"], "none");
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_interactive_ledger_exposes_atomic_writes_and_bounded_views() {
+        let ledger = BrowserInteractiveLedger::open_in_memory().expect("open interactive");
+        ledger
+            .execute_atomic(vec![
+                r#"(transact [[:card/a :card/title "A"]])"#.to_owned(),
+                r#"(transact [[:card/a :card/status :current]])"#.to_owned(),
+            ])
+            .await
+            .expect("atomic interactive write");
+        let view = ledger.read_view().expect("bounded view");
+        let result = view
+            .query(
+                r#"(query [:find ?title :where [:card/a :card/title ?title]])"#.to_owned(),
+                4,
+                4_096,
+            )
+            .await
+            .expect("bounded query");
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["results"][0][0], "A");
+        assert_eq!(view.tx_cursor(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_capability_constructors_use_paged_persistent_authority() {
+        let interactive_name = format!("vicia-interactive-capability-{}", js_sys::Date::now());
+        let interactive = BrowserInteractiveLedger::open(&interactive_name)
+            .await
+            .expect("open paged interactive ledger");
+        assert!(interactive.db.inner.borrow().paged);
+        assert_eq!(
+            interactive.db.inner.borrow().open_mode,
+            BrowserOpenMode::Paged
+        );
+
+        let maintenance_name = format!("vicia-maintenance-capability-{}", js_sys::Date::now());
+        let maintenance = BrowserMaintenanceLedger::open(&maintenance_name)
+            .await
+            .expect("open paged maintenance ledger");
+        assert!(maintenance.db.inner.borrow().paged);
+        assert_eq!(
+            maintenance.db.inner.borrow().open_mode,
+            BrowserOpenMode::Paged
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_maintenance_ledger_owns_portability_and_idle_work() {
+        let source = BrowserMaintenanceLedger::open_in_memory().expect("open maintenance source");
+        let graph = source.export_graph().await.expect("export graph");
+        let target = BrowserMaintenanceLedger::open_in_memory().expect("open maintenance target");
+        target.import_graph(graph).await.expect("strict import");
+        let outcome = target
+            .run_idle_maintenance()
+            .await
+            .expect("idle maintenance");
+        let outcome: serde_json::Value = serde_json::from_str(&outcome).unwrap();
+        assert_eq!(outcome["checkpoint"], "noop");
+        assert_eq!(outcome["delta"], "noop");
     }
 
     #[wasm_bindgen_test]

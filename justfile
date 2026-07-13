@@ -64,6 +64,11 @@ current-reader-smoke OUTPUT_DIR="target/current-reader/smoke":
 current-reader-full OUTPUT_DIR="target/current-reader/full":
     ./scripts/run-current-reader-bench.sh full "{{OUTPUT_DIR}}"
 
+# Generate and validate the browser interactive/maintenance TypeScript boundary.
+browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
+    wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser
+    node scripts/validate-browser-capability-surface.mjs "{{OUTPUT_DIR}}/minigraf.d.ts"
+
 # Compare two leaf-read receipts and enforce the candidate acceptance gates.
 leaf-read-path-compare BASELINE CANDIDATE:
     node scripts/compare-leaf-read-path-receipts.mjs "{{BASELINE}}" "{{CANDIDATE}}"
