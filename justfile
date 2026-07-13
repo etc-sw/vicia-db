@@ -4,13 +4,13 @@
 default:
     @just --list
 
-# Build and verify the browser WASM package against Vicia's format matrix and
-# Vetch's consumer gates, then atomically install it into the local package.
-#
-# Default target: sibling ~/projects/vetch-app checkout.
-# Worktree verification: just sync /absolute/path/to/vetch-worktree
+# Verify and publish a clean local Vicia commit into Vetch.
 sync VETCH_APP_DIR="":
     ./scripts/sync-vetch-browser-package.sh "{{VETCH_APP_DIR}}"
+
+# Verify and publish the current dirty local worktree without commit or push.
+sync-local VETCH_APP_DIR="":
+    VICIA_SYNC_ALLOW_DIRTY_PUBLISH=1 ./scripts/sync-vetch-browser-package.sh "{{VETCH_APP_DIR}}"
 
 # Clone/update the reference engines under ~/db-ref and link the local harness.
 db-ref-setup:

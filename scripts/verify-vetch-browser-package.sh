@@ -49,6 +49,8 @@ write_receipt() {
   mkdir -p "$(dirname "$receipt")"
   SOURCE_COMMIT="${SOURCE_COMMIT:?}" \
   SOURCE_DIRTY="${SOURCE_DIRTY:?}" \
+  SOURCE_KIND="${SOURCE_KIND:?}" \
+  SOURCE_WORKSPACE_SHA256="${SOURCE_WORKSPACE_SHA256:?}" \
   WASM_SHA256="${WASM_SHA256:?}" \
   WASM_PACK_VERSION="${WASM_PACK_VERSION:?}" \
   VETCH_COMMIT="$(git -C "$vetch_dir" rev-parse HEAD)" \
@@ -73,6 +75,8 @@ const value = {
   vicia: {
     sourceCommit: process.env.SOURCE_COMMIT,
     sourceDirty: process.env.SOURCE_DIRTY === "true",
+    sourceKind: process.env.SOURCE_KIND,
+    sourceWorkspaceSha256: process.env.SOURCE_WORKSPACE_SHA256,
     wasmSha256: process.env.WASM_SHA256,
     wasmPackVersion: process.env.WASM_PACK_VERSION,
   },
