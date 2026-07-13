@@ -1661,6 +1661,7 @@ impl Minigraf {
     #[cfg(feature = "bench-internals")]
     pub fn set_leaf_read_diagnostics_enabled(&self, enabled: bool) {
         crate::storage::btree_v6::set_leaf_read_diagnostics_enabled(enabled);
+        crate::graph::storage::set_current_attribute_phase_diagnostics_enabled(enabled);
     }
 
     /// Return live pending-container memory accounting without cloning data.

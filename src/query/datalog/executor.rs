@@ -582,7 +582,18 @@ impl DatalogExecutor {
                     })
                 },
             )?;
-            let results = project_find_specs(&sink.finish()?, &query.find);
+            #[cfg(any(test, feature = "bench-internals"))]
+            let finish_started =
+                crate::graph::storage::current_attribute_phase_diagnostics_enabled()
+                    .then(std::time::Instant::now);
+            let finished = sink.finish()?;
+            let results = project_find_specs(&finished, &query.find);
+            #[cfg(any(test, feature = "bench-internals"))]
+            if let Some(started) = finish_started {
+                self.storage.note_current_attribute_aggregate_finish(
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                );
+            }
             return Ok(QueryResult::QueryResults {
                 vars: query.find.iter().map(|spec| spec.display_name()).collect(),
                 results,
@@ -6317,6 +6328,63 @@ mod expr_eval_tests {
             .find(|b| b.get("salary") == Some(&Value::Integer(100)))
             .unwrap();
         assert_eq!(row_b100.get("__win_2"), Some(&Value::Integer(100)));
+    }
+
+    #[test]
+    fn current_attribute_phase_timing_is_explicit_and_preserves_aggregate() {
+        const FACTS: usize = 1_000;
+        let storage = FactStorage::new();
+        storage
+            .transact(
+                (0..FACTS)
+                    .map(|index| {
+                        (
+                            Uuid::from_u128(u128::try_from(index).unwrap().saturating_add(1)),
+                            ":phase/value".to_owned(),
+                            Value::Integer(i64::try_from(index).unwrap()),
+                        )
+                    })
+                    .collect(),
+                None,
+            )
+            .unwrap();
+        let executor = DatalogExecutor::new(storage.clone());
+        let query = parse_datalog_command(
+            "(query [:find (count ?v) (sum ?v) :where [?e :phase/value ?v]])",
+        )
+        .unwrap();
+
+        crate::graph::storage::set_current_attribute_phase_diagnostics_enabled(false);
+        let disabled = executor.execute(query.clone()).unwrap();
+        assert_aggregate_pair(disabled, 1_000, 499_500);
+        let disabled = storage.last_current_attribute_cursor_diagnostics().unwrap();
+        assert_eq!(disabled.reducer_elapsed_ns, 0);
+        assert_eq!(disabled.entity_flush_prepare_elapsed_ns, 0);
+        assert_eq!(disabled.visitor_elapsed_ns, 0);
+        assert_eq!(disabled.aggregate_finish_elapsed_ns, 0);
+
+        crate::graph::storage::set_current_attribute_phase_diagnostics_enabled(true);
+        let enabled = executor.execute(query).unwrap();
+        crate::graph::storage::set_current_attribute_phase_diagnostics_enabled(false);
+        assert_aggregate_pair(enabled, 1_000, 499_500);
+        let enabled = storage.last_current_attribute_cursor_diagnostics().unwrap();
+        assert_eq!(enabled.reducer_entries, 1_000);
+        assert_eq!(enabled.entity_flush_count, 1_000);
+        assert_eq!(enabled.visitor_values, 1_000);
+        assert_eq!(enabled.emitted_rows, 1_000);
+        assert!(enabled.reducer_elapsed_ns > 0);
+        assert!(enabled.entity_flush_prepare_elapsed_ns > 0);
+        assert!(enabled.visitor_elapsed_ns > 0);
+        assert!(enabled.aggregate_finish_elapsed_ns > 0);
+    }
+
+    fn assert_aggregate_pair(result: QueryResult, expected_count: i64, expected_sum: i64) {
+        let QueryResult::QueryResults { results, .. } = result else {
+            panic!("expected query results")
+        };
+        let row = results.first().expect("aggregate row");
+        assert_eq!(row.first(), Some(&Value::Integer(expected_count)));
+        assert_eq!(row.get(1), Some(&Value::Integer(expected_sum)));
     }
 }
 

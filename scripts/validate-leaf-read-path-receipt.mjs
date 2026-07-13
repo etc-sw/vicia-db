@@ -15,7 +15,15 @@ for (const section of [receipt.point.diagnostics, receipt.aggregate.diagnostics]
   if (!section || Object.values(section).some((value) => !Number.isFinite(value) || value < 0)) fail("invalid diagnostics");
 }
 const aggregateDiagnostics = receipt.aggregate.diagnostics;
+const cursorDiagnostics = receipt.aggregate.cursorDiagnostics;
+if (!Number.isFinite(receipt.aggregate.diagnosticQueryElapsedNs) || receipt.aggregate.diagnosticQueryElapsedNs <= 0) fail("aggregate diagnostic query timing missing");
+if (!cursorDiagnostics || Object.values(cursorDiagnostics).some((value) => !Number.isFinite(value) || value < 0)) fail("invalid current-attribute cursor diagnostics");
 if (aggregateDiagnostics.projectedAevtEmitted !== receipt.facts) fail("projected AEVT count mismatch");
 if (aggregateDiagnostics.projectedOwnedAevtDecodes !== 0) fail("projected path decoded owned AEVT keys");
 if (aggregateDiagnostics.fullLeafVecPeakEntries !== 0 || aggregateDiagnostics.fullLeafVecPeakStructBytes !== 0 || aggregateDiagnostics.fullLeafVecPeakDecodedPayloadBytes !== 0) fail("full-leaf materialization returned");
+if (cursorDiagnostics.committedEntriesVisited !== receipt.facts || cursorDiagnostics.reducerEntries !== receipt.facts) fail("current reducer entry count mismatch");
+if (cursorDiagnostics.entityFlushCount !== receipt.facts || cursorDiagnostics.visitorValues !== receipt.facts || cursorDiagnostics.emittedRows !== receipt.facts) fail("current flush/visitor count mismatch");
+for (const name of ["committedMergeElapsedNs", "reducerElapsedNs", "entityFlushPrepareElapsedNs", "visitorElapsedNs", "aggregateFinishElapsedNs"]) {
+  if (cursorDiagnostics[name] <= 0) fail(`current phase timing missing: ${name}`);
+}
 console.log(`leaf read receipt OK: ${profile} (${samples} samples)`);

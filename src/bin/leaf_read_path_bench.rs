@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use minigraf::{LeafReadDiagnostics, OpenOptions, QueryResult};
+use minigraf::{CurrentAttributeCursorDiagnostics, LeafReadDiagnostics, OpenOptions, QueryResult};
 use serde::Serialize;
 use std::env;
 use std::fs;
@@ -26,7 +26,9 @@ struct AggregateMeasurement {
     open_baseline_rss_bytes: u64,
     workload_peak_rss_bytes: u64,
     workload_delta_rss_bytes: u64,
+    diagnostic_query_elapsed_ns: u64,
     diagnostics: LeafReadDiagnostics,
+    cursor_diagnostics: CurrentAttributeCursorDiagnostics,
 }
 
 fn main() -> Result<()> {
@@ -133,8 +135,14 @@ fn measure_aggregate(path: &Path, facts: u64, samples: usize) -> Result<Aggregat
         bail!("aggregate correctness mismatch")
     }
     db.set_leaf_read_diagnostics_enabled(true);
+    let diagnostic_started = Instant::now();
     pair = aggregate_pair(db.execute(query)?)?;
+    let diagnostic_query_elapsed_ns =
+        u64::try_from(diagnostic_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
     let diagnostics = db.last_leaf_read_diagnostics();
+    let cursor_diagnostics = db
+        .last_current_attribute_cursor_diagnostics()
+        .context("aggregate cursor diagnostics missing")?;
     db.set_leaf_read_diagnostics_enabled(false);
     let peak = peak_rss_bytes().context("read workload peak RSS")?;
     Ok(AggregateMeasurement {
@@ -144,7 +152,9 @@ fn measure_aggregate(path: &Path, facts: u64, samples: usize) -> Result<Aggregat
         open_baseline_rss_bytes: baseline,
         workload_peak_rss_bytes: peak,
         workload_delta_rss_bytes: peak.saturating_sub(baseline),
+        diagnostic_query_elapsed_ns,
         diagnostics,
+        cursor_diagnostics,
     })
 }
 

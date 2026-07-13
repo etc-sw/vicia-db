@@ -10,9 +10,26 @@ use crate::storage::index::{
 };
 use anyhow::Result;
 #[cfg(any(test, feature = "bench-internals"))]
+use std::cell::Cell;
+#[cfg(any(test, feature = "bench-internals"))]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+#[cfg(any(test, feature = "bench-internals"))]
+thread_local! {
+    static CURRENT_ATTRIBUTE_PHASE_DIAGNOSTICS_ENABLED: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn set_current_attribute_phase_diagnostics_enabled(enabled: bool) {
+    CURRENT_ATTRIBUTE_PHASE_DIAGNOSTICS_ENABLED.set(enabled);
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn current_attribute_phase_diagnostics_enabled() -> bool {
+    CURRENT_ATTRIBUTE_PHASE_DIAGNOSTICS_ENABLED.get()
+}
 
 /// Accounted owned memory for one pending in-memory container.
 ///
@@ -118,6 +135,22 @@ pub struct CurrentAttributeCursorDiagnostics {
     pub yield_count: u64,
     /// Number of calls that resumed a previously yielded cursor.
     pub resume_count: u64,
+    /// Wall time inside the committed AEVT merge/visit, including nested phases.
+    pub committed_merge_elapsed_ns: u64,
+    /// Accepted current-view entries passed through `reduce_current_entry`.
+    pub reducer_entries: u64,
+    /// Exclusive time spent updating per-entity current-view state.
+    pub reducer_elapsed_ns: u64,
+    /// Entities whose accumulated state reached the flush boundary.
+    pub entity_flush_count: u64,
+    /// Time spent materializing visible values before invoking the visitor.
+    pub entity_flush_prepare_elapsed_ns: u64,
+    /// Values passed to the current-view visitor.
+    pub visitor_values: u64,
+    /// Exclusive time spent inside the current-view visitor callback.
+    pub visitor_elapsed_ns: u64,
+    /// Time spent finishing the typed aggregate and projecting its result row.
+    pub aggregate_finish_elapsed_ns: u64,
 }
 
 pub(crate) struct CurrentAttributeCursor {
@@ -136,6 +169,8 @@ pub(crate) struct CurrentAttributeCursor {
     committed_complete: bool,
     complete: bool,
     yielded: bool,
+    #[cfg(any(test, feature = "bench-internals"))]
+    phase_diagnostics_enabled: bool,
     #[cfg(any(test, feature = "bench-internals"))]
     current_entity_windows: u64,
     #[cfg(any(test, feature = "bench-internals"))]
@@ -275,6 +310,11 @@ pub(crate) enum CurrentRefsStep {
 #[cfg(any(test, feature = "bench-internals"))]
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn elapsed_ns(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -890,6 +930,22 @@ impl FactStorage {
             .unwrap_or_else(|error| error.into_inner())
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn note_current_attribute_aggregate_finish(&self, elapsed_ns: u64) {
+        if !current_attribute_phase_diagnostics_enabled() {
+            return;
+        }
+        let mut slot = self
+            .last_current_attribute_cursor_diagnostics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(diagnostics) = slot.as_mut() {
+            diagnostics.aggregate_finish_elapsed_ns = diagnostics
+                .aggregate_finish_elapsed_ns
+                .saturating_add(elapsed_ns);
+        }
+    }
+
     /// `true` when this storage has a committed reader — some facts live on
     /// disk, so [`Self::pending_fact_count`] is not the exact total.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -1501,6 +1557,8 @@ impl FactStorage {
             complete: false,
             yielded: false,
             #[cfg(any(test, feature = "bench-internals"))]
+            phase_diagnostics_enabled: current_attribute_phase_diagnostics_enabled(),
+            #[cfg(any(test, feature = "bench-internals"))]
             current_entity_windows: 0,
             #[cfg(any(test, feature = "bench-internals"))]
             diagnostics,
@@ -1546,6 +1604,15 @@ impl FactStorage {
             let Some(entity) = cursor.current_entity else {
                 return Ok(());
             };
+            #[cfg(any(test, feature = "bench-internals"))]
+            {
+                cursor.diagnostics.entity_flush_count =
+                    cursor.diagnostics.entity_flush_count.saturating_add(1);
+            }
+            #[cfg(any(test, feature = "bench-internals"))]
+            let prepare_started = cursor
+                .phase_diagnostics_enabled
+                .then(std::time::Instant::now);
             let mut output = Vec::new();
             for (encoded, state) in &cursor.values {
                 for ((valid_from, valid_to), (assert_tx, fact_ref)) in &state.assertions {
@@ -1572,8 +1639,32 @@ impl FactStorage {
                     output.push(value);
                 }
             }
+            #[cfg(any(test, feature = "bench-internals"))]
+            if let Some(started) = prepare_started {
+                cursor.diagnostics.entity_flush_prepare_elapsed_ns = cursor
+                    .diagnostics
+                    .entity_flush_prepare_elapsed_ns
+                    .saturating_add(elapsed_ns(started));
+            }
             for value in &output {
-                visit(entity, value)?;
+                #[cfg(any(test, feature = "bench-internals"))]
+                let visitor_started = cursor
+                    .phase_diagnostics_enabled
+                    .then(std::time::Instant::now);
+                let visit_result = visit(entity, value);
+                #[cfg(any(test, feature = "bench-internals"))]
+                if let Some(started) = visitor_started {
+                    cursor.diagnostics.visitor_elapsed_ns = cursor
+                        .diagnostics
+                        .visitor_elapsed_ns
+                        .saturating_add(elapsed_ns(started));
+                }
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    cursor.diagnostics.visitor_values =
+                        cursor.diagnostics.visitor_values.saturating_add(1);
+                }
+                visit_result?;
                 #[cfg(any(test, feature = "bench-internals"))]
                 {
                     cursor.diagnostics.emitted_rows =
@@ -1604,9 +1695,23 @@ impl FactStorage {
                 flush_entity(cursor, visit)?;
             }
             cursor.current_entity = Some(key.entity);
+            #[cfg(any(test, feature = "bench-internals"))]
+            let reducer_started = cursor
+                .phase_diagnostics_enabled
+                .then(std::time::Instant::now);
             let added_window = reduce_current_entry(&mut cursor.values, key, fact_ref);
             #[cfg(any(test, feature = "bench-internals"))]
-            cursor.note_reducer_shape(added_window);
+            {
+                if let Some(started) = reducer_started {
+                    cursor.diagnostics.reducer_elapsed_ns = cursor
+                        .diagnostics
+                        .reducer_elapsed_ns
+                        .saturating_add(elapsed_ns(started));
+                }
+                cursor.diagnostics.reducer_entries =
+                    cursor.diagnostics.reducer_entries.saturating_add(1);
+                cursor.note_reducer_shape(added_window);
+            }
             #[cfg(not(any(test, feature = "bench-internals")))]
             let _ = added_window;
             Ok(())
@@ -1617,7 +1722,11 @@ impl FactStorage {
             let next_start = cursor.next_start.clone();
             let end = cursor.end.clone();
             let committed_index_reader = cursor.committed_index_reader.clone();
-            let complete = committed_index_reader.as_ref().map_or(Ok(true), |reader| {
+            #[cfg(any(test, feature = "bench-internals"))]
+            let committed_started = cursor
+                .phase_diagnostics_enabled
+                .then(std::time::Instant::now);
+            let complete_result = committed_index_reader.as_ref().map_or(Ok(true), |reader| {
                 reader.visit_current_aevt_entries(
                     &next_start,
                     end.as_ref(),
@@ -1675,7 +1784,15 @@ impl FactStorage {
                         Ok(processed < max_entries)
                     },
                 )
-            })?;
+            });
+            #[cfg(any(test, feature = "bench-internals"))]
+            if let Some(started) = committed_started {
+                cursor.diagnostics.committed_merge_elapsed_ns = cursor
+                    .diagnostics
+                    .committed_merge_elapsed_ns
+                    .saturating_add(elapsed_ns(started));
+            }
+            let complete = complete_result?;
             cursor.committed_complete = complete;
             if bounded && let Some(last) = &cursor.last_key {
                 cursor.next_start = last.clone();
