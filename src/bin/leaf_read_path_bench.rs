@@ -91,10 +91,14 @@ fn measure_point(path: &Path, facts: u64, samples: usize) -> Result<PointMeasure
         }
         samples_ms_per_operation.push(elapsed_ms(started) / POINT_BATCH as f64);
     }
+    db.set_leaf_read_diagnostics_enabled(true);
+    validate_point(db.execute(&query)?, expected)?;
+    let diagnostics = db.last_leaf_read_diagnostics();
+    db.set_leaf_read_diagnostics_enabled(false);
     Ok(PointMeasurement {
         samples_ms_per_operation,
         raw_single_query_samples_ms,
-        diagnostics: db.last_leaf_read_diagnostics(),
+        diagnostics,
     })
 }
 
@@ -128,6 +132,10 @@ fn measure_aggregate(path: &Path, facts: u64, samples: usize) -> Result<Aggregat
     if pair != (facts, expected_checksum) {
         bail!("aggregate correctness mismatch")
     }
+    db.set_leaf_read_diagnostics_enabled(true);
+    pair = aggregate_pair(db.execute(query)?)?;
+    let diagnostics = db.last_leaf_read_diagnostics();
+    db.set_leaf_read_diagnostics_enabled(false);
     let peak = peak_rss_bytes().context("read workload peak RSS")?;
     Ok(AggregateMeasurement {
         samples_ms,
@@ -136,7 +144,7 @@ fn measure_aggregate(path: &Path, facts: u64, samples: usize) -> Result<Aggregat
         open_baseline_rss_bytes: baseline,
         workload_peak_rss_bytes: peak,
         workload_delta_rss_bytes: peak.saturating_sub(baseline),
-        diagnostics: db.last_leaf_read_diagnostics(),
+        diagnostics,
     })
 }
 

@@ -10,6 +10,7 @@ use crate::storage::page_integrity::BasePageIntegrityCatalog;
 use crate::storage::{PAGE_SIZE, StorageBackend};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -47,6 +48,7 @@ pub struct LeafReadDiagnostics {
 thread_local! {
     static PEAK_SERIALIZED_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static PEAK_SERIALIZED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static LEAF_READ_DIAGNOSTICS_ENABLED: Cell<bool> = const { Cell::new(false) };
     static LEAF_READ_DIAGNOSTICS: RefCell<LeafReadDiagnostics> = const {
         RefCell::new(LeafReadDiagnostics {
             internal_pages_visited: 0,
@@ -83,12 +85,23 @@ pub(crate) fn leaf_read_diagnostics() -> LeafReadDiagnostics {
 }
 
 #[cfg(feature = "bench-internals")]
-fn update_leaf_read_diagnostics(update: impl FnOnce(&mut LeafReadDiagnostics)) {
-    LEAF_READ_DIAGNOSTICS.with(|slot| update(&mut slot.borrow_mut()));
+pub(crate) fn set_leaf_read_diagnostics_enabled(enabled: bool) {
+    LEAF_READ_DIAGNOSTICS_ENABLED.set(enabled);
 }
 
-#[cfg(not(feature = "bench-internals"))]
-fn update_leaf_read_diagnostics(_update: impl FnOnce(&mut ())) {}
+#[cfg(feature = "bench-internals")]
+#[inline(always)]
+fn leaf_read_diagnostics_enabled() -> bool {
+    LEAF_READ_DIAGNOSTICS_ENABLED.get()
+}
+
+#[cfg(feature = "bench-internals")]
+#[inline(always)]
+fn update_leaf_read_diagnostics(update: impl FnOnce(&mut LeafReadDiagnostics)) {
+    if leaf_read_diagnostics_enabled() {
+        LEAF_READ_DIAGNOSTICS.with(|slot| update(&mut slot.borrow_mut()));
+    }
+}
 
 #[cfg(feature = "bench-internals")]
 pub(crate) fn reset_build_diagnostics() {
@@ -757,6 +770,7 @@ where
 }
 
 /// Read all `(K, FactRef)` entries from a leaf page's slot directory.
+#[cfg(test)]
 #[allow(clippy::arithmetic_side_effects)]
 fn read_leaf_entries<K>(page: &[u8]) -> Result<Vec<(K, FactRef)>>
 where
@@ -884,6 +898,297 @@ where
     Ok(entries)
 }
 
+/// Page-backed cursor over one raw or restart-compressed leaf.
+///
+/// The cursor owns the cached page and at most one decoded entry. Prefix leaves
+/// additionally retain only the previous serialized entry needed to reconstruct
+/// the next record.
+struct LeafEntryCursor<K> {
+    page: Arc<Vec<u8>>,
+    page_type: u8,
+    entry_count: usize,
+    slot: usize,
+    previous: Vec<u8>,
+    buffered: Option<(K, FactRef)>,
+    marker: PhantomData<K>,
+}
+
+impl<K> LeafEntryCursor<K>
+where
+    K: for<'de> Deserialize<'de> + Ord,
+{
+    fn new(page: Arc<Vec<u8>>) -> Result<Self> {
+        let page_type = page
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("empty leaf page"))?;
+        if !is_leaf_page_type(page_type) {
+            anyhow::bail!("expected leaf page, found type 0x{page_type:02x}")
+        }
+        if page_type == PAGE_TYPE_PREFIX_LEAF
+            && page.get(1).copied() != Some(u8::try_from(PREFIX_RESTART_INTERVAL)?)
+        {
+            anyhow::bail!("unsupported prefix leaf restart interval")
+        }
+        let entry_count = usize::from(read_u16_at(&page, 2)?);
+        let slot_directory_end = LEAF_HEADER_SIZE
+            .checked_add(entry_count.saturating_mul(SLOT_SIZE))
+            .ok_or_else(|| anyhow!("leaf slot directory length overflow"))?;
+        if slot_directory_end > page.len() {
+            anyhow::bail!("leaf slot directory is truncated")
+        }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_pages_visited = diagnostics.leaf_pages_visited.saturating_add(1);
+            diagnostics.leaf_entries_available = diagnostics
+                .leaf_entries_available
+                .saturating_add(u64::try_from(entry_count).unwrap_or(u64::MAX));
+            if page_type == PAGE_TYPE_PREFIX_LEAF {
+                diagnostics.prefix_leaf_pages_visited =
+                    diagnostics.prefix_leaf_pages_visited.saturating_add(1);
+            } else {
+                diagnostics.raw_leaf_pages_visited =
+                    diagnostics.raw_leaf_pages_visited.saturating_add(1);
+            }
+        });
+        Ok(Self {
+            page,
+            page_type,
+            entry_count,
+            slot: 0,
+            previous: Vec::new(),
+            buffered: None,
+            marker: PhantomData,
+        })
+    }
+
+    fn seek_lower_bound(&mut self, start: &K) -> Result<()> {
+        if self.page_type == PAGE_TYPE_PREFIX_LEAF {
+            self.seek_prefix_lower_bound(start)
+        } else {
+            self.seek_raw_lower_bound(start)
+        }
+    }
+
+    fn seek_raw_lower_bound(&mut self, start: &K) -> Result<()> {
+        let mut low = 0usize;
+        let mut high = self.entry_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let (key, _) = self.decode_raw(middle)?;
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
+            if key < *start {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        self.slot = low;
+        if low < self.entry_count {
+            self.buffered = Some(self.decode_raw(low)?);
+            self.slot = low.saturating_add(1);
+        }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_entries_skipped = diagnostics
+                .leaf_entries_skipped
+                .saturating_add(u64::try_from(low).unwrap_or(u64::MAX));
+        });
+        Ok(())
+    }
+
+    fn seek_prefix_lower_bound(&mut self, start: &K) -> Result<()> {
+        if self.entry_count == 0 {
+            return Ok(());
+        }
+        let restart_count = self.entry_count.div_ceil(PREFIX_RESTART_INTERVAL);
+        let mut low = 0usize;
+        let mut high = restart_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let slot = middle.saturating_mul(PREFIX_RESTART_INTERVAL);
+            let (key, _) = self.decode_prefix_restart(slot)?;
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
+            if key <= *start {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        let block = low.saturating_sub(1);
+        let block_start = block.saturating_mul(PREFIX_RESTART_INTERVAL);
+        self.slot = block_start;
+        self.previous.clear();
+        while self.slot < self.entry_count {
+            let entry_slot = self.slot;
+            let entry = self.decode_prefix_next()?;
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
+            if entry.0 >= *start {
+                self.buffered = Some(entry);
+                break;
+            }
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_skipped =
+                    diagnostics.leaf_entries_skipped.saturating_add(1);
+            });
+            if entry_slot
+                .saturating_add(1)
+                .is_multiple_of(PREFIX_RESTART_INTERVAL)
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn next_entry(&mut self) -> Result<Option<(K, FactRef)>> {
+        if let Some(entry) = self.buffered.take() {
+            return Ok(Some(entry));
+        }
+        if self.slot >= self.entry_count {
+            return Ok(None);
+        }
+        if self.page_type == PAGE_TYPE_PREFIX_LEAF {
+            self.decode_prefix_next().map(Some)
+        } else {
+            let slot = self.slot;
+            self.slot = self.slot.saturating_add(1);
+            self.decode_raw(slot).map(Some)
+        }
+    }
+
+    #[inline(always)]
+    fn stored_entry(&self, slot: usize) -> Result<&[u8]> {
+        if slot >= self.entry_count {
+            anyhow::bail!("leaf slot {slot} exceeds entry count {}", self.entry_count)
+        }
+        let slot_off = LEAF_HEADER_SIZE
+            .checked_add(slot.saturating_mul(SLOT_SIZE))
+            .ok_or_else(|| anyhow!("leaf slot offset overflow"))?;
+        let offset = usize::from(read_u16_at(&self.page, slot_off)?);
+        let length = usize::from(read_u16_at(&self.page, slot_off.saturating_add(2))?);
+        self.page
+            .get(offset..offset.saturating_add(length))
+            .ok_or_else(|| {
+                anyhow!(
+                    "entry slice out of bounds: offset={offset} len={length} page_len={}",
+                    self.page.len()
+                )
+            })
+    }
+
+    #[inline(always)]
+    fn decode_raw(&self, slot: usize) -> Result<(K, FactRef)> {
+        #[cfg(feature = "bench-internals")]
+        let started = leaf_read_diagnostics_enabled().then(std::time::Instant::now);
+        let entry = postcard::from_bytes(self.stored_entry(slot)?)?;
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_entries_decoded = diagnostics.leaf_entries_decoded.saturating_add(1);
+            if let Some(started) = started {
+                diagnostics.raw_decode_elapsed_ns =
+                    diagnostics.raw_decode_elapsed_ns.saturating_add(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    );
+            }
+        });
+        Ok(entry)
+    }
+
+    #[inline(always)]
+    fn decode_prefix_restart(&mut self, slot: usize) -> Result<(K, FactRef)> {
+        self.previous.clear();
+        self.decode_prefix_at(slot)
+    }
+
+    #[inline(always)]
+    fn decode_prefix_next(&mut self) -> Result<(K, FactRef)> {
+        let slot = self.slot;
+        let entry = self.decode_prefix_at(slot)?;
+        self.slot = self.slot.saturating_add(1);
+        Ok(entry)
+    }
+
+    #[inline(always)]
+    fn decode_prefix_at(&mut self, slot: usize) -> Result<(K, FactRef)> {
+        #[cfg(feature = "bench-internals")]
+        let started = leaf_read_diagnostics_enabled().then(std::time::Instant::now);
+        let page = &self.page;
+        let previous = &mut self.previous;
+        if slot >= self.entry_count {
+            anyhow::bail!("leaf slot {slot} exceeds entry count {}", self.entry_count)
+        }
+        let slot_off = LEAF_HEADER_SIZE
+            .checked_add(slot.saturating_mul(SLOT_SIZE))
+            .ok_or_else(|| anyhow!("leaf slot offset overflow"))?;
+        let offset = usize::from(read_u16_at(page, slot_off)?);
+        let length = usize::from(read_u16_at(page, slot_off.saturating_add(2))?);
+        let stored = page
+            .get(offset..offset.saturating_add(length))
+            .ok_or_else(|| {
+                anyhow!(
+                    "entry slice out of bounds: offset={offset} len={length} page_len={}",
+                    page.len()
+                )
+            })?;
+        if stored.len() < PREFIX_RECORD_HEADER_SIZE {
+            anyhow::bail!("compressed leaf record is truncated")
+        }
+        let shared = usize::from(read_u16_at(stored, 0)?);
+        let decoded_len = usize::from(read_u16_at(stored, 2)?);
+        if slot.is_multiple_of(PREFIX_RESTART_INTERVAL) && shared != 0 {
+            anyhow::bail!("compressed leaf restart record has a prefix")
+        }
+        if shared > previous.len() || shared > decoded_len {
+            anyhow::bail!("compressed leaf prefix is out of bounds")
+        }
+        let suffix = stored
+            .get(PREFIX_RECORD_HEADER_SIZE..)
+            .ok_or_else(|| anyhow!("compressed leaf record is truncated"))?;
+        if shared.saturating_add(suffix.len()) != decoded_len {
+            anyhow::bail!("compressed leaf decoded length mismatch")
+        }
+        previous.truncate(shared);
+        previous.extend_from_slice(suffix);
+        let entry = postcard::from_bytes(previous)?;
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_entries_decoded = diagnostics.leaf_entries_decoded.saturating_add(1);
+            if slot.is_multiple_of(PREFIX_RESTART_INTERVAL) {
+                diagnostics.prefix_restart_blocks_reconstructed = diagnostics
+                    .prefix_restart_blocks_reconstructed
+                    .saturating_add(1);
+            }
+            diagnostics.prefix_entries_reconstructed =
+                diagnostics.prefix_entries_reconstructed.saturating_add(1);
+            diagnostics.reconstructed_key_bytes = diagnostics
+                .reconstructed_key_bytes
+                .saturating_add(u64::try_from(previous.len()).unwrap_or(u64::MAX));
+            if let Some(started) = started {
+                diagnostics.prefix_decode_elapsed_ns =
+                    diagnostics.prefix_decode_elapsed_ns.saturating_add(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    );
+            }
+        });
+        Ok(entry)
+    }
+}
+
 // ─── stream_all_entries ───────────────────────────────────────────────────────
 
 /// Stream all `(K, FactRef)` entries from a B+tree in sorted order.
@@ -912,7 +1217,15 @@ where
             );
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
-        result.extend(read_leaf_entries::<K>(&page[..])?);
+        let mut cursor = LeafEntryCursor::<K>::new(page)?;
+        while let Some(entry) = cursor.next_entry()? {
+            result.push(entry);
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_emitted =
+                    diagnostics.leaf_entries_emitted.saturating_add(1);
+            });
+        }
 
         if next_leaf == 0 {
             break;
@@ -980,22 +1293,11 @@ where
             anyhow::bail!("range_scan: expected leaf at page_id={}", leaf_id);
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
-        let entries: Vec<(K, FactRef)> = read_leaf_entries(&page[..])?;
-
-        for (k, fr) in entries {
-            #[cfg(feature = "bench-internals")]
-            update_leaf_read_diagnostics(|diagnostics| {
-                diagnostics.lower_bound_key_comparisons =
-                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
-            });
-            if k < *start {
-                #[cfg(feature = "bench-internals")]
-                update_leaf_read_diagnostics(|diagnostics| {
-                    diagnostics.leaf_entries_skipped =
-                        diagnostics.leaf_entries_skipped.saturating_add(1);
-                });
-                continue;
-            }
+        let mut cursor = LeafEntryCursor::<K>::new(page)?;
+        if leaf_id == start_leaf {
+            cursor.seek_lower_bound(start)?;
+        }
+        while let Some((k, fr)) = cursor.next_entry()? {
             if let Some(e) = end
                 && k >= *e
             {
@@ -1034,42 +1336,52 @@ fn visit_range_entries<K>(
 where
     K: Serialize + for<'de> Deserialize<'de> + Ord,
 {
-    let mut leaf_id = find_leaf_for_key(root_page_id, start, backend, cache)?;
+    let start_leaf = find_leaf_for_key(root_page_id, start, backend, cache)?;
+    let mut leaf_id = start_leaf;
     'outer: loop {
         let page = cache.get_or_load(leaf_id, backend)?;
         if !page.first().copied().is_some_and(is_leaf_page_type) {
             anyhow::bail!("range_scan: expected leaf at page_id={}", leaf_id);
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
-        for (key, fact_ref) in read_leaf_entries::<K>(&page[..])? {
-            #[cfg(feature = "bench-internals")]
-            update_leaf_read_diagnostics(|diagnostics| {
-                diagnostics.lower_bound_key_comparisons =
-                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
-            });
-            if key < *start {
+        let mut cursor = LeafEntryCursor::<K>::new(page)?;
+        if leaf_id == start_leaf {
+            cursor.seek_lower_bound(start)?;
+        }
+        macro_rules! visit_entry {
+            ($entry:expr) => {{
+                let (key, fact_ref) = $entry;
+                if end.is_some_and(|end| key >= *end) {
+                    break 'outer;
+                }
                 #[cfg(feature = "bench-internals")]
                 update_leaf_read_diagnostics(|diagnostics| {
-                    diagnostics.leaf_entries_skipped =
-                        diagnostics.leaf_entries_skipped.saturating_add(1);
+                    diagnostics.leaf_entries_emitted =
+                        diagnostics.leaf_entries_emitted.saturating_add(1);
                 });
-                continue;
+                if !visit(&key, fact_ref)? {
+                    #[cfg(feature = "bench-internals")]
+                    update_leaf_read_diagnostics(|diagnostics| {
+                        diagnostics.early_stop_count =
+                            diagnostics.early_stop_count.saturating_add(1);
+                    });
+                    return Ok(false);
+                }
+            }};
+        }
+        if let Some(entry) = cursor.buffered.take() {
+            visit_entry!(entry);
+        }
+        if cursor.page_type == PAGE_TYPE_PREFIX_LEAF {
+            while cursor.slot < cursor.entry_count {
+                visit_entry!(cursor.decode_prefix_next()?);
             }
-            if end.is_some_and(|end| key >= *end) {
-                break 'outer;
+        } else {
+            while cursor.slot < cursor.entry_count {
+                let slot = cursor.slot;
+                cursor.slot = cursor.slot.saturating_add(1);
+                visit_entry!(cursor.decode_raw(slot)?);
             }
-            if !visit(&key, fact_ref)? {
-                #[cfg(feature = "bench-internals")]
-                update_leaf_read_diagnostics(|diagnostics| {
-                    diagnostics.early_stop_count = diagnostics.early_stop_count.saturating_add(1);
-                });
-                return Ok(false);
-            }
-            #[cfg(feature = "bench-internals")]
-            update_leaf_read_diagnostics(|diagnostics| {
-                diagnostics.leaf_entries_emitted =
-                    diagnostics.leaf_entries_emitted.saturating_add(1);
-            });
         }
         if next_leaf == 0 {
             break;
@@ -1426,7 +1738,7 @@ mod tests {
     use super::*;
     use crate::graph::types::Value;
     use crate::storage::backend::MemoryBackend;
-    use crate::storage::index::{EavtKey, FactRef, encode_value};
+    use crate::storage::index::{AevtKey, EavtKey, FactRef, encode_value};
     use uuid::Uuid;
 
     #[test]
@@ -1489,6 +1801,42 @@ mod tests {
                 slot_index: 0,
             },
         )
+    }
+
+    fn make_aevt(n: u128, attr: &str, tx: u64) -> (AevtKey, FactRef) {
+        (
+            AevtKey {
+                attribute: attr.to_string(),
+                entity: Uuid::from_u128(n),
+                valid_from: 0,
+                valid_to: i64::MAX,
+                tx_count: tx,
+                value_bytes: encode_value(&Value::Integer(tx.cast_signed())),
+                tx_id: tx,
+                asserted: true,
+            },
+            FactRef {
+                page_id: tx + 1,
+                slot_index: 0,
+            },
+        )
+    }
+
+    #[allow(clippy::indexing_slicing)]
+    fn raw_leaf_page(entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut page = vec![0u8; PAGE_SIZE];
+        page[0] = PAGE_TYPE_LEAF;
+        page[2..4].copy_from_slice(&u16::try_from(entries.len()).unwrap().to_le_bytes());
+        let mut data_end = PAGE_SIZE;
+        for (index, entry) in entries.iter().enumerate() {
+            data_end -= entry.len();
+            page[data_end..data_end + entry.len()].copy_from_slice(entry);
+            let slot = LEAF_HEADER_SIZE + index * SLOT_SIZE;
+            page[slot..slot + 2].copy_from_slice(&u16::try_from(data_end).unwrap().to_le_bytes());
+            page[slot + 2..slot + 4]
+                .copy_from_slice(&u16::try_from(entry.len()).unwrap().to_le_bytes());
+        }
+        page
     }
 
     #[test]
@@ -1576,6 +1924,141 @@ mod tests {
             read_leaf_entries::<EavtKey>(&corrupt_restart).is_err(),
             "restart records must never depend on an earlier entry"
         );
+        let mut cursor = LeafEntryCursor::<EavtKey>::new(Arc::new(corrupt_restart)).unwrap();
+        assert!(
+            cursor
+                .seek_lower_bound(&expected[PREFIX_RESTART_INTERVAL].0)
+                .is_err(),
+            "the page-backed cursor must reject a corrupt restart"
+        );
+    }
+
+    #[test]
+    fn raw_leaf_cursor_seeks_before_exact_between_and_after() {
+        let expected = (1u128..=32)
+            .map(|n| make_eavt(n, ":raw", n as u64))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let page = Arc::new(raw_leaf_page(&serialized));
+        assert_eq!(page[0], PAGE_TYPE_LEAF);
+
+        let starts = [
+            (make_eavt(0, ":raw", 0).0, Some(0usize)),
+            (expected[10].0.clone(), Some(10)),
+            (
+                EavtKey {
+                    attribute: ":zz".to_string(),
+                    ..expected[10].0.clone()
+                },
+                Some(11),
+            ),
+            (make_eavt(33, ":raw", 33).0, None),
+        ];
+        for (start, expected_index) in starts {
+            let mut cursor = LeafEntryCursor::<EavtKey>::new(page.clone()).unwrap();
+            cursor.seek_lower_bound(&start).unwrap();
+            let actual = cursor.next_entry().unwrap();
+            assert_eq!(actual, expected_index.map(|index| expected[index].clone()));
+        }
+    }
+
+    #[test]
+    fn prefix_leaf_cursor_seeks_from_one_restart_block() {
+        let expected = (1u128..=48)
+            .map(|n| make_aevt(n, ":shared/attribute", n as u64))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        let cache = PageCache::new(8);
+        write_leaf_page(&mut backend, &cache, 1, &serialized, 0).unwrap();
+        let page = Arc::new(backend.read_page(1).unwrap());
+        assert_eq!(page[0], PAGE_TYPE_PREFIX_LEAF);
+
+        let starts = [
+            (make_aevt(0, ":shared/attribute", 0).0, Some(0usize)),
+            (expected[25].0.clone(), Some(25)),
+            (
+                AevtKey {
+                    valid_from: 1,
+                    ..expected[25].0.clone()
+                },
+                Some(26),
+            ),
+            (make_aevt(49, ":shared/attribute", 49).0, None),
+        ];
+        for (start, expected_index) in starts {
+            let mut cursor = LeafEntryCursor::<AevtKey>::new(page.clone()).unwrap();
+            cursor.seek_lower_bound(&start).unwrap();
+            let actual = cursor.next_entry().unwrap();
+            assert_eq!(actual, expected_index.map(|index| expected[index].clone()));
+        }
+
+        #[cfg(feature = "bench-internals")]
+        {
+            reset_leaf_read_diagnostics();
+            set_leaf_read_diagnostics_enabled(true);
+            let mut cursor = LeafEntryCursor::<AevtKey>::new(page).unwrap();
+            cursor.seek_lower_bound(&expected[25].0).unwrap();
+            let diagnostics = leaf_read_diagnostics();
+            set_leaf_read_diagnostics_enabled(false);
+            assert!(diagnostics.prefix_entries_reconstructed > 0);
+            assert!(
+                diagnostics
+                    .prefix_entries_reconstructed
+                    .saturating_sub(diagnostics.prefix_restart_blocks_reconstructed)
+                    < u64::try_from(PREFIX_RESTART_INTERVAL).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn leaf_cursor_rejects_malformed_slot_restart_and_serialized_entry() {
+        let raw_expected = (1u128..=8)
+            .map(|n| make_eavt(n, ":raw", n as u64))
+            .collect::<Vec<_>>();
+        let raw_serialized = btree_entries(raw_expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        let cache = PageCache::new(8);
+        let raw = raw_leaf_page(&raw_serialized);
+        assert_eq!(raw[0], PAGE_TYPE_LEAF);
+
+        let mut malformed_slot = raw.clone();
+        malformed_slot[LEAF_HEADER_SIZE..LEAF_HEADER_SIZE + 2]
+            .copy_from_slice(&u16::MAX.to_le_bytes());
+        let mut cursor = LeafEntryCursor::<EavtKey>::new(Arc::new(malformed_slot)).unwrap();
+        assert!(cursor.next_entry().is_err());
+
+        let mut malformed_entry = raw;
+        malformed_entry[LEAF_HEADER_SIZE + 2..LEAF_HEADER_SIZE + 4]
+            .copy_from_slice(&1u16.to_le_bytes());
+        let mut cursor = LeafEntryCursor::<EavtKey>::new(Arc::new(malformed_entry)).unwrap();
+        assert!(cursor.next_entry().is_err());
+
+        let prefix_expected = (1u128..=20)
+            .map(|n| make_aevt(n, ":prefix", n as u64))
+            .collect::<Vec<_>>();
+        let prefix_serialized = btree_entries(prefix_expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        write_leaf_page(&mut backend, &cache, 2, &prefix_serialized, 0).unwrap();
+        let mut prefix = backend.read_page(2).unwrap();
+        assert_eq!(prefix[0], PAGE_TYPE_PREFIX_LEAF);
+        prefix[1] = 8;
+        assert!(LeafEntryCursor::<AevtKey>::new(Arc::new(prefix)).is_err());
     }
 
     #[test]

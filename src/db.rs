@@ -1008,6 +1008,12 @@ impl Minigraf {
         crate::storage::btree_v6::leaf_read_diagnostics()
     }
 
+    /// Enable or disable the repository-only leaf diagnostic probe on this thread.
+    #[cfg(feature = "bench-internals")]
+    pub fn set_leaf_read_diagnostics_enabled(&self, enabled: bool) {
+        crate::storage::btree_v6::set_leaf_read_diagnostics_enabled(enabled);
+    }
+
     /// Return live pending-container memory accounting without cloning data.
     ///
     /// Repository benchmark hook available only with `bench-internals`.
