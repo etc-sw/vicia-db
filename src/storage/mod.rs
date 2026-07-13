@@ -56,13 +56,25 @@ pub(crate) fn mark_storage_failure(
     error: anyhow::Error,
     disposition: StorageFailureDisposition,
 ) -> anyhow::Error {
-    if error.downcast_ref::<StorageFailure>().is_some() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Browser sparse reads use typed page-demand errors as control flow.
+        // Session reuse policy is native-only, so preserve the browser error
+        // as the top-level value that the demand loader must downcast.
+        let _ = disposition;
         error
-    } else {
-        anyhow::Error::new(StorageFailure {
-            disposition,
-            source: error,
-        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if error.downcast_ref::<StorageFailure>().is_some() {
+            error
+        } else {
+            anyhow::Error::new(StorageFailure {
+                disposition,
+                source: error,
+            })
+        }
     }
 }
 
