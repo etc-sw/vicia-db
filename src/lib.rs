@@ -111,7 +111,7 @@ pub use repl::Repl;
 pub use graph::types::{EntityId, FactRecord, FactValidTime, Value};
 
 #[cfg(feature = "bench-internals")]
-pub use db::WalReplayMemoryDiagnostics;
+pub use db::{AtomicWritePreparationDiagnostics, WalReplayMemoryDiagnostics};
 #[cfg(feature = "bench-internals")]
 pub use graph::storage::{
     CurrentAttributeCursorDiagnostics, PendingMemoryComponent, PendingMemoryDiagnostics,

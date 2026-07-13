@@ -106,6 +106,7 @@ const requiredProfiles = {
   "delta-accumulation": ["smoke", "t8b-mini", "full"],
   "agent-brief-read-path": ["smoke", "full"],
   "browser-paged-matrix": ["full"],
+  "vetch-ledger-caller": ["smoke", "full"],
   "vetch-gate-d-exact-trace": ["full"],
 };
 for (const [suiteId, profileIds] of Object.entries(requiredProfiles)) {
@@ -122,6 +123,7 @@ for (const suiteId of [
   "vetch-cadence",
   "delta-accumulation",
   "agent-brief-read-path",
+  "vetch-ledger-caller",
 ]) {
   const suite = catalog.suites.find((candidate) => candidate.id === suiteId);
   for (const profile of suite.profiles) {

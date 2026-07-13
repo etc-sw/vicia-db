@@ -297,8 +297,16 @@ impl BrowserDb {
     #[wasm_bindgen(js_name = executeAtomic)]
     pub async fn execute_atomic(&self, commands: Vec<String>) -> Result<String, JsValue> {
         self.ensure_usable()?;
+        #[cfg(feature = "bench-internals")]
+        let preparation_started = js_sys::Date::now();
         let prepared = crate::db::Minigraf::materialize_atomic_write_commands(&commands)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        #[cfg(feature = "bench-internals")]
+        let prepared = {
+            let mut prepared = prepared;
+            prepared.benchmark_preparation_ms = js_sys::Date::now() - preparation_started;
+            prepared
+        };
 
         self.begin_mutation()?;
         let result = self.apply_atomic_write(prepared).await;
@@ -1229,6 +1237,10 @@ impl BrowserDb {
         use crate::graph::types::tx_id_now;
         use crate::storage::packed_pages::MAX_FACT_BYTES;
 
+        #[cfg(feature = "bench-internals")]
+        let mutation_started = js_sys::Date::now();
+        #[cfg(feature = "bench-internals")]
+        let preparation_ms = prepared.benchmark_preparation_ms;
         let (dirty_pages, result_json) = {
             let mut inner = self.inner.borrow_mut();
             let tx_id = tx_id_now();
@@ -1310,6 +1322,11 @@ impl BrowserDb {
             (dirty_pages, json)
         };
 
+        #[cfg(feature = "bench-internals")]
+        let mutation_ms = js_sys::Date::now() - mutation_started;
+        #[cfg(feature = "bench-internals")]
+        let publication_started = js_sys::Date::now();
+
         if !dirty_pages.is_empty() {
             let idb = self
                 .inner
@@ -1323,6 +1340,19 @@ impl BrowserDb {
         }
 
         self.evict_sparse_staging();
+        #[cfg(feature = "bench-internals")]
+        let result_json = {
+            let publication_ms = js_sys::Date::now() - publication_started;
+            let mut result: serde_json::Value = serde_json::from_str(&result_json)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            result["benchmark"] = serde_json::json!({
+                "schema": "vicia.browser-atomic-write-stages.v1",
+                "preparation_ms": preparation_ms,
+                "mutation_ms": mutation_ms,
+                "publication_ms": publication_ms,
+            });
+            result.to_string()
+        };
         Ok(result_json)
     }
 }

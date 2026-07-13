@@ -161,6 +161,29 @@
       ]
     },
     {
+      "id": "vetch-ledger-caller",
+      "milestone": "M8-h0-ledger-caller-contract",
+      "kind": "measurement-gate",
+      "owner": "vicia-vetch-boundary",
+      "decision": "Which typed commit, receipt, expectation, and bounded-read gaps are demonstrated by exact Vetch caller shapes?",
+      "profiles": [
+        {
+          "id": "smoke",
+          "tier": "pull-request-smoke",
+          "acceptanceEligible": false,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<10k.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --features bench-internals --bench vetch_ledger_caller_benchmark -- smoke",
+          "budgets": []
+        },
+        {
+          "id": "full",
+          "tier": "dedicated-host-contract-freeze",
+          "acceptanceEligible": false,
+          "command": "VICIA_BENCH_BASE_FIXTURE=<1m.graph> VICIA_BENCH_RECEIPT=<path> cargo bench --features bench-internals --bench vetch_ledger_caller_benchmark -- full",
+          "budgets": []
+        }
+      ]
+    },
+    {
       "id": "vetch-gate-d-exact-trace",
       "milestone": "M6-vetch-product-acceptance",
       "kind": "external-absolute-acceptance",

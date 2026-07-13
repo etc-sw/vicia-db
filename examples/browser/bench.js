@@ -370,6 +370,126 @@ window.benchPagedOpen = async () => {
   );
 };
 
+function encodeLedgerCallerValue(value) {
+  if (value.type === "string") return JSON.stringify(value.value);
+  if (value.type === "integer" || value.type === "boolean") return String(value.value);
+  if (value.type === "ref") return `#uuid "${value.value}"`;
+  if (value.type === "keyword") return value.value;
+  if (value.type === "null") return "nil";
+  throw new Error(`unsupported ledger caller value ${JSON.stringify(value)}`);
+}
+
+function encodeLedgerCallerCommands(changes) {
+  return [
+    ["retract", changes.filter((change) => change.operation === "retract")],
+    ["transact", changes.filter((change) => change.operation === "assert")],
+  ]
+    .filter(([, selected]) => selected.length > 0)
+    .map(([verb, selected]) =>
+      `(${verb} [${selected.map((change) =>
+        `[#uuid "${change.entity}" ${change.attribute} ${encodeLedgerCallerValue(change.value)}]`
+      ).join("")}])`
+    );
+}
+
+function ledgerCallerSampleUuid(uuid, sample) {
+  const parts = uuid.split("-");
+  const tail = Number.parseInt(parts[4], 16) + sample * 256;
+  parts[4] = tail.toString(16).padStart(12, "0");
+  return parts.join("-");
+}
+
+function instantiateLedgerCallerScenario(scenario, sample) {
+  return {
+    ...scenario,
+    changes: scenario.changes.map((change) => ({
+      ...change,
+      entity: ledgerCallerSampleUuid(change.entity, sample),
+      value: change.value.type === "ref"
+        ? { ...change.value, value: ledgerCallerSampleUuid(change.value.value, sample) }
+        : change.value,
+    })),
+    proof: {
+      ...scenario.proof,
+      entity: ledgerCallerSampleUuid(scenario.proof.entity, sample),
+    },
+  };
+}
+
+// H0 exact caller contract on the real paged browser write path. The internal
+// stage timings exist only in a bench-internals wasm package.
+window.benchVetchLedgerCaller = async (samples = 20) => {
+  await initPromise;
+  const response = await fetch("/benchmarks/fixtures/vetch-ledger-caller.v1.json");
+  if (!response.ok) throw new Error(`caller fixture fetch failed: ${response.status}`);
+  const fixture = await response.json();
+  const db = await BrowserDb.openPaged(DB_NAME);
+  const scenarios = [];
+  for (const scenario of fixture.scenarios) {
+    window.gc?.();
+    const heapBeforeBytes = heap();
+    const measurements = {
+      callerEncodingMs: [],
+      preparationMs: [],
+      mutationMs: [],
+      publicationMs: [],
+      executeAtomicMs: [],
+      resultDecodeMs: [],
+      proofReadMs: [],
+    };
+    for (let sample = 0; sample < samples; sample++) {
+      const encodingStarted = performance.now();
+      const instance = instantiateLedgerCallerScenario(scenario, sample);
+      const commands = encodeLedgerCallerCommands(instance.changes);
+      measurements.callerEncodingMs.push(performance.now() - encodingStarted);
+
+      const executeStarted = performance.now();
+      const rawReceipt = await db.executeAtomic(commands);
+      measurements.executeAtomicMs.push(performance.now() - executeStarted);
+      const decodeStarted = performance.now();
+      const receipt = JSON.parse(rawReceipt);
+      measurements.resultDecodeMs.push(performance.now() - decodeStarted);
+      if (receipt.fact_count !== scenario.changes.length || !receipt.atomic) {
+        throw new Error(`${scenario.id} atomic receipt mismatch: ${rawReceipt}`);
+      }
+      if (!receipt.benchmark) {
+        throw new Error("ledger caller benchmark requires a bench-internals wasm package");
+      }
+      measurements.preparationMs.push(receipt.benchmark.preparation_ms);
+      measurements.mutationMs.push(receipt.benchmark.mutation_ms);
+      measurements.publicationMs.push(receipt.benchmark.publication_ms);
+
+      const proofStarted = performance.now();
+      const proof = JSON.parse(await db.execute(
+        `(query [:find ?v :where [#uuid "${instance.proof.entity}" ${instance.proof.attribute} ?v]])`,
+      ));
+      measurements.proofReadMs.push(performance.now() - proofStarted);
+      if (proof.results?.length !== instance.proof.expectedRows) {
+        throw new Error(
+          `${scenario.id} exact proof row mismatch: ${JSON.stringify(proof.results)}`,
+        );
+      }
+    }
+    const heapAfterBytes = heap();
+    scenarios.push({
+      id: scenario.id,
+      measurements,
+      heapBeforeBytes,
+      heapAfterBytes,
+      heapDeltaBytes: heapBeforeBytes === null || heapAfterBytes === null
+        ? null
+        : heapAfterBytes - heapBeforeBytes,
+    });
+  }
+  return show(JSON.stringify({
+    schema: "vicia.vetch-ledger-caller-browser.v1",
+    fixtureSchema: fixture.schema,
+    samples,
+    scenarios,
+    stats: await idbStats(),
+  }));
+};
+
 // The portability API is explicitly O(total), but it must not change the live
 // sparse residency or use the eager full-store loader.
 window.benchPagedExport = async () => {

@@ -1,7 +1,8 @@
 # Vetch-Oriented High-Level Ledger API Plan
 
-Status: planned; specification candidate until H0 measurement freezes the first
-public slice.
+Status: H0 measured on 2026-07-13; the first demonstrated public gap is a
+consistent transaction-pinned read view. The typed commit facade remains
+planned but is not a current Vetch blocker.
 
 Related authority:
 
@@ -414,7 +415,7 @@ Every implementation slice preserves:
 
 ### H0 — Exact caller contract and benchmark freeze
 
-Do not add public APIs in this slice.
+Status: complete as a measurement gate. No public API was added.
 
 - Record Vetch `cards.move`, Condense admission, proposal verdict, and
   agent-brief read requests as typed fixture data.
@@ -436,7 +437,53 @@ Gate:
 - the benchmark identifies a concrete public-surface gap rather than treating
   all caller cost as database cost.
 
+#### H0 receipt and verdict — 2026-07-13
+
+The durable fixture `vicia.vetch-ledger-caller-fixture.v1` records normalized
+`cards.move`, Condense admission, proposal verdict, and agent-brief shapes from
+the current Vetch authority adapter and Gate D trace. Each measured sample
+derives fresh operation/entity identities, compiles the typed changes into the
+current Datalog boundary, commits assertions and retractions under one
+transaction cursor, and checks exact full-history identity plus a bounded proof
+read.
+
+The native smoke and full receipts each passed 26 correctness checks. On the
+1M v12 fixture, caller-shaped mutation p95 was `1.181..2.220 ms`, Datalog
+parse/materialization p95 was `0.023..0.040 ms`, and exact proof-read p95 was
+`0.052..0.070 ms`. These paths remained delta/selection-sized relative to the
+10K smoke profile.
+
+The real-Chrome 1M paged run used 20 observations per scenario and separated
+caller encoding, Rust preparation, mutation, IndexedDB publication, result
+decode, and exact proof read. `executeAtomic()` p95 was `1.6..1.9 ms`; exact
+proof-read p95 was `0.1..0.2 ms`; JSON decode p95 was at most `0.1 ms`.
+
+H0 decisions:
+
+- Keep atomic expectations out of H1. The current serialized writer can recheck
+  the exact basis inside its lock, reject a stale second verdict, and consume no
+  transaction identity. Reopen this only for a caller that cannot use that
+  boundary.
+- Keep the existing compact durability receipt. The transaction cursor plus
+  caller-owned typed delta identifies and patches the accepted projection;
+  echoing `committedFacts` and `touched` is not justified by latency,
+  allocation, or correctness evidence.
+- Do not change the wasm binding merely to avoid Datalog parsing or JSON
+  decoding. Neither is a measured foreground bottleneck.
+- Admit the consistent read view as the next public-surface candidate. The H0
+  interleaving probe proves that separate agent-brief reads can observe
+  different transaction cursors. H2 must pin one cursor and reject incomplete
+  results; a facade that only wraps current raw calls does not solve this gap.
+
+The H0 milestone is characterization evidence, not an absolute performance
+budget. Numeric H1 budgets remain unset because H1 has no measured blocker.
+The next implementation slice should define and verify the smallest pinned
+read-view boundary before adding a broader `ViciaLedger` facade.
+
 ### H1 — Typed commit facade over existing atomic publication
+
+Status: deferred. H0 found no current correctness, latency, or allocation gap
+that requires this facade before the pinned read view.
 
 - Add internal typed fact-change and commit-receipt types shared by native core
   and browser binding code where practical.
@@ -456,6 +503,8 @@ Gate:
 - native/browser tagged values and transaction identity remain equivalent.
 
 ### H2 — Bounded current reads and consistent read views
+
+Status: next candidate, narrowed by H0 to transaction-pinned multi-query reads.
 
 - Expose exact entity/attribute reads through the indexed current-view path.
 - Add browser prepared/bound query parity if H0 proves repeated parsing is

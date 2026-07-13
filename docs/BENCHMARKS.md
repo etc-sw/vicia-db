@@ -1748,6 +1748,59 @@ just leaf-read-path-compare \
   benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/candidate.json
 ```
 
+### H0 Vetch ledger caller contract
+
+`vicia.vetch-ledger-caller-fixture.v1` freezes four typed caller shapes from the
+current Vetch authority boundary: card move, Condense admission, proposal
+verdict, and agent brief. Every sample derives fresh identities, compiles the
+typed delta through the exact browser atomic-write parser/materializer, commits
+under one transaction cursor, compares the exported full-history tail, and
+performs one bounded proof read.
+
+The local H0 receipts passed all 26 correctness checks at both 10K and 1M:
+
+| 1M native metric | p95 range across four fixtures |
+|---|---:|
+| Caller encoding | `0.010..0.013 ms` |
+| Datalog parse/materialization | `0.023..0.040 ms` |
+| Atomic mutation | `1.181..2.220 ms` |
+| Exact proof read | `0.052..0.070 ms` |
+
+The real-Chrome 1M paged receipt used 20 observations per fixture:
+
+| Browser metric | p95 range |
+|---|---:|
+| `executeAtomic()` total | `1.6..1.9 ms` |
+| Rust mutation stage | `1 ms` |
+| IndexedDB publication stage | `1 ms` |
+| JSON result decode | `0..0.1 ms` |
+| Exact proof read | `0.1..0.2 ms` |
+
+The millisecond-resolution internal browser stage clock is diagnostic; the
+high-resolution total is the comparison surface. H0 does not set a new absolute
+budget. It rejects parse/JSON optimization and expanded commit receipts as
+unmeasured public-API work, keeps atomic expectations behind the existing
+serialized basis check, and admits transaction-pinned multi-query reads as the
+next concrete gap.
+
+```bash
+VICIA_BENCH_RECEIPT=target/h0-smoke.json \
+  cargo bench --features bench-internals \
+  --bench vetch_ledger_caller_benchmark -- smoke
+
+VICIA_BENCH_BASE_FIXTURE=<1m.graph> \
+VICIA_BENCH_RECEIPT=target/h0-full.json \
+  cargo bench --features bench-internals \
+  --bench vetch_ledger_caller_benchmark -- full
+
+wasm-pack build --target web --out-dir minigraf-wasm -- \
+  --features browser,bench-internals
+python3 -m http.server 8123
+VICIA_BENCH_RECEIPT=target/h0-browser.json \
+  node examples/browser/bench-driver.cjs ledger-caller \
+  /path-served-under-repo/1m.graph 20
+```
+
 ---
 
 ## Reproducing

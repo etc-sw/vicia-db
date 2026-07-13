@@ -22,7 +22,11 @@ pub(crate) const VALID_FROM_USE_TX_TIME: i64 = i64::MIN;
 ///
 /// This prevents an unbounded JavaScript array from becoming one WebAssembly
 /// allocation and one IndexedDB publication.
-#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[cfg(any(
+    test,
+    feature = "bench-internals",
+    all(target_arch = "wasm32", feature = "browser")
+))]
 pub(crate) const BROWSER_ATOMIC_MAX_COMMANDS: usize = 256;
 /// Maximum materialized facts in one browser atomic write request.
 ///
@@ -30,13 +34,25 @@ pub(crate) const BROWSER_ATOMIC_MAX_COMMANDS: usize = 256;
 /// (131,072 facts) before operation metadata; this ceiling retains bounded
 /// headroom for that complete operation envelope while still rejecting
 /// unreasonable materialized batches.
-#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[cfg(any(
+    test,
+    feature = "bench-internals",
+    all(target_arch = "wasm32", feature = "browser")
+))]
 pub(crate) const BROWSER_ATOMIC_MAX_FACTS: usize = 262_144;
 /// Maximum aggregate UTF-8 Datalog source bytes in one browser atomic write.
-#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[cfg(any(
+    test,
+    feature = "bench-internals",
+    all(target_arch = "wasm32", feature = "browser")
+))]
 pub(crate) const BROWSER_ATOMIC_MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum lexical tokens accepted before the normal parser allocates its AST.
-#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[cfg(any(
+    test,
+    feature = "bench-internals",
+    all(target_arch = "wasm32", feature = "browser")
+))]
 const BROWSER_ATOMIC_MAX_TOKENS: usize = BROWSER_ATOMIC_MAX_FACTS * 8;
 use crate::graph::FactStorage;
 use crate::graph::types::Value;
@@ -110,7 +126,11 @@ fn is_write_tx_active() -> bool {
 ///
 /// No database state has changed while this value is being built. BrowserDb
 /// uses this as the prepare boundary before claiming its mutation guard.
-#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+#[cfg(any(
+    test,
+    feature = "bench-internals",
+    all(target_arch = "wasm32", feature = "browser")
+))]
 #[derive(Debug)]
 pub(crate) struct MaterializedAtomicWrite {
     /// Facts in caller command order, with transaction metadata unstamped.
@@ -121,9 +141,38 @@ pub(crate) struct MaterializedAtomicWrite {
     pub(crate) transacted_fact_count: usize,
     /// Number of materialized retraction facts.
     pub(crate) retracted_fact_count: usize,
+    /// H0-only wall-clock time spent in parser/materialization on wasm.
+    #[cfg(all(
+        target_arch = "wasm32",
+        feature = "browser",
+        feature = "bench-internals"
+    ))]
+    pub(crate) benchmark_preparation_ms: f64,
 }
 
-#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+/// Repository-only diagnostics for the browser atomic-write preparation path.
+///
+/// Available only with `bench-internals`; this keeps H0 caller-contract
+/// measurements on the exact parser/materializer used by `executeAtomic`
+/// without making its internal fact representation public.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtomicWritePreparationDiagnostics {
+    /// Submitted Datalog command count.
+    pub command_count: usize,
+    /// Total UTF-8 source bytes submitted by the caller.
+    pub source_bytes: usize,
+    /// Materialized assertion count.
+    pub transacted_fact_count: usize,
+    /// Materialized retraction count.
+    pub retracted_fact_count: usize,
+}
+
+#[cfg(any(
+    test,
+    feature = "bench-internals",
+    all(target_arch = "wasm32", feature = "browser")
+))]
 fn atomic_write_preflight(source: &str) -> Result<(usize, usize)> {
     let mut chars = source.chars().peekable();
     let mut bracket_depth = 0usize;
@@ -1747,7 +1796,11 @@ impl Minigraf {
     /// This is the shared preparation half of BrowserDb's atomic write API.
     /// Query, rule, and forget commands are intentionally excluded: their
     /// evaluation or registry semantics do not belong in a write-only batch.
-    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    #[cfg(any(
+        test,
+        feature = "bench-internals",
+        all(target_arch = "wasm32", feature = "browser")
+    ))]
     pub(crate) fn materialize_atomic_write_commands(
         commands: &[String],
     ) -> Result<MaterializedAtomicWrite> {
@@ -1896,6 +1949,41 @@ impl Minigraf {
             command_count: commands.len(),
             transacted_fact_count,
             retracted_fact_count,
+            #[cfg(all(
+                target_arch = "wasm32",
+                feature = "browser",
+                feature = "bench-internals"
+            ))]
+            benchmark_preparation_ms: 0.0,
+        })
+    }
+
+    /// Measure the exact `executeAtomic` parse/materialization boundary.
+    ///
+    /// This repository benchmark hook is excluded from default builds and does
+    /// not mutate database state.
+    #[cfg(feature = "bench-internals")]
+    pub fn benchmark_atomic_write_preparation(
+        commands: &[String],
+    ) -> Result<AtomicWritePreparationDiagnostics> {
+        let source_bytes = commands.iter().try_fold(0usize, |total, command| {
+            total
+                .checked_add(command.len())
+                .ok_or_else(|| anyhow::anyhow!("executeAtomic input byte count overflow"))
+        })?;
+        let prepared = Self::materialize_atomic_write_commands(commands)?;
+        let materialized_fact_count = prepared.facts.len();
+        debug_assert_eq!(
+            materialized_fact_count,
+            prepared
+                .transacted_fact_count
+                .saturating_add(prepared.retracted_fact_count)
+        );
+        Ok(AtomicWritePreparationDiagnostics {
+            command_count: prepared.command_count,
+            source_bytes,
+            transacted_fact_count: prepared.transacted_fact_count,
+            retracted_fact_count: prepared.retracted_fact_count,
         })
     }
 

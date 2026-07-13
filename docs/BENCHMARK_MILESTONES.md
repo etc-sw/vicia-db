@@ -16,12 +16,16 @@ This document explains how to use that authority during development.
 | M5 browser bounded lifecycle | Do 1M foreground browser operations stay bounded while O(total) work remains disposable? | Real-Chrome paged matrix | Vicia browser |
 | M6 Vetch product acceptance | Does the exact product trace preserve cadence, memory, growth, query shape, fingerprints, maintenance, and reopen? | Vetch Gate D full | Vetch quiet surface |
 | M7 cross-engine characterization | Where does Vicia spend time, memory, and bytes relative to classified embedded peers, and do all survive kill-9? | Weekly smoke + dedicated full | Vicia performance |
+| M8 H0 ledger caller contract | Which typed commit, receipt, expectation, and consistent-read gaps are demonstrated by exact Vetch caller shapes? | Native smoke/full + real-Chrome 1M stage receipt | Vicia/Vetch boundary |
 
 M1 is longitudinal evidence and does not by itself close a product milestone.
 M2-M6 are absolute acceptance boundaries. M7 is comparative evidence and does
 not define an overall winner or a release budget. A storage or query optimization must
 name the affected milestone before implementation; otherwise it has no honest
 performance completion condition.
+
+M8 is a measurement gate rather than an acceptance budget. It freezes caller
+shape and separates ownership costs before authorizing a public facade.
 
 ## Development loop
 
@@ -125,6 +129,20 @@ These remain at their real ownership boundaries. M5 runs the existing
 real-Chrome paged matrix in this repository. M6 runs the exact Vetch trace in
 `vetch-app`. Their commands and product budgets are catalogued here so a Vicia
 change cannot call itself release-ready after only native microbenchmarks.
+
+### M8 — H0 ledger caller contract
+
+- Four typed fixtures: card move, Condense admission, proposal verdict, and
+  agent brief.
+- Native 10K smoke and 1M full receipts split caller encoding, exact
+  `executeAtomic` parser/materializer work, atomic mutation, and proof read.
+- The real-Chrome 1M receipt additionally splits IndexedDB publication and JSON
+  decode and records JS heap plus Chrome process-tree memory evidence.
+- Correctness covers full-history identity, one transaction cursor per commit,
+  serialized stale-verdict rejection without cursor consumption, and the
+  demonstrated multi-query cursor-mixing gap.
+- This milestone has no numeric budget until it identifies an implementation
+  boundary. Its receipt decides whether H1/H2 work is admitted.
 
 ## Closeout receipt set
 

@@ -1,0 +1,65 @@
+{
+  "schema": "vicia.vetch-ledger-caller-fixture.v1",
+  "source": {
+    "repository": "/home/upopo/projects/vetch-app",
+    "commit": "13970fa",
+    "paths": [
+      "apps/quiet-surface/src/adapters/vicia-db/viciaCanvasPersistence.ts",
+      "apps/quiet-surface/src/adapters/vicia-db/viciaCanvasEntityProjection.ts",
+      "apps/quiet-surface/scripts/bench-vicia-gate-d-exact-trace.mjs"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "cards.move",
+      "changes": [
+        { "operation": "retract", "entity": "10000000-0000-0000-0000-000000000001", "attribute": ":vetch_card/x", "value": { "type": "integer", "value": 120 } },
+        { "operation": "retract", "entity": "10000000-0000-0000-0000-000000000001", "attribute": ":vetch_card/y", "value": { "type": "integer", "value": 240 } },
+        { "operation": "assert", "entity": "10000000-0000-0000-0000-000000000001", "attribute": ":vetch_card/x", "value": { "type": "integer", "value": 168 } },
+        { "operation": "assert", "entity": "10000000-0000-0000-0000-000000000001", "attribute": ":vetch_card/y", "value": { "type": "integer", "value": 276 } },
+        { "operation": "assert", "entity": "10000000-0000-0000-0000-000000000011", "attribute": ":vetch_card_event/type", "value": { "type": "keyword", "value": ":canvas-card-move" } },
+        { "operation": "assert", "entity": "10000000-0000-0000-0000-000000000011", "attribute": ":vetch_card_event/card", "value": { "type": "ref", "value": "10000000-0000-0000-0000-000000000001" } },
+        { "operation": "assert", "entity": "10000000-0000-0000-0000-000000000021", "attribute": ":vetch_canvas_commit/status", "value": { "type": "keyword", "value": ":committed" } },
+        { "operation": "assert", "entity": "10000000-0000-0000-0000-000000000021", "attribute": ":vetch_canvas_commit/request-fingerprint", "value": { "type": "string", "value": "cards-move-fixture-v1" } }
+      ],
+      "proof": { "entity": "10000000-0000-0000-0000-000000000021", "attribute": ":vetch_canvas_commit/request-fingerprint", "expectedRows": 1 }
+    },
+    {
+      "id": "condense.admit",
+      "changes": [
+        { "operation": "assert", "entity": "20000000-0000-0000-0000-000000000001", "attribute": ":vetch_condense_translation/run-id", "value": { "type": "string", "value": "condense-run-7" } },
+        { "operation": "assert", "entity": "20000000-0000-0000-0000-000000000001", "attribute": ":vetch_condense_translation/member-count", "value": { "type": "integer", "value": 12 } },
+        { "operation": "assert", "entity": "20000000-0000-0000-0000-000000000001", "attribute": ":vetch_condense_translation/operation-id", "value": { "type": "string", "value": "condense-admit-fixture-v1" } },
+        { "operation": "retract", "entity": "20000000-0000-0000-0000-000000000002", "attribute": ":vetch_condense_translation_index/count", "value": { "type": "integer", "value": 4 } },
+        { "operation": "assert", "entity": "20000000-0000-0000-0000-000000000002", "attribute": ":vetch_condense_translation_index/count", "value": { "type": "integer", "value": 5 } },
+        { "operation": "assert", "entity": "20000000-0000-0000-0000-000000000002", "attribute": ":vetch_condense_translation_index/head", "value": { "type": "ref", "value": "20000000-0000-0000-0000-000000000001" } },
+        { "operation": "assert", "entity": "20000000-0000-0000-0000-000000000003", "attribute": ":vetch_canvas_commit/status", "value": { "type": "keyword", "value": ":committed" } }
+      ],
+      "proof": { "entity": "20000000-0000-0000-0000-000000000001", "attribute": ":vetch_condense_translation/operation-id", "expectedRows": 1 }
+    },
+    {
+      "id": "proposal.verdict",
+      "changes": [
+        { "operation": "retract", "entity": "30000000-0000-0000-0000-000000000001", "attribute": ":vetch_proposal/status", "value": { "type": "keyword", "value": ":open" } },
+        { "operation": "assert", "entity": "30000000-0000-0000-0000-000000000001", "attribute": ":vetch_proposal/status", "value": { "type": "keyword", "value": ":accepted" } },
+        { "operation": "assert", "entity": "30000000-0000-0000-0000-000000000002", "attribute": ":vetch_verdict/proposal", "value": { "type": "ref", "value": "30000000-0000-0000-0000-000000000001" } },
+        { "operation": "assert", "entity": "30000000-0000-0000-0000-000000000002", "attribute": ":vetch_verdict/outcome", "value": { "type": "keyword", "value": ":accepted" } },
+        { "operation": "assert", "entity": "30000000-0000-0000-0000-000000000003", "attribute": ":vetch_relation_admission/status", "value": { "type": "keyword", "value": ":accepted" } },
+        { "operation": "assert", "entity": "30000000-0000-0000-0000-000000000003", "attribute": ":vetch_relation_admission/relation", "value": { "type": "ref", "value": "30000000-0000-0000-0000-000000000004" } }
+      ],
+      "proof": { "entity": "30000000-0000-0000-0000-000000000002", "attribute": ":vetch_verdict/outcome", "expectedRows": 1 }
+    },
+    {
+      "id": "agent.brief",
+      "changes": [
+        { "operation": "assert", "entity": "40000000-0000-0000-0000-000000000001", "attribute": ":vetch_source/title", "value": { "type": "string", "value": "Bounded context source" } },
+        { "operation": "assert", "entity": "40000000-0000-0000-0000-000000000001", "attribute": ":vetch_source/space", "value": { "type": "ref", "value": "40000000-0000-0000-0000-000000000010" } },
+        { "operation": "assert", "entity": "40000000-0000-0000-0000-000000000002", "attribute": ":vetch_decision/source", "value": { "type": "ref", "value": "40000000-0000-0000-0000-000000000001" } },
+        { "operation": "assert", "entity": "40000000-0000-0000-0000-000000000002", "attribute": ":vetch_decision/status", "value": { "type": "keyword", "value": ":current" } },
+        { "operation": "assert", "entity": "40000000-0000-0000-0000-000000000003", "attribute": ":vetch_receipt/decision", "value": { "type": "ref", "value": "40000000-0000-0000-0000-000000000002" } },
+        { "operation": "assert", "entity": "40000000-0000-0000-0000-000000000003", "attribute": ":vetch_receipt/outcome", "value": { "type": "keyword", "value": ":observed" } }
+      ],
+      "proof": { "entity": "40000000-0000-0000-0000-000000000003", "attribute": ":vetch_receipt/outcome", "expectedRows": 1 }
+    }
+  ]
+}

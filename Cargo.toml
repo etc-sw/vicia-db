@@ -92,6 +92,11 @@ harness = false
 name = "vetch_cadence_benchmark"
 harness = false
 
+[[bench]]
+name = "vetch_ledger_caller_benchmark"
+harness = false
+required-features = ["bench-internals"]
+
 [[bin]]
 name = "pending-isolation-bench"
 path = "src/bin/pending_isolation_bench.rs"

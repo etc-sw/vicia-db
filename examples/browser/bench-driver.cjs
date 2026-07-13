@@ -20,6 +20,7 @@ try {
   puppeteer = require("puppeteer-core");
 }
 const { execFileSync } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -542,6 +543,54 @@ async function pagedMatrixMain() {
   console.log("pagedMatrix:", JSON.stringify(evidence));
 }
 
+async function ledgerCallerMain() {
+  const fixture = process.argv[3];
+  const samples = Number(process.argv[4] ?? 20);
+  if (!fixture || !Number.isInteger(samples) || samples < 1) {
+    console.error("usage: bench-driver.cjs ledger-caller <fixture-url-path> [samples]");
+    process.exit(1);
+  }
+  const evidence = await withPage(
+    async (page, browser) => {
+      await page.evaluate(() => window.benchReset());
+      await page.evaluate(() => window.benchReady());
+      const imported = JSON.parse(
+        await page.evaluate((url) => window.benchPagedImport(url), fixture),
+      );
+      const measured = await measureBrowserRss(browser, async () =>
+        JSON.parse(
+          await page.evaluate((count) => window.benchVetchLedgerCaller(count), samples),
+        ),
+      );
+      return { imported, measured };
+    },
+    { extraArgs: ["--js-flags=--expose-gc"], forwardConsole: true },
+  );
+  const receiptPath = process.env.VICIA_BENCH_RECEIPT;
+  if (receiptPath) {
+    const wasmPath = path.join(process.cwd(), "minigraf-wasm", "minigraf_bg.wasm");
+    fs.mkdirSync(path.dirname(receiptPath), { recursive: true });
+    fs.writeFileSync(receiptPath, JSON.stringify({
+      schema: "vicia.vetch-ledger-caller-browser-receipt.v1",
+      passed: true,
+      chrome: CHROME,
+      fixture,
+      samples,
+      provenance: {
+        sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        sourceDirty: execFileSync(
+          "git",
+          ["status", "--porcelain", "--untracked-files=no"],
+          { encoding: "utf8" },
+        ).trim().length > 0,
+        wasmSha256: crypto.createHash("sha256").update(fs.readFileSync(wasmPath)).digest("hex"),
+      },
+      evidence,
+    }, null, 2));
+  }
+  console.log("ledgerCaller:", JSON.stringify(evidence));
+}
+
 // Legacy A0 mode: import once, then measure open() in fresh browsers.
 async function openMain() {
   const fixture = process.argv[2];
@@ -550,6 +599,7 @@ async function openMain() {
     console.error(
         "usage: bench-driver.cjs <fixture-url-path|skip-import> [runs]\n" +
         "       bench-driver.cjs paged-matrix <fixture-url-path> [openRuns] [growthCycles]\n" +
+        "       bench-driver.cjs ledger-caller <fixture-url-path> [samples]\n" +
         "       bench-driver.cjs growth <cycles> <factsPerCycle> <sampleEvery> <fixture-url-path|empty> [reopenRuns]\n" +
         "       bench-driver.cjs maintained-growth <cycles> <factsPerCycle> <sampleEvery> <maintenanceEvery> <fixture-url-path|empty> [reopenRuns]\n" +
         "       bench-driver.cjs worker-smoke",
@@ -578,6 +628,8 @@ async function openMain() {
 let main;
 if (process.argv[2] === "paged-matrix") {
   main = pagedMatrixMain();
+} else if (process.argv[2] === "ledger-caller") {
+  main = ledgerCallerMain();
 } else if (process.argv[2] === "growth") {
   main = growthMain();
 } else if (process.argv[2] === "maintained-growth") {

@@ -45,6 +45,7 @@
 - ✅ 1 delta manifest recovery test (integration, Vetch delta storage — manifest recovery gate)
 - ✅ 1 header extension gate test (integration, Vetch delta storage — v10 extension module gate)
 - ✅ Agent-brief read-path benchmark harness (bench, Vetch Q1-A — current/as-of/prepared/export receipt-read surfaces; not counted as a test)
+- ✅ H0 Vetch ledger caller-contract harness (bench — four typed caller fixtures, exact atomic-write preparation timing, full-history/one-cursor proof, stale-verdict serialized rejection, multi-read cursor-mixing probe, native 10K/1M receipts, and real-Chrome IndexedDB stage receipt; not counted as a test)
 - ✅ `vicia.pending-isolation.v3` benchmark harness (bench — ID-only cursor isolation, canonical overlay ownership, per-index sorted-run bounds, peak decoded-WAL batch ownership, allocator trim, and post-drop RSS decomposition in a fresh child; not counted as a test)
 - ✅ Self-checking 1M paged-browser matrix harness (bench, Vetch A5-6d — import, fresh `openPaged` cold/warm probes, verified async export, 1,024-write threshold, maintenance reclaim, and post-maintenance reopen; not counted as a test)
 - ✅ 4 index corruption tests (integration, v11 public API — header/catalog corruption rejects open; exact fact/EAVT pages fail closed on first selective query)

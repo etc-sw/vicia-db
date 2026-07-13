@@ -14,6 +14,7 @@ case "$profile" in
       "vetch-cadence:vetch_cadence_benchmark:smoke"
       "delta-accumulation:delta_accumulation_benchmark:smoke"
       "agent-brief:agent_brief_read_path_benchmark:smoke"
+      "vetch-ledger-caller:vetch_ledger_caller_benchmark:smoke"
     )
     ;;
   full)
@@ -22,6 +23,7 @@ case "$profile" in
       "vetch-cadence:vetch_cadence_benchmark:full"
       "delta-accumulation:delta_accumulation_benchmark:full"
       "agent-brief:agent_brief_read_path_benchmark:full"
+      "vetch-ledger-caller:vetch_ledger_caller_benchmark:full"
     )
     ;;
   delta-mini)
@@ -70,8 +72,13 @@ for suite in "${suites[@]}"; do
   receipts+=("$receipt")
 
   echo "running: $label ($mode)"
-  VICIA_BENCH_RECEIPT="$receipt" \
-    cargo bench --bench "$bench" -- "$mode" >"$csv"
+  if [[ "$bench" == "vetch_ledger_caller_benchmark" ]]; then
+    VICIA_BENCH_RECEIPT="$receipt" \
+      cargo bench --features bench-internals --bench "$bench" -- "$mode" >"$csv"
+  else
+    VICIA_BENCH_RECEIPT="$receipt" \
+      cargo bench --bench "$bench" -- "$mode" >"$csv"
+  fi
   node scripts/check-benchmark-receipt.mjs "$receipt"
 done
 
