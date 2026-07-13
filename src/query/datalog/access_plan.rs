@@ -173,11 +173,18 @@ fn collect_lookups(clauses: &[WhereClause], lookups: &mut BTreeSet<QueryLookup>)
 
                 if let Some(entity) = bound_entity {
                     lookups.insert(QueryLookup::Entity(entity));
-                } else if let AttributeSpec::Real(EdnValue::Keyword(attribute)) = &pattern.attribute
-                {
-                    lookups.insert(QueryLookup::Attribute(attribute.clone()));
                 } else {
-                    return false;
+                    match &pattern.attribute {
+                        AttributeSpec::Real(EdnValue::Keyword(attribute)) => {
+                            lookups.insert(QueryLookup::Attribute(attribute.clone()));
+                        }
+                        // Pseudo attributes are derived from facts already
+                        // admitted by a real entity/attribute lookup. They do
+                        // not require another storage range and therefore must
+                        // not invalidate an otherwise selective plan.
+                        AttributeSpec::Pseudo(_) => {}
+                        AttributeSpec::Real(_) => return false,
+                    }
                 }
             }
             WhereClause::Not(inner) | WhereClause::NotJoin { clauses: inner, .. } => {
@@ -248,6 +255,22 @@ mod tests {
             QueryAccessPlan::for_query(&query),
             QueryAccessPlan::Selective {
                 lookups: vec![QueryLookup::Entity(alice)],
+            }
+        );
+    }
+
+    #[test]
+    fn pseudo_attribute_filter_preserves_real_attribute_seed() {
+        let query = parse_query(
+            "(query [:find ?e ?tx :where \
+             [?e :status \"committed\"] \
+             [?e :db/tx-count ?tx]])",
+        );
+
+        assert_eq!(
+            QueryAccessPlan::for_query(&query),
+            QueryAccessPlan::Selective {
+                lookups: vec![QueryLookup::Attribute(":status".to_string())],
             }
         );
     }
