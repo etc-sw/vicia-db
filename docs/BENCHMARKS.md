@@ -1700,6 +1700,16 @@ aggregate, so the performance receipt rejects rollout. The next measured slice
 is an allocation-free AEVT projection decoder inside this cursor, not a return
 to full-leaf materialization or a larger prefetch batch.
 
+The clean canonical storage-layout rerun at source `2efa2ac` validates and
+passes its mutation audit after the cursor change. Fill 90 keeps the exact
+269.586 MiB image and passes size, checkpoint (3,650.368/4,112.685 ms),
+aggregate (435.765/446.391 ms), and RSS gates. Its 0.01876 ms point p95 fails
+the receipt-owned regression threshold, while every other fill fails at least
+one size, checkpoint, or point gate. `selectedFillPercent` therefore remains
+`null`; the rerun is regression evidence, not rollout authority. Its receipt is
+preserved under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-leaf-cursor-full/`.
+
 Raw receipts are preserved under
 `benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/`.
 
