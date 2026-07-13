@@ -1361,10 +1361,8 @@ async fn open_persistent_storage(
 
     let header = crate::storage::FileHeader::from_bytes(&page0)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION
-        && header.version <= crate::storage::FORMAT_VERSION
-    {
-        match open_v11_sparse_storage(idb, page0).await {
+    if header.version == crate::storage::FORMAT_VERSION {
+        match open_current_sparse_storage(idb, page0).await {
             Ok(mut pfs) => {
                 if mode == BrowserOpenMode::EagerCompatibility {
                     prefetch_eager_compatibility_pages(idb, &mut pfs).await?;
@@ -1384,7 +1382,7 @@ async fn open_persistent_storage(
     open_eager_or_migrate_storage(idb, mode).await
 }
 
-async fn open_v11_sparse_storage(
+async fn open_current_sparse_storage(
     idb: &IndexedDbBackend,
     page0: Vec<u8>,
 ) -> Result<PersistentFactStorage<BrowserBufferBackend>, JsValue> {
@@ -1440,6 +1438,16 @@ async fn open_eager_or_migrate_storage(
     let buffer = BrowserBufferBackend::load_pages(existing);
     let mut pfs = PersistentFactStorage::new(buffer, 256)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    pfs.with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if mode.is_paged() {
+        // A previous compatible format can be read eagerly, but its index nodes do
+        // not satisfy the current sparse decoder. Recompact it once while the
+        // complete image is resident, then atomically publish the replacement
+        // pages before exposing a bounded paged handle.
+        pfs.run_idle_delta_maintenance()
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    }
     let declared_page_count = pfs
         .with_backend_mut(BrowserBufferBackend::retain_declared_prefix)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -1719,6 +1727,37 @@ mod tests {
             .export_graph()
             .expect("export sparse fixture")
             .to_vec()
+    }
+
+    fn downgrade_current_fixture_to_v11(bytes: &mut [u8]) {
+        let page0 = bytes
+            .get(..crate::storage::PAGE_SIZE)
+            .expect("fixture must contain page 0");
+        let mut header =
+            crate::storage::FileHeader::from_bytes(page0).expect("read current fixture header");
+        let extension = crate::storage::header_extension::HeaderExtension::read_from_page0(
+            header.version,
+            page0,
+        )
+        .expect("read current fixture extension")
+        .expect("current fixture must contain an extension");
+        header.version = crate::storage::INTEGRITY_FORMAT_VERSION;
+        header.header_checksum = crate::storage::persistent_facts::compute_header_checksum(&header);
+        let extension = crate::storage::header_extension::HeaderExtension::new(
+            extension.primary(),
+            extension.secondary(),
+        )
+        .with_base_fact_page_start(extension.base_fact_page_start())
+        .expect("retain v11 base fact page start")
+        .with_base_integrity(extension.base_integrity())
+        .expect("retain v11 base integrity");
+        let v11_page0 =
+            crate::storage::header_extension::build_header_page_with_extension(header, extension)
+                .expect("build v11 fixture header");
+        bytes
+            .get_mut(..crate::storage::PAGE_SIZE)
+            .expect("fixture must contain mutable page 0")
+            .copy_from_slice(&v11_page0);
     }
 
     fn page_map_version(pages: &std::collections::HashMap<u64, Vec<u8>>) -> u32 {
@@ -2638,6 +2677,44 @@ mod tests {
             .load_all_pages()
             .await
             .expect("load paged migration image");
+        assert_eq!(page_map_version(&durable), crate::storage::FORMAT_VERSION);
+    }
+
+    #[wasm_bindgen_test]
+    async fn open_paged_migrates_complete_v11_then_returns_sparse() {
+        let db_name = format!("vicia-open-paged-v11-migration-{}", js_sys::Date::now());
+        let mut bytes = build_sparse_v11_fixture(240).await;
+        downgrade_current_fixture_to_v11(&mut bytes);
+        let seed = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open v11 migration seed");
+        seed.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed complete v11 fixture");
+
+        let db = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("complete v11 image must upgrade before sparse return");
+        {
+            let inner = db.inner.borrow();
+            assert!(inner.paged);
+            inner
+                .pfs
+                .with_backend(|backend| assert!(backend.is_sparse()));
+        }
+        let query = db
+            .execute("(query [:find ?value :where [:sparse/target :sparse/value ?value]])".into())
+            .await
+            .expect("query migrated v11 fixture");
+        let query: serde_json::Value =
+            serde_json::from_str(&query).expect("migrated v11 query JSON");
+        assert_eq!(query["results"], serde_json::json!([[120]]));
+        let durable = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("inspect v11 migration")
+            .load_all_pages()
+            .await
+            .expect("load migrated v11 image");
         assert_eq!(page_map_version(&durable), crate::storage::FORMAT_VERSION);
     }
 
