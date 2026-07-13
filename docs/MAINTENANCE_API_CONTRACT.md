@@ -148,7 +148,7 @@ Recommended Vetch policy:
 6. In the browser, run the O(total-history) rebuild in a disposable worker,
    reserve quota headroom for the old and candidate images during atomic
    replacement, post an outcome, terminate after either result, and reopen
-   through `openPaged()`.
+   `BrowserInteractiveLedger`.
 
 Forbidden policy:
 
@@ -194,10 +194,11 @@ termination and not a general device-memory floor. A legacy v10 database's
 first `openPaged()` also follows an O(total) migration path and uses the same
 worker lifecycle during Vetch cutover.
 
-Vetch `1b57689` supplies the browser caller evidence: it observes maintenance
+Vetch `b3a1107` supplies the browser caller evidence: it observes maintenance
 advice centrally, schedules soft and hard idle demand outside the foreground
-operation, acquires the same Web Lock in a disposable worker, posts a truthful
-outcome, terminates after success or failure, and reopens through `openPaged()`.
+operation, acquires the same Web Lock in a disposable worker, opens
+`BrowserMaintenanceLedger`, posts a truthful outcome, terminates after success
+or failure, and reopens `BrowserInteractiveLedger`.
 
 Future native and final-cutover integration should add evidence that:
 

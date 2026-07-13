@@ -2,35 +2,35 @@
 
 Per-backend durability semantics (gap G13) and the browser caller rules from
 slice A5 of `docs/APP_ADOPTION_GAP_PLAN.md`. This is the authority for what
-`execute` / `executeAtomic` / `checkpoint` / `backup_to` /
-`exportGraphAsync` / `importGraph` / `importGraphForPagedAccess` /
-`runIdleMaintenance` guarantee **at the moment they return**, per backend,
-and for the rules a browser caller must follow because of those semantics. The
+capability-scoped foreground and maintenance operations guarantee **at the
+moment they return**, per backend. Raw `Minigraf` and `BrowserDb` methods retain
+the same underlying durability semantics for 1.x compatibility. The
 session-protocol view of the same facts (the
 `durability` field on result frames) is `docs/SESSION_PROTOCOL.md`
 "Durability classification"; the two documents must not diverge.
 
 Backends covered:
 
-- **Native file-backed** — `Minigraf::open("path.graph")`: single `.graph`
-  file + WAL sidecar. What harrekki runs.
-- **Browser** — eager-compatible `BrowserDb.open(dbName)` or bounded-v11
-  `BrowserDb.openPaged(dbName)` (wasm): IndexedDB-backed, write-through, no
-  WAL. Vetch main `1b57689` uses the paged path for foreground authority.
-- In-memory databases (native `Minigraf::new()`, browser
-  `BrowserDb.openInMemory()`) have **no durability**; nothing below
+- **Native file-backed** — `InteractiveLedger::open("path.graph")` for
+  foreground work and `MaintenanceLedger::open("path.graph")` for an explicit
+  idle lifetime: single `.graph` file + WAL sidecar. `Minigraf::open()` remains
+  the raw 1.x compatibility surface.
+- **Browser** — `BrowserInteractiveLedger.open(dbName)` for paged foreground
+  work and `BrowserMaintenanceLedger.open(dbName)` in a disposable worker:
+  IndexedDB-backed, write-through, no WAL. `BrowserDb` remains the raw 1.x
+  compatibility surface.
+- In-memory capability or raw handles have **no durability**; nothing below
   applies to them.
 
 ## 1. What returns mean, per backend
 
 | Event | Native file-backed | Browser (IndexedDB) |
 | --- | --- | --- |
-| `execute` (write) returns Ok | Facts are in the WAL (**fsynced**) and in memory. Survives kill -9 / power loss via replay. = `applied`. | All dirty pages committed in **one** IndexedDB readwrite transaction. Survives tab close and browser crash; **not** guaranteed against power loss / OS crash (see below). No WAL tier exists. |
-| `BrowserDb.executeAtomic(commands)` returns Ok | Not exposed; native callers use one `transact` or `retract` command per WAL transaction. | Every command was parsed and materialized before mutation; all facts share one `tx_id` / `tx_count`, and the exact dirty-page set committed in **one** IndexedDB readwrite transaction. |
+| Foreground write returns Ok | `InteractiveLedger::execute_write` facts are in the WAL (**fsynced**) and in memory. Survives kill -9 / power loss via replay. = `applied`. | `BrowserInteractiveLedger.executeAtomic(commands)` committed the exact dirty-page set in **one** IndexedDB readwrite transaction. Survives tab close and browser crash; **not** guaranteed against power loss / OS crash (see below). |
 | `checkpoint()` returns Ok | Committed image durable (data synced before the header publish), WAL retired. = `published`. | Same flush as `execute`'s write-through; only needed after bulk operations. |
 | `backup_to()` / session `backup` returns Ok | Source checkpoint complete; a fresh independent destination contains exactly returned `tx_count`, is fsynced, and was atomically published without overwrite while the same write lock remained held. | Not applicable; browser portability uses atomic export/import. |
 | idle maintenance returns Ok | Pending writes are checkpointed first; threshold delta may be copy-on-write recompacted. | Threshold delta was either healthy (`noop`) or rebuilt as a fresh contiguous graph and atomically replaced in IndexedDB. |
-| Handle drop / tab close | Best-effort checkpoint on `Drop` (errors swallowed). Un-checkpointed WAL replays on next open. | Whatever the last committed IndexedDB transaction wrote. Nothing in flight survives partially (single tx). |
+| Handle drop / tab close | `InteractiveLedger` performs no hidden checkpoint; its WAL replays when maintenance or foreground work reopens. Raw `Minigraf` retains its best-effort drop checkpoint. | Whatever the last committed IndexedDB transaction wrote. Nothing in flight survives partially (single tx). |
 | Crash mid-write | The in-flight entry has a bad CRC32 and is discarded on replay; every *acknowledged* write survives. | The in-flight IndexedDB transaction rolls back whole; reopen shows the previous consistent state. |
 
 ### Native: WAL-first
@@ -202,31 +202,32 @@ Derived from the semantics above plus the A5 growth measurements
    of the native `.graph.lock`; two tabs opening the same DB name are two
    independent in-memory stores. Exact page-0 comparison now makes the stale
    writer reject instead of interleaving generations, but it is a safety
-   boundary, not a work scheduler or retry protocol. `BrowserDb` does not (and
-   by design will not) choose which tab owns writes; single-writer discipline
-   remains caller policy. Wrap every writing handle's
+   boundary, not a work scheduler or retry protocol. Vicia does not choose
+   which tab owns writes; single-writer discipline remains caller policy. Wrap
+   every writing handle's
    lifetime in a Web Lock, which the browser releases automatically when
    the tab dies (unlike a lock file):
 
    ```js
-   await navigator.locks.request(`vicia:${dbName}`, async (lock) => {
-     const db = await BrowserDb.openPaged(dbName);
-     // ... entire writing session while the lock is held ...
+   await navigator.locks.request(`vicia:${dbName}`, async () => {
+     const ledger = await BrowserInteractiveLedger.open(dbName);
+     try {
+       // ... bounded reads and executeAtomic while the lock is held ...
+     } finally {
+       ledger.free();
+     }
    });
    ```
 
-   Read-only tabs that never call `execute` with writes / `importGraph`
-   can open without the lock. Eager `open()` sees the snapshot loaded at open
-   time. `openPaged()` keeps already resident pages on that old snapshot and
-   rejects the next IndexedDB miss after another handle publishes, so it never
-   combines generations; reopen on that stale-authority error.
+   Read-only callers can open an interactive capability without the lock if
+   they never write. A paged handle that observes another published generation
+   rejects instead of mixing generations; reopen on that stale-authority error.
 
-2. **Batch, then debounce.** Between maintenance windows every write
-   `execute()` appends a delta segment and rewrites the manifest, so
-   per-commit latency rises with segment count. Therefore: put same-kind facts
-   in one `transact` or `retract` command; when one authority transition
-   needs both kinds, use one bounded `executeAtomic` call. Both forms produce
-   one `tx_count`, one segment, and one IndexedDB transaction. Debounce
+2. **Batch, then debounce.** Between maintenance windows every interactive
+   write appends a delta segment and rewrites the manifest, so per-commit
+   latency rises with segment count. Put same-kind facts in one command and
+   put one logical mixed transition in one bounded `executeAtomic` call. It
+   produces one `tx_count`, one segment, and one IndexedDB transaction. Debounce
    high-frequency sources app-side — commit on gesture end, never per frame.
    Successful write results expose `maintenance_pending` and `advice`; use
    those fields instead of guessing from commit count.
@@ -234,12 +235,13 @@ Derived from the semantics above plus the A5 growth measurements
 3. **Give O(total) browser work a disposable worker lifetime.** React to write
    advice at startup/import/slice/idle boundaries. End use of the foreground
    handle, launch a DedicatedWorker that acquires the same caller-owned Web
-   Lock, opens with `openPaged()`, calls `runIdleMaintenance()`, posts its
-   outcome, and terminates after either success or failure. The next foreground
-   operation reopens through `openPaged()`. Maintenance no-ops below threshold
+   Lock, opens `BrowserMaintenanceLedger`, performs one maintenance or
+   portability operation, posts its outcome, and terminates after success or
+   failure. The next foreground operation reopens
+   `BrowserInteractiveLedger`. Maintenance no-ops below threshold
    and atomically reclaims superseded page records after soft/hard pressure.
-   Initial import, `exportGraphAsync()`, and the first `openPaged()` of a legacy
-   v10 database use the same disposable-worker rule. That migration temporarily
+   Strict import, verified export, and the first paged open of a legacy v10
+   database use the same disposable-worker rule. That migration temporarily
    loads the legacy published image before committing v11.
    The 100K maintained-growth gate proves repeated reclaim and latency reset;
    `bench-driver.cjs worker-smoke` proves the binding works in a real module
@@ -248,8 +250,8 @@ Derived from the semantics above plus the A5 growth measurements
    200 ms sampled process-tree PSS. Export retains 1.04 GiB and maintenance
    retains 1.27 GiB when the call returns; the harness then closes the browser
    process. A long-lived authority worker is therefore not the intended
-   reclamation boundary. Vetch main `1b57689` implements this exact boundary
-   against clean Vicia `e60a7c2`: foreground `openPaged()`, one shared Web
-   Lock, bounded `executeAtomic` authority publications, disposable
+   reclamation boundary. Vetch main `b3a1107` implements this exact boundary
+   against clean Vicia `c958ea3`: foreground `BrowserInteractiveLedger`, one
+   shared Web Lock, bounded `executeAtomic` authority publications, disposable
    migration/import/export/maintenance, outcome receipts, worker termination,
    and fresh reopen. Its real-Chrome caller smoke closes Gate E.

@@ -1701,7 +1701,7 @@ When evaluating features, ask:
 - ✅ Optimizer & Benchmarks — predicate push-down, cost-based ordering, SIMD analysis (#205–#207, #229)
 - ✅ Reliability — WAL fault injection, migration matrix, index corruption resilience, XTDB/Datomic compat, coverage gates (#209, #210, #212–#217, #219–#221)
 - ✅ Vetch adoption — exact 128-entity reads, browser mixed-write atomicity, paged browser/native Gate E, and the external 1M/1,024-slice Gate D cadence with incremental resident delta checkpoints
-- ✅ Vetch high-level ledger H2/H3 — bounded transaction-pinned typed reads with generation-time row/work budgets plus capability-scoped interactive and explicit-only maintenance checkpoint handles on native and browser paths
+- ✅ Vetch high-level ledger H2/H3/H5 — bounded transaction-pinned typed reads, capability-scoped interactive and explicit-only maintenance handles, Vetch adoption, executable browser migration, and a replacement-first 2.0 compatibility policy
 - ✅ Deferred Features — #180, #181, #182, #183 tagged milestone 2.0; #187 closed; #201 deferred to 2.0
 - ✅ #231 Repo Split — Python, Node, WASM, Java, Android, Swift, C all in separate repos under [project-minigraf](https://github.com/project-minigraf)
 - ✅ Documentation — cookbook (#190), perf tuning guide (#191), error message guide (#192)

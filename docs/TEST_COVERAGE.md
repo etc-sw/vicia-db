@@ -164,6 +164,7 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 
 **Phase 8.1a Features** (browser WASM, complete):
 - ✅ `BrowserDb` public API: `open_in_memory`, eager-compatible `open`, bounded `open_paged`, `execute`, `checkpoint`, `run_idle_maintenance`, synchronous `export_graph`, verified `export_graph_async`, recovery-compatible `import_graph`, strict `import_graph_for_paged_access`
+- ✅ capability-scoped browser API: `BrowserInteractiveLedger` atomic writes and bounded read views; `BrowserMaintenanceLedger` maintenance, verified export, and strict import; executable real-Chrome example proves Web-Locked worker separation, round-trip reopen, and worker termination
 - ✅ `BrowserBufferBackend` — `StorageBackend` over either a complete resident image or a sparse logical image with pinned authority metadata, bounded clean-page residency, and typed page demands; both preserve native `.graph` page bytes
 - ✅ `IndexedDbBackend` — page-granular async IndexedDB source with batched exact-range reads and exact page-0 compare-and-swap authority; no browser-only schema key
 - ✅ `wasm-pack` build generating `minigraf-wasm/` with JS glue and TypeScript `.d.ts`

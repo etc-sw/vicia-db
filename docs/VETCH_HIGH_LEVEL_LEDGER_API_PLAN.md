@@ -3,13 +3,14 @@
 Status: H0 measurement, H2 bounded transaction-pinned current reads, and H3
 interactive/maintenance capability separation completed on 2026-07-13. The
 typed commit facade remains deferred because it is not a current Vetch blocker.
-H4 remains conditional on measured projection-refresh evidence. H5-A Vetch
-capability adoption completed on 2026-07-14; public example and raw API
-compatibility guidance remains as H5-B.
+H4 remains conditional on measured projection-refresh evidence. H5 capability
+adoption, executable examples, and replacement-first compatibility guidance
+completed on 2026-07-14.
 
 Related authority:
 
 - `docs/VETCH_CALLER_REQUIREMENTS.md`
+- `docs/API_COMPATIBILITY_AND_MIGRATION.md`
 - `docs/DURABILITY_AND_CALLER_RULES.md`
 - `docs/VETCH_DELTA_STORAGE_ROADMAP.md`
 - `docs/BENCHMARKS.md`
@@ -689,13 +690,26 @@ H5-A deliberately preserves the raw `Minigraf` and `BrowserDb` compatibility
 surfaces. Their long-term support statement and public migration examples are
 H5-B; they are not a condition for Vetch to use the safer capability boundary.
 
-- Update browser/native examples to use the high-level facade for ordinary
-  work.
-- Publish exact migration examples from raw calls.
-- Record which raw APIs remain supported and for how long.
-- Update `README.md`, `CHANGELOG.md`, `ROADMAP.md`, `docs/TEST_COVERAGE.md`, and
-  API references only when an implementation phase actually lands.
-- Do not couple this adoption to the Vicia rename or file-format work.
+#### H5-B — Executable migration and compatibility policy
+
+Status: complete on 2026-07-14.
+
+The canonical browser example now executes the same capability split used by
+Vetch. Foreground atomic write and bounded read work stays inside
+`BrowserInteractiveLedger`; idle maintenance, verified export, and strict
+import each use a fresh `BrowserMaintenanceLedger` module worker under the same
+Web Lock. A real-Chrome receipt proves Bob's foreground lookup, a complete
+export, strict import into a second database, Alice/Bob after reopen, and zero
+remaining workers.
+
+`docs/API_COMPATIBILITY_AND_MIGRATION.md` is the single migration and support
+authority. `Minigraf` and `BrowserDb` remain supported throughout 1.x. A raw
+method may be removed only in 2.0, after exact capability replacement and
+migration evidence exist, and no earlier than twelve months after a published
+method-specific removal notice. Advanced rules, prepared queries, UDFs,
+semantic `forget`, REPL dispatch, eager recovery, and fixture construction keep
+the raw types blocking because no capability replacement exists. H5-B adds no
+deprecation attribute, API break, file-format change, or Vicia rename work.
 
 ## Vetch Integration Sequence
 
