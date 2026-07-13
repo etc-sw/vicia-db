@@ -1676,6 +1676,41 @@ just checkpoint-construction-smoke
 just checkpoint-construction-full
 ```
 
+### Restart-aware leaf read path
+
+`vicia.leaf-read-path.v1` compares the former full-leaf materialization path
+with the page-backed raw/prefix cursor on one byte-identical fill-90 v12 1M
+fixture. Point samples measure warmed 200-query batches in a fresh process;
+aggregate samples run in a separate fresh process. Diagnostics run as one
+explicit probe query so per-entry counters do not distort the timed samples.
+
+| Metric | Full-leaf baseline | Page-backed cursor | Gate |
+|---|---:|---:|---:|
+| Point batch p95 | 0.02050 ms | 0.01087 ms | pass (`<= 0.050 ms`, no regression) |
+| Aggregate p50 | 432.492 ms | 419.073 ms | fail (3.10%, requires 10% or `<= 230 ms`) |
+| Aggregate p95/p50 | 102.75% | 101.87% | pass (`<= 115%`) |
+| Query RSS delta | 1.125 MiB | 1.125 MiB | pass (`<= baseline + 2 MiB`) |
+| Peak full-leaf entries / struct bytes / payload bytes | 60 / 7,200 / 4,020 | 0 / 0 / 0 | pass |
+
+The cursor is retained as the durable traversal boundary: it removes leaf-local
+result ownership, cuts selective point latency, preserves exact
+1,000,000/499,999,500,000 count/checksum, and bounds prefix resume work to a
+restart block. It does not avoid deserializing all 1M `AevtKey` values for an
+aggregate, so the performance receipt rejects rollout. The next measured slice
+is an allocation-free AEVT projection decoder inside this cursor, not a return
+to full-leaf materialization or a larger prefetch batch.
+
+Raw receipts are preserved under
+`benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/`.
+
+```bash
+just leaf-read-path-smoke
+just leaf-read-path-full
+just leaf-read-path-compare \
+  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/baseline.json \
+  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/candidate.json
+```
+
 ---
 
 ## Reproducing
