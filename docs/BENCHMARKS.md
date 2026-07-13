@@ -1584,6 +1584,26 @@ V12 therefore remains unmerged and Vetch keeps its v11 browser package. The
 canonical uncontended evidence is retained under
 `benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-prefix-uncontended-full/receipt.json`.
 
+The checkpoint construction follow-up removes three general empty-base costs:
+it serializes borrowed pending keys instead of cloning attribute/value buffers,
+reuses exact EAVT fact-position order for AEVT when every fact has one
+attribute, and serializes standalone separator keys only for the first entry of
+each leaf. At source `2526307`, clean fill-90 checkpoint p50/p95 falls to
+3,633.534/3,963.193 ms, 28.5%/35.3% below the uncontended v12 receipt, and the
+p95/p50 ratio is 109.07%. Checkpoint RSS p50 remains 279.750 MiB, graph bytes
+remain 269.586 MiB, and count/checksum remain exactly
+1,000,000/499,999,500,000.
+
+That receipt validates and its mutation audit passes, but does not select a
+fill candidate. A separately owned Vetch TypeGPU QA process began during the
+run and overlapped the query phase; fill-90 point p95 rose to 0.052 ms and
+aggregate p95/p50 to 119.51%, while both gates passed in the two preceding clean
+v12 receipts. The checkpoint-tail objective is closed without relaxing its
+rule, but package rollout still requires one uncontended full receipt with all
+receipt-owned gates plus real-browser WASM execution. Evidence is retained
+under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-lazy-separator-full/receipt.json`.
+
 The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
