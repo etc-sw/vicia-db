@@ -35,6 +35,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [ ] Roll out file format v12 adaptive prefix leaves. The implementation keeps raw leaves when compression loses, uses restart-16 prefix leaves for repeated AEVT/AVET keys, reads v11 without rewriting it, preserves v11 foreground delta checkpoints, and upgrades only through idle COW maintenance. Borrowed initial-build keys, uniform-attribute EAVT/AEVT order reuse, and leaf-first-key-only separator serialization reduce the final uncontended fill-90 checkpoint to 3,775.192/4,256.684 ms p50/p95; its 112.75% tail and the 111.99% aggregate tail pass while the image remains 269.586 MiB and exact count/checksum remain 1,000,000/499,999,500,000. Rollout remains open because the 0.0268/0.0571 ms point-read p50/p95 fails its gate; no candidate was selected.
 - [x] Replace full-leaf read materialization with a restart-aware page-backed cursor. Raw leaves use slot-directory binary search; prefix leaves binary-search restart-16 records and reconstruct only the selected block before continuing one entry at a time. The clean 1M receipt reduces point batch p95 from 0.02050 to 0.01087 ms, keeps RSS delta unchanged at 1.125 MiB, and records zero full-leaf `Vec` entries/bytes. Aggregate p50 improves only 3.10%, from 432.492 to 419.073 ms, so this slice does not authorize v12 rollout.
 - [x] Decode current-attribute AEVT entries as borrowed postcard projections. The clean 1M receipt emits exactly 1,000,000 projected entries, decodes zero owned `AevtKey`s in the projected stream, keeps all full-leaf materialization metrics at zero, and holds RSS delta to 1.250 MiB. Diagnostic projection decode time improves 25.27% (177.422 to 132.585 ms), but aggregate p50 improves only 1.28% (419.073 to 413.713 ms), below the 10%/230 ms gate. Point p95 is 0.01584 ms: below the absolute 0.050 ms limit but above the recorded 0.01087 ms cursor receipt even though the point probe never enters the projection path. Retain the durable projection; keep v12 rollout open.
+- [x] Attribute current-read phases and repair the measured reducer. The diagnostic-only 1M probe assigns 22.84% of query time to `reduce_current_entry`; the accepted repair reuses one inline value/window state and promotes to the existing map only for multi-value entities. The clean same-fixture receipt reduces aggregate p50 from 355.045 to 282.403 ms (20.46%), keeps p95/p50 at 102.82%, improves point p95 from 0.01496 to 0.01363 ms, holds query RSS to 1.250 MiB, and retains exactly 1,000,000 projected entries with zero owned AEVT decode or full-leaf materialization. The clean storage-layout rerun and mutation audit pass structurally, but no high-fill candidate passes every rollout gate, so v12 and Vetch package rollout remain open.
 
 ## Regression gates
 
@@ -45,51 +46,20 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-### Slice: current-read phase attribution and one measured repair
+### Slice: isolate the remaining v12 rollout variance
 
-This is a direct risk probe inside the v12 current-read rollout. The product
-boundary remains the selected-attribute current-view pipeline: page-backed AEVT
-projection -> temporal reducer -> entity flush -> typed aggregate sink. It does
-not admit a new query API, change-feed, cache, file encoding, or Vetch-owned
-projection authority.
-
-1. Add repository-only phase diagnostics without contaminating timed samples.
-   Reuse the existing explicit diagnostic-query toggle so `Instant` sampling is
-   disabled during the 20 performance samples and enabled only for the separate
-   receipt probe. Record:
-   - total committed merge/visit time;
-   - `reduce_current_entry` time and accepted-entry count;
-   - entity-flush preparation time and flush count, excluding the visitor;
-   - visitor time and emitted-value count, which is the typed aggregate push for
-     this workload;
-   - aggregate finish/projection time after the cursor completes.
-   Keep the existing raw/prefix projection decode timers so the receipt can
-   derive the remaining page traversal, merge, and comparison share rather than
-   double-count nested phases.
-2. Extend `vicia.leaf-read-path.v1` additively. Put the cursor and aggregate
-   phase counters under the aggregate diagnostic section, preserve fixture
-   provenance, and make the validator reject missing/non-finite phases,
-   accepted/emitted count drift, owned projected AEVT decode, or any return of
-   full-leaf materialization. Add focused tests proving that disabled timing
-   remains zero and enabled timing preserves exact count `1,000,000` and
-   checksum `499999500000`.
-3. Run smoke, then one clean 1M full receipt against the current projected
-   cursor receipt. Rank phases by exclusive elapsed time and choose exactly one
-   production repair only when it owns at least 10% of diagnostic query time or
-   explains at least half of the gap to the `230 ms` target. The repair must
-   stay inside the existing borrowed cursor/reducer/sink boundary and keep
-   v11/v12 bytes and Datalog/bi-temporal semantics unchanged.
-4. Verify the chosen repair with targeted reducer/aggregate/corruption tests,
-   `cargo test`, `cargo fmt -- --check`, `cargo clippy --lib -- -D warnings`,
-   the browser WASM check, and the same leaf-read smoke/full receipt. Accept it
-   only if aggregate p50 is `<= 230 ms` or improves by at least 10%, aggregate
-   p95 is `<= 115%` of p50, point batch p95 is `<= 0.050 ms` and no worse than
-   the current cursor receipt, query RSS grows by no more than `2 MiB`, and all
-   structural zero-allocation counters remain green.
-
-Stop after attribution without a production change when no phase meets the
-ownership threshold; record the measured distribution and name the next probe.
-If semantics, corruption handling, point latency, or RSS regresses, reject the
-repair and keep v12 rollout open. Only after every gate passes should the
-storage-layout and real-Chrome suites run and the complete Vetch browser package
-be replaced; never replace only the `.wasm` binary.
+- Keep the accepted inline reducer and stop current-read aggregate tuning; its
+  dedicated leaf-read gate is closed.
+- Use the clean storage-layout receipt's per-sample checkpoint phase counters
+  and rotated execution order to determine whether the fill-90/95/100 tail is
+  owned by fact/index construction, sync, integrity catalog work, or host I/O
+  outliers. Separately inspect point samples because the leaf-read point gate
+  passes while the cross-fill relative gate does not.
+- Admit one further implementation only if the same production phase explains
+  the failure across high-fill candidates. Do not relax the 115% tail or 20%
+  point-regression gates, rerun until green, change v12 bytes, or add an API,
+  cache, prefetch layer, or dependency to mask variance.
+- Keep `selectedFillPercent = null`, production fill 75, and the current Vetch
+  browser package until one clean mutation-audited full receipt passes every
+  storage-layout gate. Replace the complete package only after that receipt and
+  another real-Chrome pass.

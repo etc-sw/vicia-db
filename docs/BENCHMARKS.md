@@ -1740,12 +1740,55 @@ canonical storage-layout evidence is replaced from this receipt.
 The clean projection receipts are preserved under
 `benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/`.
 
+The next clean receipt adds diagnostic-only phase timing. Timers are disabled
+for the 20 performance samples and enabled only for a separate probe query, so
+the probe can attribute nested work without changing the candidate samples.
+The 1M baseline probe records 495.124 ms total: postcard projection decode is
+119.247 ms, current-entry reduction is 113.110 ms (22.84%), entity-flush
+preparation is 30.738 ms, typed aggregate visitor work is 42.405 ms, and
+aggregate finish/projection is 0.007 ms. Reduction therefore passes the 10%
+ownership threshold for one production repair.
+
+`CurrentAttributeValues` now retains one reusable inline value/state for the
+common one-value entity and promotes to the existing hash-map reducer only when
+an entity actually has multiple encoded values. This removes repeated outer
+map construction and reuses the inner temporal-window allocation without
+changing scoped/unscoped retraction, valid-time, Float resolution, or Ref
+semantics.
+
+| Metric | Phase-attribution baseline | Inline reducer | Gate |
+|---|---:|---:|---:|
+| Point batch p95 | 0.01496 ms | 0.01363 ms | pass (`<= 0.050 ms`, no regression) |
+| Aggregate p50 | 355.045 ms | 282.403 ms | pass (20.46% improvement) |
+| Aggregate p95/p50 | 102.45% | 102.82% | pass (`<= 115%`) |
+| Query RSS delta | 1.125 MiB | 1.250 MiB | pass (`<= baseline + 2 MiB`) |
+| Reducer diagnostic time | 113.110 ms | 47.350 ms | 58.14% reduction |
+| Projected emitted / owned AEVT decode | 1,000,000 / 0 | 1,000,000 / 0 | pass |
+| Peak full-leaf entries / struct bytes / payload bytes | 0 / 0 / 0 | 0 / 0 / 0 | pass |
+
+The leaf-read candidate passes its performance gate and all 924 non-ignored
+library tests plus the integration/doc suites, the browser WASM check, clippy,
+and the real Chrome 74-test suite.
+The follow-up clean `vicia.storage-layout.v2` full receipt remains valid and
+mutation-audited, but selects no v12 fill. Fill 90 keeps the 269.586 MiB image
+and 286.349 ms aggregate p50, while its checkpoint p95/p50 is 122.20%, point
+p50/p95 is 0.01821/0.03552 ms relative to fill 75's 0.01373/0.02028 ms, and
+aggregate p95/p50 is 119.61%; those receipt-owned gates fail. Every other
+high-fill candidate also fails at least one size, checkpoint-tail, point, or
+aggregate-tail gate. v12 rollout therefore stays open and the Vetch browser
+package is not replaced.
+
+The clean leaf receipts are preserved under
+`benchmarks/baselines/leaf-read-path/2026-07-14-hal7800-inline-reducer-full/`;
+the storage-layout receipt is preserved under
+`benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/`.
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full
 just leaf-read-path-compare \
-  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/baseline.json \
-  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/candidate.json
+  benchmarks/baselines/leaf-read-path/2026-07-14-hal7800-inline-reducer-full/baseline.json \
+  benchmarks/baselines/leaf-read-path/2026-07-14-hal7800-inline-reducer-full/candidate.json
 ```
 
 ### H0 Vetch ledger caller contract
