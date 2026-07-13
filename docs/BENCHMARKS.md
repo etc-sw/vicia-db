@@ -1566,6 +1566,24 @@ foreground open and delta checkpoint do not rewrite it, and only caller-schedule
 idle COW maintenance publishes v12. Raw evidence is retained under
 `benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-prefix-full/receipt.json`.
 
+An uncontended follow-up at source `144b36b` terminated the two identified
+21–24-hour stale Vetch Playwright process trees before measurement and ran no
+other heavy work alongside the benchmark. Fill 90 again produced the exact
+269.586 MiB image and 1,000,000/499,999,500,000 result. Against the v11
+reference-sort receipt, point p50 improves 6.35% (0.026979 to 0.025266 ms),
+aggregate p50 improves 9.08% (489.099 to 444.675 ms), checkpoint p50 changes
+by +1.32% (5,013.869 to 5,079.803 ms), and checkpoint RSS p50 falls 0.625 MiB.
+Aggregate p95/p50 is now 106.96%, but checkpoint remains outside the rollout
+gate at 6,127.321/5,079.803 ms, or 120.62%.
+
+The two slow checkpoint samples raise EAVT/AEVT collect-sort and multiple index
+build phases together; they do not isolate prefix encode/decode or publication
+sync as a single cause. In the same rotated run, fill 75, 85, and 100 meet the
+checkpoint tail rule, while no candidate passes every receipt-owned gate.
+V12 therefore remains unmerged and Vetch keeps its v11 browser package. The
+canonical uncontended evidence is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-prefix-uncontended-full/receipt.json`.
+
 The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
