@@ -4,7 +4,7 @@ use crate::graph::types::{
     Value, tx_id_now,
 };
 use crate::query::datalog::types::AsOf;
-use crate::storage::index::{AevtKey, FactRef, encode_value};
+use crate::storage::index::{AevtKey, CurrentAevtEntryRef, FactRef, encode_value};
 use anyhow::Result;
 #[cfg(any(test, feature = "bench-internals"))]
 use std::sync::Mutex;
@@ -1333,6 +1333,7 @@ impl FactStorage {
             );
         }
         let mut processed = 0usize;
+        let bounded = max_entries != usize::MAX;
 
         let flush_entity = |cursor: &mut CurrentAttributeCursor,
                             visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>|
@@ -1384,15 +1385,11 @@ impl FactStorage {
         };
 
         let accept = |cursor: &mut CurrentAttributeCursor,
-                      key: &AevtKey,
+                      key: CurrentAevtEntryRef<'_>,
                       fact_ref: CursorFactRef,
-                      committed: bool,
                       visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>|
          -> Result<()> {
             if !entry_visible_as_of(key, cursor.as_of.as_ref()) {
-                if committed {
-                    cursor.last_key = Some(key.clone());
-                }
                 return Ok(());
             }
             if cursor
@@ -1407,9 +1404,6 @@ impl FactStorage {
             cursor.note_reducer_shape(added_window);
             #[cfg(not(any(test, feature = "bench-internals")))]
             let _ = added_window;
-            if committed {
-                cursor.last_key = Some(key.clone());
-            }
             Ok(())
         };
 
@@ -1419,49 +1413,66 @@ impl FactStorage {
             let end = cursor.end.clone();
             let committed_index_reader = cursor.committed_index_reader.clone();
             let complete = committed_index_reader.as_ref().map_or(Ok(true), |reader| {
-                reader.visit_aevt_entries(&next_start, end.as_ref(), &mut |key, fact_ref| {
-                    if last_key.as_ref().is_some_and(|last| key <= last) {
-                        return Ok(true);
-                    }
-                    while cursor.pending_position < cursor.pending.len()
-                        && cursor
-                            .pending
-                            .get(cursor.pending_position)
-                            .is_some_and(|id| {
-                                d.pending
-                                    .compare_aevt_key(*id, key)
-                                    .is_ok_and(|order| order.is_lt())
-                            })
-                    {
-                        let pending_id = *cursor
-                            .pending
-                            .get(cursor.pending_position)
-                            .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
-                        let pending_key = d.pending.get(pending_id)?.to_aevt_key();
-                        #[cfg(any(test, feature = "bench-internals"))]
-                        cursor.note_pending_entry();
-                        accept(
-                            cursor,
-                            &pending_key,
-                            CursorFactRef::Pending(pending_id),
-                            false,
-                            visit,
-                        )?;
-                        cursor.pending_position += 1;
-                        processed += 1;
-                        if processed >= max_entries {
-                            return Ok(false);
+                reader.visit_current_aevt_entries(
+                    &next_start,
+                    end.as_ref(),
+                    &mut |key, fact_ref| {
+                        if last_key
+                            .as_ref()
+                            .is_some_and(|last| !key.cmp_owned_suffix(last).is_gt())
+                        {
+                            return Ok(true);
                         }
-                    }
-                    #[cfg(any(test, feature = "bench-internals"))]
-                    cursor.note_committed_entry();
-                    accept(cursor, key, CursorFactRef::Committed(fact_ref), true, visit)?;
-                    processed += 1;
-                    Ok(processed < max_entries)
-                })
+                        while cursor.pending_position < cursor.pending.len()
+                            && cursor
+                                .pending
+                                .get(cursor.pending_position)
+                                .is_some_and(|id| {
+                                    d.pending
+                                        .compare_aevt_projection(*id, key)
+                                        .is_ok_and(|order| order.is_lt())
+                                })
+                        {
+                            let pending_id = *cursor
+                                .pending
+                                .get(cursor.pending_position)
+                                .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+                            let pending_key = d.pending.get(pending_id)?.current_aevt_entry();
+                            #[cfg(any(test, feature = "bench-internals"))]
+                            cursor.note_pending_entry();
+                            accept(
+                                cursor,
+                                pending_key,
+                                CursorFactRef::Pending(pending_id),
+                                visit,
+                            )?;
+                            cursor.pending_position += 1;
+                            processed += 1;
+                            if processed >= max_entries {
+                                return Ok(false);
+                            }
+                        }
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        cursor.note_committed_entry();
+                        accept(cursor, key, CursorFactRef::Committed(fact_ref), visit)?;
+                        if bounded {
+                            let reused = if let Some(last) = &mut cursor.last_key {
+                                key.write_resume_key(last)
+                            } else {
+                                let mut last = cursor.next_start.clone();
+                                key.write_resume_key(&mut last);
+                                cursor.last_key = Some(last);
+                                false
+                            };
+                            crate::storage::btree_v6::note_resume_key(reused);
+                        }
+                        processed += 1;
+                        Ok(processed < max_entries)
+                    },
+                )
             })?;
             cursor.committed_complete = complete;
-            if let Some(last) = &cursor.last_key {
+            if bounded && let Some(last) = &cursor.last_key {
                 cursor.next_start = last.clone();
             }
             if !complete {
@@ -1475,16 +1486,10 @@ impl FactStorage {
                 .pending
                 .get(cursor.pending_position)
                 .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
-            let key = d.pending.get(pending_id)?.to_aevt_key();
+            let key = d.pending.get(pending_id)?.current_aevt_entry();
             #[cfg(any(test, feature = "bench-internals"))]
             cursor.note_pending_entry();
-            accept(
-                cursor,
-                &key,
-                CursorFactRef::Pending(pending_id),
-                false,
-                visit,
-            )?;
+            accept(cursor, key, CursorFactRef::Pending(pending_id), visit)?;
             cursor.pending_position += 1;
             processed += 1;
         }
@@ -1520,7 +1525,7 @@ impl FactStorage {
     }
 }
 
-fn entry_visible_as_of(key: &AevtKey, as_of: Option<&AsOf>) -> bool {
+fn entry_visible_as_of(key: CurrentAevtEntryRef<'_>, as_of: Option<&AsOf>) -> bool {
     match as_of {
         None => true,
         Some(AsOf::Counter(counter)) => key.tx_count <= *counter,
@@ -1531,38 +1536,59 @@ fn entry_visible_as_of(key: &AevtKey, as_of: Option<&AsOf>) -> bool {
 
 fn reduce_current_entry(
     values: &mut std::collections::HashMap<Vec<u8>, CurrentValueState>,
-    key: &AevtKey,
+    key: CurrentAevtEntryRef<'_>,
     fact_ref: CursorFactRef,
 ) -> bool {
-    let state = values.entry(key.value_bytes.clone()).or_default();
-    let windows_before = state
-        .assertions
-        .len()
-        .saturating_add(state.max_scoped_retract_tx.len());
-    if key.asserted {
+    fn reduce_state(
+        state: &mut CurrentValueState,
+        key: CurrentAevtEntryRef<'_>,
+        fact_ref: CursorFactRef,
+    ) -> bool {
+        let windows_before = state
+            .assertions
+            .len()
+            .saturating_add(state.max_scoped_retract_tx.len());
+        if key.asserted {
+            state
+                .assertions
+                .entry((key.valid_from, key.valid_to))
+                .and_modify(|winner| {
+                    if key.tx_count > winner.0 {
+                        *winner = (key.tx_count, fact_ref);
+                    }
+                })
+                .or_insert((key.tx_count, fact_ref));
+        } else if key.valid_from == RETRACT_ALL_VALID_FROM && key.valid_to == VALID_TIME_FOREVER {
+            state.max_unscoped_retract_tx = state.max_unscoped_retract_tx.max(key.tx_count);
+        } else {
+            state
+                .max_scoped_retract_tx
+                .entry((key.valid_from, key.valid_to))
+                .and_modify(|tx| *tx = (*tx).max(key.tx_count))
+                .or_insert(key.tx_count);
+        }
         state
             .assertions
-            .entry((key.valid_from, key.valid_to))
-            .and_modify(|winner| {
-                if key.tx_count > winner.0 {
-                    *winner = (key.tx_count, fact_ref);
-                }
-            })
-            .or_insert((key.tx_count, fact_ref));
-    } else if key.valid_from == RETRACT_ALL_VALID_FROM && key.valid_to == VALID_TIME_FOREVER {
-        state.max_unscoped_retract_tx = state.max_unscoped_retract_tx.max(key.tx_count);
-    } else {
-        state
-            .max_scoped_retract_tx
-            .entry((key.valid_from, key.valid_to))
-            .and_modify(|tx| *tx = (*tx).max(key.tx_count))
-            .or_insert(key.tx_count);
+            .len()
+            .saturating_add(state.max_scoped_retract_tx.len())
+            > windows_before
     }
-    state
-        .assertions
-        .len()
-        .saturating_add(state.max_scoped_retract_tx.len())
-        > windows_before
+
+    // The common current-view shape starts each entity with one value. Avoid
+    // a borrowed miss probe before the unavoidable first owned map key.
+    if values.is_empty() {
+        let mut state = CurrentValueState::default();
+        let added = reduce_state(&mut state, key, fact_ref);
+        values.insert(key.value_bytes.to_vec(), state);
+        return added;
+    }
+    if let Some(state) = values.get_mut(key.value_bytes) {
+        return reduce_state(state, key, fact_ref);
+    }
+    let mut state = CurrentValueState::default();
+    let added = reduce_state(&mut state, key, fact_ref);
+    values.insert(key.value_bytes.to_vec(), state);
+    added
 }
 
 fn decode_index_value(encoded: &[u8]) -> Result<Value> {

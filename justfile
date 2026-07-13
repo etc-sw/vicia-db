@@ -4,13 +4,13 @@
 default:
     @just --list
 
-# Build the browser WASM package from this checkout and atomically install it
-# into Vetch's local @vicia-db/browser package boundary.
-#
-# Default target: sibling ~/projects/vetch-app checkout.
-# Worktree verification: just sync /absolute/path/to/vetch-worktree
+# Verify and publish a clean local Vicia commit into Vetch.
 sync VETCH_APP_DIR="":
     ./scripts/sync-vetch-browser-package.sh "{{VETCH_APP_DIR}}"
+
+# Verify and publish the current dirty local worktree without commit or push.
+sync-local VETCH_APP_DIR="":
+    VICIA_SYNC_ALLOW_DIRTY_PUBLISH=1 ./scripts/sync-vetch-browser-package.sh "{{VETCH_APP_DIR}}"
 
 # Clone/update the reference engines under ~/db-ref and link the local harness.
 db-ref-setup:
@@ -47,3 +47,15 @@ checkpoint-construction-smoke OUTPUT_DIR="target/checkpoint-construction/smoke":
 # Run the clean 1M/20-sample checkpoint construction acceptance matrix.
 checkpoint-construction-full OUTPUT_DIR="target/checkpoint-construction/full":
     ./scripts/run-checkpoint-construction-bench.sh full "{{OUTPUT_DIR}}"
+
+# Measure the restart-aware leaf read path with a 10K/five-sample fixture.
+leaf-read-path-smoke OUTPUT_DIR="target/leaf-read-path/smoke":
+    ./scripts/run-leaf-read-path-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Measure the restart-aware leaf read path with the canonical 1M/20-sample fixture.
+leaf-read-path-full OUTPUT_DIR="target/leaf-read-path/full":
+    ./scripts/run-leaf-read-path-bench.sh full "{{OUTPUT_DIR}}"
+
+# Compare two leaf-read receipts and enforce the candidate acceptance gates.
+leaf-read-path-compare BASELINE CANDIDATE:
+    node scripts/compare-leaf-read-path-receipts.mjs "{{BASELINE}}" "{{CANDIDATE}}"

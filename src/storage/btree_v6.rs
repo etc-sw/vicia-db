@@ -1,25 +1,136 @@
-//! On-disk B+tree for covering index persistence (file format v6).
+//! On-disk B+tree for covering index persistence (v6 base layout, v12 prefix leaves).
 //!
 //! Each node maps to exactly one 4KB page. The `PageCache` serves all reads.
 //! `build_btree` does a bulk-build (write-all-leaves, then internal levels
 //! bottom-up). Range scans traverse the tree through the cache.
 
 use crate::storage::cache::PageCache;
-use crate::storage::index::FactRef;
+use crate::storage::index::{AevtEntryWire, AevtKey, CurrentAevtEntryRef, FactRef};
 use crate::storage::page_integrity::BasePageIntegrityCatalog;
 use crate::storage::{PAGE_SIZE, StorageBackend};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 #[cfg(feature = "bench-internals")]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+
+/// Repository-only counters for the page-backed leaf read path.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub struct LeafReadDiagnostics {
+    pub internal_pages_visited: u64,
+    pub leaf_pages_visited: u64,
+    pub raw_leaf_pages_visited: u64,
+    pub prefix_leaf_pages_visited: u64,
+    pub leaf_entries_available: u64,
+    pub leaf_entries_decoded: u64,
+    pub leaf_entries_emitted: u64,
+    pub leaf_entries_skipped: u64,
+    pub lower_bound_key_comparisons: u64,
+    pub prefix_restart_blocks_reconstructed: u64,
+    pub prefix_entries_reconstructed: u64,
+    pub reconstructed_key_bytes: u64,
+    pub full_leaf_vec_peak_entries: u64,
+    pub full_leaf_vec_peak_struct_bytes: u64,
+    pub full_leaf_vec_peak_decoded_payload_bytes: u64,
+    pub raw_decode_elapsed_ns: u64,
+    pub prefix_decode_elapsed_ns: u64,
+    pub early_stop_count: u64,
+    pub leaf_boundary_transitions: u64,
+    pub aevt_projection_decodes: u64,
+    pub projected_aevt_emitted: u64,
+    pub borrowed_attribute_bytes: u64,
+    pub borrowed_value_bytes: u64,
+    pub projected_owned_aevt_decodes: u64,
+    pub resume_key_materializations: u64,
+    pub resume_key_buffer_reuses: u64,
+}
 
 #[cfg(feature = "bench-internals")]
 thread_local! {
     static PEAK_SERIALIZED_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static PEAK_SERIALIZED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static LEAF_READ_DIAGNOSTICS_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static LEAF_READ_DIAGNOSTICS: RefCell<LeafReadDiagnostics> = const {
+        RefCell::new(LeafReadDiagnostics {
+            internal_pages_visited: 0,
+            leaf_pages_visited: 0,
+            raw_leaf_pages_visited: 0,
+            prefix_leaf_pages_visited: 0,
+            leaf_entries_available: 0,
+            leaf_entries_decoded: 0,
+            leaf_entries_emitted: 0,
+            leaf_entries_skipped: 0,
+            lower_bound_key_comparisons: 0,
+            prefix_restart_blocks_reconstructed: 0,
+            prefix_entries_reconstructed: 0,
+            reconstructed_key_bytes: 0,
+            full_leaf_vec_peak_entries: 0,
+            full_leaf_vec_peak_struct_bytes: 0,
+            full_leaf_vec_peak_decoded_payload_bytes: 0,
+            raw_decode_elapsed_ns: 0,
+            prefix_decode_elapsed_ns: 0,
+            early_stop_count: 0,
+            leaf_boundary_transitions: 0,
+            aevt_projection_decodes: 0,
+            projected_aevt_emitted: 0,
+            borrowed_attribute_bytes: 0,
+            borrowed_value_bytes: 0,
+            projected_owned_aevt_decodes: 0,
+            resume_key_materializations: 0,
+            resume_key_buffer_reuses: 0,
+        })
+    };
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn reset_leaf_read_diagnostics() {
+    LEAF_READ_DIAGNOSTICS.with(|slot| *slot.borrow_mut() = LeafReadDiagnostics::default());
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn leaf_read_diagnostics() -> LeafReadDiagnostics {
+    LEAF_READ_DIAGNOSTICS.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn note_resume_key(reused: bool) {
+    update_leaf_read_diagnostics(|diagnostics| {
+        if reused {
+            diagnostics.resume_key_buffer_reuses =
+                diagnostics.resume_key_buffer_reuses.saturating_add(1);
+        } else {
+            diagnostics.resume_key_materializations =
+                diagnostics.resume_key_materializations.saturating_add(1);
+        }
+    });
+}
+
+#[cfg(not(feature = "bench-internals"))]
+pub(crate) fn note_resume_key(_reused: bool) {}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn set_leaf_read_diagnostics_enabled(enabled: bool) {
+    LEAF_READ_DIAGNOSTICS_ENABLED.set(enabled);
+}
+
+#[cfg(feature = "bench-internals")]
+#[inline(always)]
+fn leaf_read_diagnostics_enabled() -> bool {
+    LEAF_READ_DIAGNOSTICS_ENABLED.get()
+}
+
+#[cfg(feature = "bench-internals")]
+#[inline(always)]
+fn update_leaf_read_diagnostics(update: impl FnOnce(&mut LeafReadDiagnostics)) {
+    if leaf_read_diagnostics_enabled() {
+        LEAF_READ_DIAGNOSTICS.with(|slot| update(&mut slot.borrow_mut()));
+    }
 }
 
 #[cfg(feature = "bench-internals")]
@@ -56,6 +167,8 @@ fn observe_serialized_frontier(_entries: usize, _bytes: usize) {}
 pub const PAGE_TYPE_LEAF: u8 = 0x21;
 /// Internal node page type (v6).
 pub const PAGE_TYPE_INTERNAL: u8 = 0x22;
+/// Prefix-compressed leaf node page type (v12).
+pub const PAGE_TYPE_PREFIX_LEAF: u8 = 0x23;
 
 // ─── Fixed sizes ──────────────────────────────────────────────────────────────
 
@@ -65,9 +178,14 @@ const LEAF_HEADER_SIZE: usize = 12;
 const INTERNAL_HEADER_SIZE: usize = 12;
 /// Slot directory entry: offset(u16) + length(u16) = 4 bytes.
 const SLOT_SIZE: usize = 4;
+/// Full serialized entries restart at this interval so corruption and future
+/// point decoding stay bounded to a small page-local run.
+const PREFIX_RESTART_INTERVAL: usize = 16;
+/// shared-prefix length (u16) + decoded length (u16).
+const PREFIX_RECORD_HEADER_SIZE: usize = 4;
 /// Production bulk-build fill percentage. This changes packing policy only;
-/// every resulting page retains the same v11 byte format.
-pub(crate) const DEFAULT_BTREE_FILL_PERCENT: u8 = 75;
+/// leaf encoding remains selected independently per page.
+pub(crate) const DEFAULT_BTREE_FILL_PERCENT: u8 = 90;
 
 #[derive(Clone, Copy)]
 pub(crate) struct BtreeBuildOptions {
@@ -122,6 +240,34 @@ fn read_u64_at(page: &[u8], offset: usize) -> Result<u64> {
     ))
 }
 
+fn is_leaf_page_type(page_type: u8) -> bool {
+    page_type == PAGE_TYPE_LEAF || page_type == PAGE_TYPE_PREFIX_LEAF
+}
+
+fn prefix_record_layout(
+    previous: Option<&[u8]>,
+    index: usize,
+    entry: &[u8],
+) -> Result<(u16, u16, usize)> {
+    let shared = if index.is_multiple_of(PREFIX_RESTART_INTERVAL) {
+        0
+    } else {
+        previous
+            .unwrap_or_default()
+            .iter()
+            .zip(entry)
+            .take_while(|(left, right)| left == right)
+            .count()
+    };
+    let shared = u16::try_from(shared).map_err(|_| anyhow!("leaf prefix exceeds u16"))?;
+    let decoded_len =
+        u16::try_from(entry.len()).map_err(|_| anyhow!("leaf entry length exceeds u16"))?;
+    let stored_len = PREFIX_RECORD_HEADER_SIZE
+        .checked_add(entry.len().saturating_sub(usize::from(shared)))
+        .ok_or_else(|| anyhow!("compressed leaf record length overflow"))?;
+    Ok((shared, decoded_len, stored_len))
+}
+
 // ─── Low-level page writers ───────────────────────────────────────────────────
 
 /// Write a single leaf page and insert it into the cache.
@@ -136,26 +282,61 @@ fn write_leaf_page(
     entries: &[Vec<u8>],
     next_leaf: u64,
 ) -> Result<()> {
+    let raw_bytes = entries.iter().map(Vec::len).sum::<usize>();
+    let mut compressed_bytes = 0usize;
+    let mut previous: Option<&[u8]> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let (_, _, stored_len) = prefix_record_layout(previous, index, entry)?;
+        compressed_bytes = compressed_bytes
+            .checked_add(stored_len)
+            .ok_or_else(|| anyhow!("compressed leaf page length overflow"))?;
+        previous = Some(entry);
+    }
+    let page_type = if compressed_bytes < raw_bytes {
+        PAGE_TYPE_PREFIX_LEAF
+    } else {
+        PAGE_TYPE_LEAF
+    };
     let entry_count =
         u16::try_from(entries.len()).map_err(|_| anyhow!("too many entries: {}", entries.len()))?;
     let mut page = vec![0u8; PAGE_SIZE];
 
     // Fixed header
-    page[0] = PAGE_TYPE_LEAF;
-    page[1] = 0; // reserved
+    page[0] = page_type;
+    page[1] = if page_type == PAGE_TYPE_PREFIX_LEAF {
+        u8::try_from(PREFIX_RESTART_INTERVAL)?
+    } else {
+        0
+    };
     page[2..4].copy_from_slice(&entry_count.to_le_bytes());
     page[4..12].copy_from_slice(&next_leaf.to_le_bytes());
 
     // Slot directory starts at byte 12; data written end-to-start
     let mut write_pos = PAGE_SIZE;
+    let mut previous: Option<&[u8]> = None;
     for (i, entry) in entries.iter().enumerate() {
-        write_pos -= entry.len();
-        page[write_pos..write_pos + entry.len()].copy_from_slice(entry);
+        let stored_len = if page_type == PAGE_TYPE_PREFIX_LEAF {
+            let (shared, decoded_len, stored_len) = prefix_record_layout(previous, i, entry)?;
+            write_pos -= stored_len;
+            page[write_pos..write_pos + 2].copy_from_slice(&shared.to_le_bytes());
+            page[write_pos + 2..write_pos + 4].copy_from_slice(&decoded_len.to_le_bytes());
+            let suffix = entry
+                .get(usize::from(shared)..)
+                .ok_or_else(|| anyhow!("leaf prefix exceeds entry length"))?;
+            page[write_pos + PREFIX_RECORD_HEADER_SIZE..write_pos + stored_len]
+                .copy_from_slice(suffix);
+            stored_len
+        } else {
+            write_pos -= entry.len();
+            page[write_pos..write_pos + entry.len()].copy_from_slice(entry);
+            entry.len()
+        };
+        previous = Some(entry);
         let slot_off = LEAF_HEADER_SIZE + i * SLOT_SIZE;
         let write_pos_u16 =
             u16::try_from(write_pos).map_err(|_| anyhow!("write_pos {write_pos} exceeds u16"))?;
-        let entry_len_u16 = u16::try_from(entry.len())
-            .map_err(|_| anyhow!("entry len {} exceeds u16", entry.len()))?;
+        let entry_len_u16 =
+            u16::try_from(stored_len).map_err(|_| anyhow!("entry len {stored_len} exceeds u16"))?;
         page[slot_off..slot_off + 2].copy_from_slice(&write_pos_u16.to_le_bytes());
         page[slot_off + 2..slot_off + 4].copy_from_slice(&entry_len_u16.to_le_bytes());
     }
@@ -268,6 +449,7 @@ pub fn build_btree(
 ) -> Result<(u64, u64)> {
     build_btree_serialized_results(
         sorted_entries.map(Ok),
+        Ok,
         backend,
         cache,
         start_page_id,
@@ -284,6 +466,7 @@ pub(crate) fn build_btree_with_options(
 ) -> Result<(u64, u64)> {
     build_btree_serialized_results(
         sorted_entries.map(Ok),
+        Ok,
         backend,
         cache,
         start_page_id,
@@ -301,9 +484,9 @@ pub(crate) fn build_btree_from_key_entries<K: Serialize>(
     build_btree_serialized_results(
         sorted_entries.map(|(key, fact_ref)| {
             let entry_bytes = postcard::to_allocvec(&(&key, &fact_ref))?;
-            let key_bytes = postcard::to_allocvec(&key)?;
-            Ok((entry_bytes, key_bytes))
+            Ok((entry_bytes, key))
         }),
+        |key| postcard::to_allocvec(&key).map_err(Into::into),
         backend,
         cache,
         start_page_id,
@@ -311,8 +494,9 @@ pub(crate) fn build_btree_from_key_entries<K: Serialize>(
     )
 }
 
-fn build_btree_serialized_results(
-    sorted_entries: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
+fn build_btree_serialized_results<K>(
+    sorted_entries: impl Iterator<Item = Result<(Vec<u8>, K)>>,
+    mut serialize_first_key: impl FnMut(K) -> Result<Vec<u8>>,
     backend: &mut dyn StorageBackend,
     cache: &PageCache,
     start_page_id: u64,
@@ -323,16 +507,21 @@ fn build_btree_serialized_results(
     let mut leaf_infos: Vec<(u64, Vec<u8>)> = Vec::new();
 
     let mut cur_entries: Vec<Vec<u8>> = Vec::new();
-    let mut cur_data_bytes: usize = 0;
+    let mut cur_raw_bytes: usize = 0;
+    let mut cur_prefix_bytes: usize = 0;
     let mut cur_first_key: Option<Vec<u8>> = None;
     let mut next_page = start_page_id;
 
     for entry in sorted_entries {
-        let (entry_bytes, key_bytes) = entry?;
+        let (entry_bytes, key) = entry?;
+        let (_, _, prefix_entry_len) = prefix_record_layout(
+            cur_entries.last().map(Vec::as_slice),
+            cur_entries.len(),
+            &entry_bytes,
+        )?;
         let projected = LEAF_HEADER_SIZE
             + (cur_entries.len() + 1) * SLOT_SIZE
-            + cur_data_bytes
-            + entry_bytes.len();
+            + (cur_raw_bytes + entry_bytes.len()).min(cur_prefix_bytes + prefix_entry_len);
 
         if projected > PAGE_SIZE && cur_entries.is_empty() {
             anyhow::bail!("B-tree leaf entry does not fit in one page")
@@ -346,16 +535,23 @@ fn build_btree_serialized_results(
             leaf_infos.push((next_page, first_key));
             next_page += 1;
             cur_entries.clear();
-            cur_data_bytes = 0;
+            cur_raw_bytes = 0;
+            cur_prefix_bytes = 0;
             cur_first_key = None;
         }
 
         if cur_first_key.is_none() {
-            cur_first_key = Some(key_bytes);
+            cur_first_key = Some(serialize_first_key(key)?);
         }
-        cur_data_bytes += entry_bytes.len();
+        let (_, _, prefix_entry_len) = prefix_record_layout(
+            cur_entries.last().map(Vec::as_slice),
+            cur_entries.len(),
+            &entry_bytes,
+        )?;
+        cur_raw_bytes += entry_bytes.len();
+        cur_prefix_bytes += prefix_entry_len;
         cur_entries.push(entry_bytes);
-        observe_serialized_frontier(cur_entries.len(), cur_data_bytes);
+        observe_serialized_frontier(cur_entries.len(), cur_raw_bytes.min(cur_prefix_bytes));
     }
 
     // Flush the last (or only) batch
@@ -478,13 +674,13 @@ fn build_btree_serialized_results(
     }
 }
 
-/// Merge two already-sorted `Vec`s into a single sorted iterator.
-///
-/// Used by `PersistentFactStorage::save()` to merge committed B+tree entries
-/// with new pending entries before building the replacement B+tree.
-pub fn merge_sorted_vecs<T: Ord>(a: Vec<T>, b: Vec<T>) -> impl Iterator<Item = T> {
-    let mut ai = a.into_iter().peekable();
-    let mut bi = b.into_iter().peekable();
+/// Merge two already-sorted iterators without materializing either input.
+pub fn merge_sorted_iters<T: Ord>(
+    a: impl Iterator<Item = T>,
+    b: impl Iterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    let mut ai = a.peekable();
+    let mut bi = b.peekable();
     std::iter::from_fn(move || match (ai.peek(), bi.peek()) {
         (Some(_), Some(_)) => {
             if ai.peek() <= bi.peek() {
@@ -512,8 +708,13 @@ fn find_leftmost_leaf(root: u64, backend: &dyn StorageBackend, cache: &PageCache
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={page_id}"))?;
         match page_type {
-            PAGE_TYPE_LEAF => return Ok(page_id),
+            page_type if is_leaf_page_type(page_type) => return Ok(page_id),
             PAGE_TYPE_INTERNAL => {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.internal_pages_visited =
+                        diagnostics.internal_pages_visited.saturating_add(1);
+                });
                 let key_count = read_u16_at(&page[..], 2)? as usize;
                 if key_count == 0 {
                     page_id = read_u64_at(&page[..], 4)?;
@@ -551,8 +752,13 @@ where
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={page_id}"))?;
         match page_type {
-            PAGE_TYPE_LEAF => return Ok(page_id),
+            page_type if is_leaf_page_type(page_type) => return Ok(page_id),
             PAGE_TYPE_INTERNAL => {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.internal_pages_visited =
+                        diagnostics.internal_pages_visited.saturating_add(1);
+                });
                 let key_count = read_u16_at(&page[..], 2)? as usize;
                 let rightmost_child = read_u64_at(&page[..], 4)?;
                 let child_arr_start = INTERNAL_HEADER_SIZE;
@@ -594,18 +800,50 @@ where
 }
 
 /// Read all `(K, FactRef)` entries from a leaf page's slot directory.
+#[cfg(test)]
 #[allow(clippy::arithmetic_side_effects)]
 fn read_leaf_entries<K>(page: &[u8]) -> Result<Vec<(K, FactRef)>>
 where
     K: for<'de> Deserialize<'de>,
 {
+    #[cfg(feature = "bench-internals")]
+    let decode_started = std::time::Instant::now();
+    let page_type = page
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow!("empty leaf page"))?;
+    if !is_leaf_page_type(page_type) {
+        anyhow::bail!("expected leaf page, found type 0x{page_type:02x}")
+    }
+    if page_type == PAGE_TYPE_PREFIX_LEAF
+        && page.get(1).copied() != Some(u8::try_from(PREFIX_RESTART_INTERVAL)?)
+    {
+        anyhow::bail!("unsupported prefix leaf restart interval")
+    }
     let entry_count = read_u16_at(page, 2)? as usize;
+    #[cfg(feature = "bench-internals")]
+    update_leaf_read_diagnostics(|diagnostics| {
+        diagnostics.leaf_pages_visited = diagnostics.leaf_pages_visited.saturating_add(1);
+        diagnostics.leaf_entries_available = diagnostics
+            .leaf_entries_available
+            .saturating_add(u64::try_from(entry_count).unwrap_or(u64::MAX));
+        if page_type == PAGE_TYPE_PREFIX_LEAF {
+            diagnostics.prefix_leaf_pages_visited =
+                diagnostics.prefix_leaf_pages_visited.saturating_add(1);
+        } else {
+            diagnostics.raw_leaf_pages_visited =
+                diagnostics.raw_leaf_pages_visited.saturating_add(1);
+        }
+    });
     let mut entries = Vec::with_capacity(entry_count);
+    let mut previous = Vec::new();
+    #[cfg(feature = "bench-internals")]
+    let mut decoded_payload_bytes = 0usize;
     for i in 0..entry_count {
         let slot_off = LEAF_HEADER_SIZE + i * SLOT_SIZE;
         let offset = read_u16_at(page, slot_off)? as usize;
         let length = read_u16_at(page, slot_off + 2)? as usize;
-        let slice = page
+        let stored = page
             .get(offset..offset.saturating_add(length))
             .ok_or_else(|| {
                 anyhow!(
@@ -613,10 +851,372 @@ where
                     page.len()
                 )
             })?;
-        let (k, fr): (K, FactRef) = postcard::from_bytes(slice)?;
+        let decoded = if page_type == PAGE_TYPE_PREFIX_LEAF {
+            if stored.len() < PREFIX_RECORD_HEADER_SIZE {
+                anyhow::bail!("compressed leaf record is truncated")
+            }
+            let shared = usize::from(read_u16_at(stored, 0)?);
+            let decoded_len = usize::from(read_u16_at(stored, 2)?);
+            if i.is_multiple_of(PREFIX_RESTART_INTERVAL) && shared != 0 {
+                anyhow::bail!("compressed leaf restart record has a prefix")
+            }
+            if shared > previous.len() || shared > decoded_len {
+                anyhow::bail!("compressed leaf prefix is out of bounds")
+            }
+            let suffix = stored
+                .get(PREFIX_RECORD_HEADER_SIZE..)
+                .ok_or_else(|| anyhow!("compressed leaf record is truncated"))?;
+            if shared.saturating_add(suffix.len()) != decoded_len {
+                anyhow::bail!("compressed leaf decoded length mismatch")
+            }
+            previous.truncate(shared);
+            previous.extend_from_slice(suffix);
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                if i.is_multiple_of(PREFIX_RESTART_INTERVAL) {
+                    diagnostics.prefix_restart_blocks_reconstructed = diagnostics
+                        .prefix_restart_blocks_reconstructed
+                        .saturating_add(1);
+                }
+                diagnostics.prefix_entries_reconstructed =
+                    diagnostics.prefix_entries_reconstructed.saturating_add(1);
+                diagnostics.reconstructed_key_bytes = diagnostics
+                    .reconstructed_key_bytes
+                    .saturating_add(u64::try_from(previous.len()).unwrap_or(u64::MAX));
+            });
+            previous.as_slice()
+        } else {
+            stored
+        };
+        let (k, fr): (K, FactRef) = postcard::from_bytes(decoded)?;
+        #[cfg(feature = "bench-internals")]
+        {
+            decoded_payload_bytes = decoded_payload_bytes.saturating_add(decoded.len());
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_decoded =
+                    diagnostics.leaf_entries_decoded.saturating_add(1);
+            });
+        }
         entries.push((k, fr));
     }
+    #[cfg(feature = "bench-internals")]
+    update_leaf_read_diagnostics(|diagnostics| {
+        diagnostics.full_leaf_vec_peak_entries = diagnostics
+            .full_leaf_vec_peak_entries
+            .max(u64::try_from(entries.capacity()).unwrap_or(u64::MAX));
+        diagnostics.full_leaf_vec_peak_struct_bytes =
+            diagnostics.full_leaf_vec_peak_struct_bytes.max(
+                u64::try_from(
+                    entries
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(K, FactRef)>()),
+                )
+                .unwrap_or(u64::MAX),
+            );
+        diagnostics.full_leaf_vec_peak_decoded_payload_bytes = diagnostics
+            .full_leaf_vec_peak_decoded_payload_bytes
+            .max(u64::try_from(decoded_payload_bytes).unwrap_or(u64::MAX));
+        let elapsed = u64::try_from(decode_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        if page_type == PAGE_TYPE_PREFIX_LEAF {
+            diagnostics.prefix_decode_elapsed_ns =
+                diagnostics.prefix_decode_elapsed_ns.saturating_add(elapsed);
+        } else {
+            diagnostics.raw_decode_elapsed_ns =
+                diagnostics.raw_decode_elapsed_ns.saturating_add(elapsed);
+        }
+    });
     Ok(entries)
+}
+
+/// Page-backed cursor over one raw or restart-compressed leaf.
+///
+/// The cursor owns the cached page and at most one decoded entry. Prefix leaves
+/// additionally retain only the previous serialized entry needed to reconstruct
+/// the next record.
+struct LeafEntryCursor<K> {
+    page: Arc<Vec<u8>>,
+    page_type: u8,
+    entry_count: usize,
+    slot: usize,
+    previous: Vec<u8>,
+    buffered: Option<(K, FactRef)>,
+    marker: PhantomData<K>,
+}
+
+impl<K> LeafEntryCursor<K>
+where
+    K: for<'de> Deserialize<'de> + Ord,
+{
+    fn new(page: Arc<Vec<u8>>) -> Result<Self> {
+        let page_type = page
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("empty leaf page"))?;
+        if !is_leaf_page_type(page_type) {
+            anyhow::bail!("expected leaf page, found type 0x{page_type:02x}")
+        }
+        if page_type == PAGE_TYPE_PREFIX_LEAF
+            && page.get(1).copied() != Some(u8::try_from(PREFIX_RESTART_INTERVAL)?)
+        {
+            anyhow::bail!("unsupported prefix leaf restart interval")
+        }
+        let entry_count = usize::from(read_u16_at(&page, 2)?);
+        let slot_directory_end = LEAF_HEADER_SIZE
+            .checked_add(entry_count.saturating_mul(SLOT_SIZE))
+            .ok_or_else(|| anyhow!("leaf slot directory length overflow"))?;
+        if slot_directory_end > page.len() {
+            anyhow::bail!("leaf slot directory is truncated")
+        }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_pages_visited = diagnostics.leaf_pages_visited.saturating_add(1);
+            diagnostics.leaf_entries_available = diagnostics
+                .leaf_entries_available
+                .saturating_add(u64::try_from(entry_count).unwrap_or(u64::MAX));
+            if page_type == PAGE_TYPE_PREFIX_LEAF {
+                diagnostics.prefix_leaf_pages_visited =
+                    diagnostics.prefix_leaf_pages_visited.saturating_add(1);
+            } else {
+                diagnostics.raw_leaf_pages_visited =
+                    diagnostics.raw_leaf_pages_visited.saturating_add(1);
+            }
+        });
+        Ok(Self {
+            page,
+            page_type,
+            entry_count,
+            slot: 0,
+            previous: Vec::new(),
+            buffered: None,
+            marker: PhantomData,
+        })
+    }
+
+    fn seek_lower_bound(&mut self, start: &K) -> Result<()> {
+        if self.page_type == PAGE_TYPE_PREFIX_LEAF {
+            self.seek_prefix_lower_bound(start)
+        } else {
+            self.seek_raw_lower_bound(start)
+        }
+    }
+
+    fn seek_raw_lower_bound(&mut self, start: &K) -> Result<()> {
+        let mut low = 0usize;
+        let mut high = self.entry_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let (key, _) = self.decode_raw(middle)?;
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
+            if key < *start {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        self.slot = low;
+        if low < self.entry_count {
+            self.buffered = Some(self.decode_raw(low)?);
+            self.slot = low.saturating_add(1);
+        }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_entries_skipped = diagnostics
+                .leaf_entries_skipped
+                .saturating_add(u64::try_from(low).unwrap_or(u64::MAX));
+        });
+        Ok(())
+    }
+
+    fn seek_prefix_lower_bound(&mut self, start: &K) -> Result<()> {
+        if self.entry_count == 0 {
+            return Ok(());
+        }
+        let restart_count = self.entry_count.div_ceil(PREFIX_RESTART_INTERVAL);
+        let mut low = 0usize;
+        let mut high = restart_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let slot = middle.saturating_mul(PREFIX_RESTART_INTERVAL);
+            let (key, _) = self.decode_prefix_restart(slot)?;
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
+            if key <= *start {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        let block = low.saturating_sub(1);
+        let block_start = block.saturating_mul(PREFIX_RESTART_INTERVAL);
+        self.slot = block_start;
+        self.previous.clear();
+        while self.slot < self.entry_count {
+            let entry_slot = self.slot;
+            let entry = self.decode_prefix_next()?;
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
+            if entry.0 >= *start {
+                self.buffered = Some(entry);
+                break;
+            }
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_skipped =
+                    diagnostics.leaf_entries_skipped.saturating_add(1);
+            });
+            if entry_slot
+                .saturating_add(1)
+                .is_multiple_of(PREFIX_RESTART_INTERVAL)
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn next_entry(&mut self) -> Result<Option<(K, FactRef)>> {
+        if let Some(entry) = self.buffered.take() {
+            return Ok(Some(entry));
+        }
+        if self.slot >= self.entry_count {
+            return Ok(None);
+        }
+        if self.page_type == PAGE_TYPE_PREFIX_LEAF {
+            self.decode_prefix_next().map(Some)
+        } else {
+            let slot = self.slot;
+            self.slot = self.slot.saturating_add(1);
+            self.decode_raw(slot).map(Some)
+        }
+    }
+
+    #[inline(always)]
+    fn stored_entry(&self, slot: usize) -> Result<&[u8]> {
+        if slot >= self.entry_count {
+            anyhow::bail!("leaf slot {slot} exceeds entry count {}", self.entry_count)
+        }
+        let slot_off = LEAF_HEADER_SIZE
+            .checked_add(slot.saturating_mul(SLOT_SIZE))
+            .ok_or_else(|| anyhow!("leaf slot offset overflow"))?;
+        let offset = usize::from(read_u16_at(&self.page, slot_off)?);
+        let length = usize::from(read_u16_at(&self.page, slot_off.saturating_add(2))?);
+        self.page
+            .get(offset..offset.saturating_add(length))
+            .ok_or_else(|| {
+                anyhow!(
+                    "entry slice out of bounds: offset={offset} len={length} page_len={}",
+                    self.page.len()
+                )
+            })
+    }
+
+    #[inline(always)]
+    fn decode_raw(&self, slot: usize) -> Result<(K, FactRef)> {
+        #[cfg(feature = "bench-internals")]
+        let started = leaf_read_diagnostics_enabled().then(std::time::Instant::now);
+        let entry = postcard::from_bytes(self.stored_entry(slot)?)?;
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_entries_decoded = diagnostics.leaf_entries_decoded.saturating_add(1);
+            if let Some(started) = started {
+                diagnostics.raw_decode_elapsed_ns =
+                    diagnostics.raw_decode_elapsed_ns.saturating_add(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    );
+            }
+        });
+        Ok(entry)
+    }
+
+    #[inline(always)]
+    fn decode_prefix_restart(&mut self, slot: usize) -> Result<(K, FactRef)> {
+        self.previous.clear();
+        self.decode_prefix_at(slot)
+    }
+
+    #[inline(always)]
+    fn decode_prefix_next(&mut self) -> Result<(K, FactRef)> {
+        let slot = self.slot;
+        let entry = self.decode_prefix_at(slot)?;
+        self.slot = self.slot.saturating_add(1);
+        Ok(entry)
+    }
+
+    #[inline(always)]
+    fn decode_prefix_at(&mut self, slot: usize) -> Result<(K, FactRef)> {
+        #[cfg(feature = "bench-internals")]
+        let started = leaf_read_diagnostics_enabled().then(std::time::Instant::now);
+        let page = &self.page;
+        let previous = &mut self.previous;
+        if slot >= self.entry_count {
+            anyhow::bail!("leaf slot {slot} exceeds entry count {}", self.entry_count)
+        }
+        let slot_off = LEAF_HEADER_SIZE
+            .checked_add(slot.saturating_mul(SLOT_SIZE))
+            .ok_or_else(|| anyhow!("leaf slot offset overflow"))?;
+        let offset = usize::from(read_u16_at(page, slot_off)?);
+        let length = usize::from(read_u16_at(page, slot_off.saturating_add(2))?);
+        let stored = page
+            .get(offset..offset.saturating_add(length))
+            .ok_or_else(|| {
+                anyhow!(
+                    "entry slice out of bounds: offset={offset} len={length} page_len={}",
+                    page.len()
+                )
+            })?;
+        if stored.len() < PREFIX_RECORD_HEADER_SIZE {
+            anyhow::bail!("compressed leaf record is truncated")
+        }
+        let shared = usize::from(read_u16_at(stored, 0)?);
+        let decoded_len = usize::from(read_u16_at(stored, 2)?);
+        if slot.is_multiple_of(PREFIX_RESTART_INTERVAL) && shared != 0 {
+            anyhow::bail!("compressed leaf restart record has a prefix")
+        }
+        if shared > previous.len() || shared > decoded_len {
+            anyhow::bail!("compressed leaf prefix is out of bounds")
+        }
+        let suffix = stored
+            .get(PREFIX_RECORD_HEADER_SIZE..)
+            .ok_or_else(|| anyhow!("compressed leaf record is truncated"))?;
+        if shared.saturating_add(suffix.len()) != decoded_len {
+            anyhow::bail!("compressed leaf decoded length mismatch")
+        }
+        previous.truncate(shared);
+        previous.extend_from_slice(suffix);
+        let entry = postcard::from_bytes(previous)?;
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_entries_decoded = diagnostics.leaf_entries_decoded.saturating_add(1);
+            if slot.is_multiple_of(PREFIX_RESTART_INTERVAL) {
+                diagnostics.prefix_restart_blocks_reconstructed = diagnostics
+                    .prefix_restart_blocks_reconstructed
+                    .saturating_add(1);
+            }
+            diagnostics.prefix_entries_reconstructed =
+                diagnostics.prefix_entries_reconstructed.saturating_add(1);
+            diagnostics.reconstructed_key_bytes = diagnostics
+                .reconstructed_key_bytes
+                .saturating_add(u64::try_from(previous.len()).unwrap_or(u64::MAX));
+            if let Some(started) = started {
+                diagnostics.prefix_decode_elapsed_ns =
+                    diagnostics.prefix_decode_elapsed_ns.saturating_add(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    );
+            }
+        });
+        Ok(entry)
+    }
 }
 
 // ─── stream_all_entries ───────────────────────────────────────────────────────
@@ -640,18 +1240,31 @@ where
             .first()
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={leaf_id}"))?;
-        if page_type != PAGE_TYPE_LEAF {
+        if !is_leaf_page_type(page_type) {
             anyhow::bail!(
                 "stream_all_entries: expected leaf page at page_id={}",
                 leaf_id
             );
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
-        result.extend(read_leaf_entries::<K>(&page[..])?);
+        let mut cursor = LeafEntryCursor::<K>::new(page)?;
+        while let Some(entry) = cursor.next_entry()? {
+            result.push(entry);
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_emitted =
+                    diagnostics.leaf_entries_emitted.saturating_add(1);
+            });
+        }
 
         if next_leaf == 0 {
             break;
         }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_boundary_transitions =
+                diagnostics.leaf_boundary_transitions.saturating_add(1);
+        });
         leaf_id = next_leaf;
     }
 
@@ -706,27 +1319,36 @@ where
             .first()
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={leaf_id}"))?;
-        if page_type != PAGE_TYPE_LEAF {
+        if !is_leaf_page_type(page_type) {
             anyhow::bail!("range_scan: expected leaf at page_id={}", leaf_id);
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
-        let entries: Vec<(K, FactRef)> = read_leaf_entries(&page[..])?;
-
-        for (k, fr) in entries {
-            if k < *start {
-                continue;
-            }
+        let mut cursor = LeafEntryCursor::<K>::new(page)?;
+        if leaf_id == start_leaf {
+            cursor.seek_lower_bound(start)?;
+        }
+        while let Some((k, fr)) = cursor.next_entry()? {
             if let Some(e) = end
                 && k >= *e
             {
                 break 'outer;
             }
             result.push((k, fr));
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_emitted =
+                    diagnostics.leaf_entries_emitted.saturating_add(1);
+            });
         }
 
         if next_leaf == 0 {
             break;
         }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_boundary_transitions =
+                diagnostics.leaf_boundary_transitions.saturating_add(1);
+        });
         leaf_id = next_leaf;
     }
 
@@ -744,27 +1366,303 @@ fn visit_range_entries<K>(
 where
     K: Serialize + for<'de> Deserialize<'de> + Ord,
 {
-    let mut leaf_id = find_leaf_for_key(root_page_id, start, backend, cache)?;
+    let start_leaf = find_leaf_for_key(root_page_id, start, backend, cache)?;
+    let mut leaf_id = start_leaf;
     'outer: loop {
         let page = cache.get_or_load(leaf_id, backend)?;
-        if page.first().copied() != Some(PAGE_TYPE_LEAF) {
+        if !page.first().copied().is_some_and(is_leaf_page_type) {
             anyhow::bail!("range_scan: expected leaf at page_id={}", leaf_id);
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
-        for (key, fact_ref) in read_leaf_entries::<K>(&page[..])? {
-            if key < *start {
+        let mut cursor = LeafEntryCursor::<K>::new(page)?;
+        if leaf_id == start_leaf {
+            cursor.seek_lower_bound(start)?;
+        }
+        macro_rules! visit_entry {
+            ($entry:expr) => {{
+                let (key, fact_ref) = $entry;
+                if end.is_some_and(|end| key >= *end) {
+                    break 'outer;
+                }
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.leaf_entries_emitted =
+                        diagnostics.leaf_entries_emitted.saturating_add(1);
+                });
+                if !visit(&key, fact_ref)? {
+                    #[cfg(feature = "bench-internals")]
+                    update_leaf_read_diagnostics(|diagnostics| {
+                        diagnostics.early_stop_count =
+                            diagnostics.early_stop_count.saturating_add(1);
+                    });
+                    return Ok(false);
+                }
+            }};
+        }
+        if let Some(entry) = cursor.buffered.take() {
+            visit_entry!(entry);
+        }
+        if cursor.page_type == PAGE_TYPE_PREFIX_LEAF {
+            while cursor.slot < cursor.entry_count {
+                visit_entry!(cursor.decode_prefix_next()?);
+            }
+        } else {
+            while cursor.slot < cursor.entry_count {
+                let slot = cursor.slot;
+                cursor.slot = cursor.slot.saturating_add(1);
+                visit_entry!(cursor.decode_raw(slot)?);
+            }
+        }
+        if next_leaf == 0 {
+            break;
+        }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_boundary_transitions =
+                diagnostics.leaf_boundary_transitions.saturating_add(1);
+        });
+        leaf_id = next_leaf;
+    }
+    Ok(true)
+}
+
+fn leaf_entry_slice(page: &[u8], entry_count: usize, slot: usize) -> Result<&[u8]> {
+    if slot >= entry_count {
+        anyhow::bail!("leaf slot {slot} exceeds entry count {entry_count}")
+    }
+    let slot_offset = LEAF_HEADER_SIZE
+        .checked_add(slot.saturating_mul(SLOT_SIZE))
+        .ok_or_else(|| anyhow!("leaf slot offset overflow"))?;
+    let offset = usize::from(read_u16_at(page, slot_offset)?);
+    let length = usize::from(read_u16_at(page, slot_offset.saturating_add(2))?);
+    page.get(offset..offset.saturating_add(length))
+        .ok_or_else(|| anyhow!("entry slice out of bounds"))
+}
+
+fn reconstruct_prefix_entry(
+    page: &[u8],
+    entry_count: usize,
+    slot: usize,
+    previous: &mut Vec<u8>,
+) -> Result<()> {
+    let stored = leaf_entry_slice(page, entry_count, slot)?;
+    if stored.len() < PREFIX_RECORD_HEADER_SIZE {
+        anyhow::bail!("compressed leaf record is truncated")
+    }
+    let shared = usize::from(read_u16_at(stored, 0)?);
+    let decoded_len = usize::from(read_u16_at(stored, 2)?);
+    if slot.is_multiple_of(PREFIX_RESTART_INTERVAL) && shared != 0 {
+        anyhow::bail!("compressed leaf restart record has a prefix")
+    }
+    if shared > previous.len() || shared > decoded_len {
+        anyhow::bail!("compressed leaf prefix is out of bounds")
+    }
+    let suffix = stored
+        .get(PREFIX_RECORD_HEADER_SIZE..)
+        .ok_or_else(|| anyhow!("compressed leaf record is truncated"))?;
+    if shared.saturating_add(suffix.len()) != decoded_len {
+        anyhow::bail!("compressed leaf decoded length mismatch")
+    }
+    previous.truncate(shared);
+    previous.extend_from_slice(suffix);
+    #[cfg(feature = "bench-internals")]
+    update_leaf_read_diagnostics(|diagnostics| {
+        if slot.is_multiple_of(PREFIX_RESTART_INTERVAL) {
+            diagnostics.prefix_restart_blocks_reconstructed = diagnostics
+                .prefix_restart_blocks_reconstructed
+                .saturating_add(1);
+        }
+        diagnostics.prefix_entries_reconstructed =
+            diagnostics.prefix_entries_reconstructed.saturating_add(1);
+        diagnostics.reconstructed_key_bytes = diagnostics
+            .reconstructed_key_bytes
+            .saturating_add(u64::try_from(previous.len()).unwrap_or(u64::MAX));
+    });
+    Ok(())
+}
+
+#[inline(always)]
+fn decode_projected_aevt(bytes: &[u8], _prefix: bool) -> Result<(AevtEntryWire<'_>, FactRef)> {
+    #[cfg(feature = "bench-internals")]
+    let started = leaf_read_diagnostics_enabled().then(std::time::Instant::now);
+    let decoded = AevtEntryWire::decode_entry(bytes)?;
+    #[cfg(feature = "bench-internals")]
+    update_leaf_read_diagnostics(|diagnostics| {
+        diagnostics.leaf_entries_decoded = diagnostics.leaf_entries_decoded.saturating_add(1);
+        diagnostics.aevt_projection_decodes = diagnostics.aevt_projection_decodes.saturating_add(1);
+        let (attribute_bytes, value_bytes) = decoded.0.borrowed_lengths();
+        diagnostics.borrowed_attribute_bytes = diagnostics
+            .borrowed_attribute_bytes
+            .saturating_add(u64::try_from(attribute_bytes).unwrap_or(u64::MAX));
+        diagnostics.borrowed_value_bytes = diagnostics
+            .borrowed_value_bytes
+            .saturating_add(u64::try_from(value_bytes).unwrap_or(u64::MAX));
+        if let Some(started) = started {
+            let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            if _prefix {
+                diagnostics.prefix_decode_elapsed_ns =
+                    diagnostics.prefix_decode_elapsed_ns.saturating_add(elapsed);
+            } else {
+                diagnostics.raw_decode_elapsed_ns =
+                    diagnostics.raw_decode_elapsed_ns.saturating_add(elapsed);
+            }
+        }
+    });
+    Ok(decoded)
+}
+
+/// Current-attribute-only AEVT scan. Raw entries borrow the cached page;
+/// prefix entries borrow the single restart reconstruction buffer.
+fn visit_current_aevt_range(
+    root_page_id: u64,
+    start: &AevtKey,
+    end: Option<&AevtKey>,
+    backend: &dyn StorageBackend,
+    cache: &PageCache,
+    visit: &mut dyn for<'a> FnMut(CurrentAevtEntryRef<'a>, FactRef) -> Result<bool>,
+) -> Result<bool> {
+    let start_leaf = find_leaf_for_key(root_page_id, start, backend, cache)?;
+    let mut leaf_id = start_leaf;
+    'leaves: loop {
+        let page = cache.get_or_load(leaf_id, backend)?;
+        let page_type = page
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("empty leaf page"))?;
+        if !is_leaf_page_type(page_type) {
+            anyhow::bail!("range_scan: expected leaf at page_id={leaf_id}")
+        }
+        if page_type == PAGE_TYPE_PREFIX_LEAF
+            && page.get(1).copied() != Some(u8::try_from(PREFIX_RESTART_INTERVAL)?)
+        {
+            anyhow::bail!("unsupported prefix leaf restart interval")
+        }
+        let entry_count = usize::from(read_u16_at(&page, 2)?);
+        let directory_end = LEAF_HEADER_SIZE
+            .checked_add(entry_count.saturating_mul(SLOT_SIZE))
+            .ok_or_else(|| anyhow!("leaf slot directory length overflow"))?;
+        if directory_end > page.len() {
+            anyhow::bail!("leaf slot directory is truncated")
+        }
+        let next_leaf = read_u64_at(&page, 4)?;
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_pages_visited = diagnostics.leaf_pages_visited.saturating_add(1);
+            diagnostics.leaf_entries_available = diagnostics
+                .leaf_entries_available
+                .saturating_add(u64::try_from(entry_count).unwrap_or(u64::MAX));
+            if page_type == PAGE_TYPE_PREFIX_LEAF {
+                diagnostics.prefix_leaf_pages_visited =
+                    diagnostics.prefix_leaf_pages_visited.saturating_add(1);
+            } else {
+                diagnostics.raw_leaf_pages_visited =
+                    diagnostics.raw_leaf_pages_visited.saturating_add(1);
+            }
+        });
+
+        let mut slot = 0usize;
+        let mut previous = Vec::new();
+        if leaf_id == start_leaf && entry_count != 0 {
+            if page_type == PAGE_TYPE_PREFIX_LEAF {
+                let restart_count = entry_count.div_ceil(PREFIX_RESTART_INTERVAL);
+                let mut low = 0usize;
+                let mut high = restart_count;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let restart_slot = middle.saturating_mul(PREFIX_RESTART_INTERVAL);
+                    previous.clear();
+                    reconstruct_prefix_entry(&page, entry_count, restart_slot, &mut previous)?;
+                    let (wire, _) = decode_projected_aevt(&previous, true)?;
+                    #[cfg(feature = "bench-internals")]
+                    update_leaf_read_diagnostics(|diagnostics| {
+                        diagnostics.lower_bound_key_comparisons =
+                            diagnostics.lower_bound_key_comparisons.saturating_add(1);
+                    });
+                    if wire.cmp_owned(start).is_lt() {
+                        low = middle.saturating_add(1);
+                    } else {
+                        high = middle;
+                    }
+                }
+                let restart = low
+                    .saturating_sub(1)
+                    .saturating_mul(PREFIX_RESTART_INTERVAL);
+                previous.clear();
+                slot = restart;
+            } else {
+                let mut low = 0usize;
+                let mut high = entry_count;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let (wire, _) = decode_projected_aevt(
+                        leaf_entry_slice(&page, entry_count, middle)?,
+                        false,
+                    )?;
+                    #[cfg(feature = "bench-internals")]
+                    update_leaf_read_diagnostics(|diagnostics| {
+                        diagnostics.lower_bound_key_comparisons =
+                            diagnostics.lower_bound_key_comparisons.saturating_add(1);
+                    });
+                    if wire.cmp_owned(start).is_lt() {
+                        low = middle.saturating_add(1);
+                    } else {
+                        high = middle;
+                    }
+                }
+                slot = low;
+            }
+        }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_entries_skipped = diagnostics
+                .leaf_entries_skipped
+                .saturating_add(u64::try_from(slot).unwrap_or(u64::MAX));
+        });
+
+        while slot < entry_count {
+            let bytes = if page_type == PAGE_TYPE_PREFIX_LEAF {
+                reconstruct_prefix_entry(&page, entry_count, slot, &mut previous)?;
+                previous.as_slice()
+            } else {
+                leaf_entry_slice(&page, entry_count, slot)?
+            };
+            slot = slot.saturating_add(1);
+            let (wire, fact_ref) =
+                decode_projected_aevt(bytes, page_type == PAGE_TYPE_PREFIX_LEAF)?;
+            if leaf_id == start_leaf && wire.cmp_owned(start).is_lt() {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.leaf_entries_skipped =
+                        diagnostics.leaf_entries_skipped.saturating_add(1);
+                });
                 continue;
             }
-            if end.is_some_and(|end| key >= *end) {
-                break 'outer;
+            if end.is_some_and(|bound| !wire.cmp_owned(bound).is_lt()) {
+                break 'leaves;
             }
-            if !visit(&key, fact_ref)? {
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_emitted =
+                    diagnostics.leaf_entries_emitted.saturating_add(1);
+                diagnostics.projected_aevt_emitted =
+                    diagnostics.projected_aevt_emitted.saturating_add(1);
+            });
+            if !visit(wire.project(), fact_ref)? {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.early_stop_count = diagnostics.early_stop_count.saturating_add(1);
+                });
                 return Ok(false);
             }
         }
         if next_leaf == 0 {
             break;
         }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_boundary_transitions =
+                diagnostics.leaf_boundary_transitions.saturating_add(1);
+        });
         leaf_id = next_leaf;
     }
     Ok(true)
@@ -958,6 +1856,25 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedIndexReader for OnDis
         )
     }
 
+    fn visit_current_aevt_entries(
+        &self,
+        start: &AevtKey,
+        end: Option<&AevtKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentAevtEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        if self.aevt_root == 0 {
+            return Ok(true);
+        }
+        visit_current_aevt_range(
+            self.aevt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+            visit,
+        )
+    }
+
     fn range_scan_avet(
         &self,
         start: &crate::storage::index::AvetKey,
@@ -1062,6 +1979,25 @@ impl<B: StorageBackend + 'static> crate::storage::delta_index::KeyedIndexReader
         )
     }
 
+    fn visit_current_aevt_entries(
+        &self,
+        start: &AevtKey,
+        end: Option<&AevtKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentAevtEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        if self.aevt_root == 0 {
+            return Ok(true);
+        }
+        visit_current_aevt_range(
+            self.aevt_root,
+            start,
+            end,
+            &self.backend_adapter,
+            &self.cache,
+            visit,
+        )
+    }
+
     fn range_scan_avet_entries(
         &self,
         start: &crate::storage::index::AvetKey,
@@ -1112,7 +2048,7 @@ mod tests {
     use super::*;
     use crate::graph::types::Value;
     use crate::storage::backend::MemoryBackend;
-    use crate::storage::index::{EavtKey, FactRef, encode_value};
+    use crate::storage::index::{AevtKey, EavtKey, FactRef, encode_value};
     use uuid::Uuid;
 
     #[test]
@@ -1177,6 +2113,42 @@ mod tests {
         )
     }
 
+    fn make_aevt(n: u128, attr: &str, tx: u64) -> (AevtKey, FactRef) {
+        (
+            AevtKey {
+                attribute: attr.to_string(),
+                entity: Uuid::from_u128(n),
+                valid_from: 0,
+                valid_to: i64::MAX,
+                tx_count: tx,
+                value_bytes: encode_value(&Value::Integer(tx.cast_signed())),
+                tx_id: tx,
+                asserted: true,
+            },
+            FactRef {
+                page_id: tx + 1,
+                slot_index: 0,
+            },
+        )
+    }
+
+    #[allow(clippy::indexing_slicing)]
+    fn raw_leaf_page(entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut page = vec![0u8; PAGE_SIZE];
+        page[0] = PAGE_TYPE_LEAF;
+        page[2..4].copy_from_slice(&u16::try_from(entries.len()).unwrap().to_le_bytes());
+        let mut data_end = PAGE_SIZE;
+        for (index, entry) in entries.iter().enumerate() {
+            data_end -= entry.len();
+            page[data_end..data_end + entry.len()].copy_from_slice(entry);
+            let slot = LEAF_HEADER_SIZE + index * SLOT_SIZE;
+            page[slot..slot + 2].copy_from_slice(&u16::try_from(data_end).unwrap().to_le_bytes());
+            page[slot + 2..slot + 4]
+                .copy_from_slice(&u16::try_from(entry.len()).unwrap().to_le_bytes());
+        }
+        page
+    }
+
     #[test]
     fn test_read_u16_at_oob_rejected() {
         let page = vec![0u8; 4];
@@ -1202,7 +2174,7 @@ mod tests {
         assert_eq!(next_free, 2, "single empty leaf = 1 page");
         // Verify it is a leaf page
         let page = cache.get_or_load(1, &backend).unwrap();
-        assert_eq!(page[0], PAGE_TYPE_LEAF);
+        assert!(is_leaf_page_type(page[0]));
         let entry_count = read_u16_at(&page[..], 2).unwrap();
         assert_eq!(entry_count, 0);
     }
@@ -1217,8 +2189,255 @@ mod tests {
         assert_eq!(root, 5);
         assert_eq!(next_free, 6);
         let page = cache.get_or_load(5, &backend).unwrap();
-        assert_eq!(page[0], PAGE_TYPE_LEAF);
+        assert!(is_leaf_page_type(page[0]));
         assert_eq!(read_u16_at(&page[..], 2).unwrap(), 1);
+    }
+
+    #[test]
+    fn prefix_leaf_roundtrips_and_rejects_corrupt_prefixes() {
+        let expected = (0u128..32)
+            .map(|n| make_eavt(n, ":shared/attribute", n as u64 + 1))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        let cache = PageCache::new(8);
+        write_leaf_page(&mut backend, &cache, 1, &serialized, 0).unwrap();
+
+        let page = backend.read_page(1).unwrap();
+        assert_eq!(page[0], PAGE_TYPE_PREFIX_LEAF);
+        assert_eq!(
+            read_leaf_entries::<EavtKey>(&page).unwrap(),
+            expected,
+            "prefix-compressed leaves must preserve exact sorted entries"
+        );
+
+        let mut corrupt_continuation = page.clone();
+        let continuation_slot = LEAF_HEADER_SIZE + SLOT_SIZE;
+        let continuation_offset =
+            usize::from(read_u16_at(&corrupt_continuation, continuation_slot).unwrap());
+        corrupt_continuation[continuation_offset..continuation_offset + 2]
+            .copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(
+            read_leaf_entries::<EavtKey>(&corrupt_continuation).is_err(),
+            "a prefix beyond the previous decoded entry must be rejected"
+        );
+
+        let mut corrupt_restart = page;
+        let restart_slot = LEAF_HEADER_SIZE + PREFIX_RESTART_INTERVAL * SLOT_SIZE;
+        let restart_offset = usize::from(read_u16_at(&corrupt_restart, restart_slot).unwrap());
+        corrupt_restart[restart_offset..restart_offset + 2].copy_from_slice(&1u16.to_le_bytes());
+        assert!(
+            read_leaf_entries::<EavtKey>(&corrupt_restart).is_err(),
+            "restart records must never depend on an earlier entry"
+        );
+        let mut cursor = LeafEntryCursor::<EavtKey>::new(Arc::new(corrupt_restart)).unwrap();
+        assert!(
+            cursor
+                .seek_lower_bound(&expected[PREFIX_RESTART_INTERVAL].0)
+                .is_err(),
+            "the page-backed cursor must reject a corrupt restart"
+        );
+    }
+
+    #[test]
+    fn raw_leaf_cursor_seeks_before_exact_between_and_after() {
+        let expected = (1u128..=32)
+            .map(|n| make_eavt(n, ":raw", n as u64))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let page = Arc::new(raw_leaf_page(&serialized));
+        assert_eq!(page[0], PAGE_TYPE_LEAF);
+
+        let starts = [
+            (make_eavt(0, ":raw", 0).0, Some(0usize)),
+            (expected[10].0.clone(), Some(10)),
+            (
+                EavtKey {
+                    attribute: ":zz".to_string(),
+                    ..expected[10].0.clone()
+                },
+                Some(11),
+            ),
+            (make_eavt(33, ":raw", 33).0, None),
+        ];
+        for (start, expected_index) in starts {
+            let mut cursor = LeafEntryCursor::<EavtKey>::new(page.clone()).unwrap();
+            cursor.seek_lower_bound(&start).unwrap();
+            let actual = cursor.next_entry().unwrap();
+            assert_eq!(actual, expected_index.map(|index| expected[index].clone()));
+        }
+    }
+
+    #[test]
+    fn prefix_leaf_cursor_seeks_from_one_restart_block() {
+        let expected = (1u128..=48)
+            .map(|n| make_aevt(n, ":shared/attribute", n as u64))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        let cache = PageCache::new(8);
+        write_leaf_page(&mut backend, &cache, 1, &serialized, 0).unwrap();
+        let page = Arc::new(backend.read_page(1).unwrap());
+        assert_eq!(page[0], PAGE_TYPE_PREFIX_LEAF);
+
+        let starts = [
+            (make_aevt(0, ":shared/attribute", 0).0, Some(0usize)),
+            (expected[25].0.clone(), Some(25)),
+            (
+                AevtKey {
+                    valid_from: 1,
+                    ..expected[25].0.clone()
+                },
+                Some(26),
+            ),
+            (make_aevt(49, ":shared/attribute", 49).0, None),
+        ];
+        for (start, expected_index) in starts {
+            let mut cursor = LeafEntryCursor::<AevtKey>::new(page.clone()).unwrap();
+            cursor.seek_lower_bound(&start).unwrap();
+            let actual = cursor.next_entry().unwrap();
+            assert_eq!(actual, expected_index.map(|index| expected[index].clone()));
+        }
+
+        #[cfg(feature = "bench-internals")]
+        {
+            reset_leaf_read_diagnostics();
+            set_leaf_read_diagnostics_enabled(true);
+            let mut cursor = LeafEntryCursor::<AevtKey>::new(page).unwrap();
+            cursor.seek_lower_bound(&expected[25].0).unwrap();
+            let diagnostics = leaf_read_diagnostics();
+            set_leaf_read_diagnostics_enabled(false);
+            assert!(diagnostics.prefix_entries_reconstructed > 0);
+            assert!(
+                diagnostics
+                    .prefix_entries_reconstructed
+                    .saturating_sub(diagnostics.prefix_restart_blocks_reconstructed)
+                    < u64::try_from(PREFIX_RESTART_INTERVAL).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn projected_aevt_visitor_obeys_raw_bounds_and_early_stop() {
+        let expected = (1u128..=32)
+            .map(|n| make_aevt(n, ":raw/aevt", n as u64))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        backend.write_page(1, &raw_leaf_page(&serialized)).unwrap();
+        let cache = PageCache::new(8);
+        let mut seen = Vec::new();
+        let complete = visit_current_aevt_range(
+            1,
+            &expected[9].0,
+            Some(&expected[20].0),
+            &backend,
+            &cache,
+            &mut |entry, fact_ref| {
+                seen.push((entry.entity, entry.tx_count, fact_ref));
+                Ok(seen.len() < 3)
+            },
+        )
+        .unwrap();
+        assert!(!complete);
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0].0, expected[9].0.entity);
+        assert_eq!(seen[2].2, expected[11].1);
+    }
+
+    #[test]
+    fn projected_aevt_visitor_reconstructs_prefix_restart_range() {
+        let expected = (1u128..=48)
+            .map(|n| make_aevt(n, ":shared/projected", n as u64))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        let cache = PageCache::new(8);
+        write_leaf_page(&mut backend, &cache, 1, &serialized, 0).unwrap();
+        assert_eq!(backend.read_page(1).unwrap()[0], PAGE_TYPE_PREFIX_LEAF);
+
+        let mut seen = Vec::new();
+        let complete = visit_current_aevt_range(
+            1,
+            &expected[17].0,
+            Some(&expected[35].0),
+            &backend,
+            &cache,
+            &mut |entry, fact_ref| {
+                seen.push((entry.entity, entry.value_bytes.to_vec(), fact_ref));
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert!(complete);
+        assert_eq!(seen.len(), 18);
+        assert_eq!(
+            seen.first().map(|entry| entry.0),
+            Some(expected[17].0.entity)
+        );
+        assert_eq!(seen.last().map(|entry| entry.2), Some(expected[34].1));
+    }
+
+    #[test]
+    fn leaf_cursor_rejects_malformed_slot_restart_and_serialized_entry() {
+        let raw_expected = (1u128..=8)
+            .map(|n| make_eavt(n, ":raw", n as u64))
+            .collect::<Vec<_>>();
+        let raw_serialized = btree_entries(raw_expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        let cache = PageCache::new(8);
+        let raw = raw_leaf_page(&raw_serialized);
+        assert_eq!(raw[0], PAGE_TYPE_LEAF);
+
+        let mut malformed_slot = raw.clone();
+        malformed_slot[LEAF_HEADER_SIZE..LEAF_HEADER_SIZE + 2]
+            .copy_from_slice(&u16::MAX.to_le_bytes());
+        let mut cursor = LeafEntryCursor::<EavtKey>::new(Arc::new(malformed_slot)).unwrap();
+        assert!(cursor.next_entry().is_err());
+
+        let mut malformed_entry = raw;
+        malformed_entry[LEAF_HEADER_SIZE + 2..LEAF_HEADER_SIZE + 4]
+            .copy_from_slice(&1u16.to_le_bytes());
+        let mut cursor = LeafEntryCursor::<EavtKey>::new(Arc::new(malformed_entry)).unwrap();
+        assert!(cursor.next_entry().is_err());
+
+        let prefix_expected = (1u128..=20)
+            .map(|n| make_aevt(n, ":prefix", n as u64))
+            .collect::<Vec<_>>();
+        let prefix_serialized = btree_entries(prefix_expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        write_leaf_page(&mut backend, &cache, 2, &prefix_serialized, 0).unwrap();
+        let mut prefix = backend.read_page(2).unwrap();
+        assert_eq!(prefix[0], PAGE_TYPE_PREFIX_LEAF);
+        prefix[1] = 8;
+        assert!(LeafEntryCursor::<AevtKey>::new(Arc::new(prefix)).is_err());
     }
 
     #[test]
@@ -1291,8 +2510,8 @@ mod tests {
             "300 entries must need multiple pages; got {}",
             pages_written
         );
-        // With 300 entries at 75% fill factor (~3072 bytes/leaf), we always get multiple
-        // leaf pages, so the root MUST be an internal node.
+        // With 300 entries at the production fill factor, we always get multiple leaf
+        // pages, so the root MUST be an internal node.
         assert_eq!(
             root_page[0], PAGE_TYPE_INTERNAL,
             "300 entries should produce an internal node root, got page type 0x{:02x}",
@@ -1301,16 +2520,18 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_sorted_vecs() {
+    fn test_merge_sorted_iters() {
         let a = vec![1u32, 3, 5, 7];
         let b = vec![2u32, 4, 6, 8];
-        let merged: Vec<u32> = merge_sorted_vecs(a, b).collect();
+        let merged: Vec<u32> = merge_sorted_iters(a.into_iter(), b.into_iter()).collect();
         assert_eq!(merged, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
-    fn test_merge_sorted_vecs_empty_left() {
-        let merged: Vec<u32> = merge_sorted_vecs(vec![], vec![1u32, 2, 3]).collect();
+    fn test_merge_sorted_iters_empty_left() {
+        let merged: Vec<u32> =
+            merge_sorted_iters(Vec::<u32>::new().into_iter(), vec![1u32, 2, 3].into_iter())
+                .collect();
         assert_eq!(merged, vec![1, 2, 3]);
     }
 
@@ -1328,14 +2549,14 @@ mod tests {
         // Collect leaf page IDs by following the chain from the leftmost leaf
         // The root may be an internal node; find the leftmost leaf first
         let root_page = cache.get_or_load(root, &backend).unwrap();
-        let mut leaf_pid = if root_page[0] == PAGE_TYPE_LEAF {
+        let mut leaf_pid = if is_leaf_page_type(root_page[0]) {
             root
         } else {
             // leftmost leaf: follow first child of each internal node down
             let mut pid = root;
             loop {
                 let p = cache.get_or_load(pid, &backend).unwrap();
-                if p[0] == PAGE_TYPE_LEAF {
+                if is_leaf_page_type(p[0]) {
                     break pid;
                 }
                 // first child is at child_array[0] = bytes 12..20
@@ -1347,7 +2568,7 @@ mod tests {
         let mut chain: Vec<u64> = vec![leaf_pid];
         loop {
             let p = cache.get_or_load(leaf_pid, &backend).unwrap();
-            assert_eq!(p[0], PAGE_TYPE_LEAF, "page {} should be leaf", leaf_pid);
+            assert!(is_leaf_page_type(p[0]), "page {} should be leaf", leaf_pid);
             let next = read_u64_at(&p[..], 4).unwrap();
             if next == 0 {
                 break;
@@ -1382,10 +2603,10 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_sorted_vecs_duplicates() {
+    fn test_merge_sorted_iters_duplicates() {
         let a = vec![1u32, 3, 3, 5];
         let b = vec![2u32, 3, 4];
-        let merged: Vec<u32> = merge_sorted_vecs(a, b).collect();
+        let merged: Vec<u32> = merge_sorted_iters(a.into_iter(), b.into_iter()).collect();
         assert_eq!(merged, vec![1, 2, 3, 3, 3, 4, 5]);
     }
 

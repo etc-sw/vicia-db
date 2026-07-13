@@ -23,6 +23,9 @@ for (const candidate of receipt.candidates) {
   validateSamples(candidate.checkpoint.deltaRssSamplesBytes, repetitions, `${label}: checkpoint delta RSS`);
   assert(Array.isArray(candidate.checkpoint.diagnosticsSamples) && candidate.checkpoint.diagnosticsSamples.length === repetitions, `${label}: checkpoint diagnostics samples`);
   for (const [index, diagnostics] of candidate.checkpoint.diagnosticsSamples.entries()) {
+    for (const field of ["peakSortReferenceEntries", "peakSortReferenceBytes", "cachedValueBytes"]) {
+      assert(Number.isSafeInteger(diagnostics[field]) && diagnostics[field] >= 0, `${label}: ownership diagnostics ${index} ${field}`);
+    }
     const phaseMicros = [
       diagnostics.factPackingMicros,
       diagnostics.committedIndexReadMicros,
@@ -63,6 +66,9 @@ for (const candidate of receipt.candidates) {
   assert(classified === layout.publishedBytes, `${label}: published byte accounting`);
   for (const component of [layout.facts, ...indexes.flatMap((index) => [index.leaf, index.internal])]) {
     assert(component.payloadBytes + component.structuralBytes + component.unusedBytes === component.pages * 4096, `${label}: page byte accounting`);
+  }
+  for (const index of indexes) {
+    assert(index.rawLeafPages + index.prefixLeafPages === index.leaf.pages, `${label}: leaf codec accounting`);
   }
 }
 

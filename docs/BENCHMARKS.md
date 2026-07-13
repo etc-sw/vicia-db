@@ -1534,6 +1534,86 @@ index sort (1,089.3 vs 1,946.0 ms) and the three populated B-tree builds, not
 publication sync (~1 ms). The receipt is retained under
 `benchmarks/baselines/storage-layout/2026-07-13-hal7800-lazy-full/receipt.json`.
 
+The next clean run at source `9c03d24` replaces the four simultaneous pending
+typed-key vectors with one reusable fact-position sort buffer and one canonical
+value encoding per fact. At fill 75, median checkpoint peak RSS falls from
+744.750 to 281.250 MiB and peak typed-key ownership falls from 1,000,000 entries
+to one streamed entry. In the same rotated run, fill 90 passes every receipt-owned
+gate: its 301.363 MiB image is 14.6% smaller than fill 75, checkpoint p50/p95 is
+5,013.869/5,717.048 ms versus 5,347.251/7,118.443 ms at fill 75, point p50 is
+0.027 ms, and aggregate p50 is 489.099 ms. Production bulk-build fill therefore
+moves from 75 to 90 without changing the public API or v11 page format. Raw
+evidence is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-reference-sort-full/receipt.json`.
+
+The v12 format candidate at source `9099310` adds adaptive page-local prefix
+leaves with restart interval 16. At production fill 90, all 20,000 EAVT leaves
+and the empty VAET leaf remain raw because prefix encoding does not save bytes;
+all 16,667 AEVT and 15,325 AVET leaves use the prefix codec. The published 1M
+image falls from 301.363 to 269.586 MiB (-10.54%). Against the preceding clean
+v11 receipt, checkpoint p50 improves from 5,013.869 to 4,914.621 ms, point p50
+from 0.026979 to 0.026294 ms, aggregate p50 from 489.099 to 472.221 ms, and
+checkpoint RSS p50 by 0.625 MiB. Exact count/checksum remain
+1,000,000/499,999,500,000.
+
+This receipt validates and its mutation audit rejects altered codec accounting,
+but it does not authorize rollout: checkpoint p95 is 5,783.706 ms (117.68% of
+p50) and aggregate p95 is 554.744 ms (117.48% of p50), both above the 115%
+tail gate. The host also had two unrelated long-running CPU-bound headless
+Chrome renderers, so the next evidence must be an uncontended clean rerun rather
+than another selective retry on the same host. V11 remains directly readable;
+foreground open and delta checkpoint do not rewrite it, and only caller-scheduled
+idle COW maintenance publishes v12. Raw evidence is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-prefix-full/receipt.json`.
+
+An uncontended follow-up at source `144b36b` terminated the two identified
+21–24-hour stale Vetch Playwright process trees before measurement and ran no
+other heavy work alongside the benchmark. Fill 90 again produced the exact
+269.586 MiB image and 1,000,000/499,999,500,000 result. Against the v11
+reference-sort receipt, point p50 improves 6.35% (0.026979 to 0.025266 ms),
+aggregate p50 improves 9.08% (489.099 to 444.675 ms), checkpoint p50 changes
+by +1.32% (5,013.869 to 5,079.803 ms), and checkpoint RSS p50 falls 0.625 MiB.
+Aggregate p95/p50 is now 106.96%, but checkpoint remains outside the rollout
+gate at 6,127.321/5,079.803 ms, or 120.62%.
+
+The two slow checkpoint samples raise EAVT/AEVT collect-sort and multiple index
+build phases together; they do not isolate prefix encode/decode or publication
+sync as a single cause. In the same rotated run, fill 75, 85, and 100 meet the
+checkpoint tail rule, while no candidate passes every receipt-owned gate.
+V12 therefore remains unmerged and Vetch keeps its v11 browser package. The
+canonical uncontended evidence is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-prefix-uncontended-full/receipt.json`.
+
+The checkpoint construction follow-up removes three general empty-base costs:
+it serializes borrowed pending keys instead of cloning attribute/value buffers,
+reuses exact EAVT fact-position order for AEVT when every fact has one
+attribute, and serializes standalone separator keys only for the first entry of
+each leaf. At source `2526307`, clean fill-90 checkpoint p50/p95 falls to
+3,633.534/3,963.193 ms, 28.5%/35.3% below the uncontended v12 receipt, and the
+p95/p50 ratio is 109.07%. Checkpoint RSS p50 remains 279.750 MiB, graph bytes
+remain 269.586 MiB, and count/checksum remain exactly
+1,000,000/499,999,500,000.
+
+That receipt validates and its mutation audit passes, but does not select a
+fill candidate. A separately owned Vetch TypeGPU QA process began during the
+run and overlapped the query phase; fill-90 point p95 rose to 0.052 ms and
+aggregate p95/p50 to 119.51%, while both gates passed in the two preceding clean
+v12 receipts. The checkpoint-tail objective is closed without relaxing its
+rule, but package rollout still requires one uncontended full receipt with all
+receipt-owned gates plus real-browser WASM execution. Evidence is retained
+under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-lazy-separator-full/receipt.json`.
+
+After the unrelated QA process exited, source `65eaaad` repeated the complete
+matrix without concurrent build or QA work. Fill 90 again passes checkpoint at
+3,775.192/4,256.684 ms p50/p95 (112.75%), aggregate at
+458.594/513.579 ms (111.99%), size, and RSS. Point read is the sole failing
+gate: 0.0268/0.0571 ms p50/p95, an absolute 30-microsecond tail gap. No
+candidate is selected, so the remaining evidence task is a more stable repeated
+point-read contract rather than another lucky full retry. The final uncontended
+receipt is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-final-uncontended-full/receipt.json`.
+
 The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
@@ -1594,6 +1674,78 @@ Raw samples and provenance are preserved at
 ```bash
 just checkpoint-construction-smoke
 just checkpoint-construction-full
+```
+
+### Restart-aware leaf read path
+
+`vicia.leaf-read-path.v1` compares the former full-leaf materialization path
+with the page-backed raw/prefix cursor on one byte-identical fill-90 v12 1M
+fixture. Point samples measure warmed 200-query batches in a fresh process;
+aggregate samples run in a separate fresh process. Diagnostics run as one
+explicit probe query so per-entry counters do not distort the timed samples.
+
+| Metric | Full-leaf baseline | Page-backed cursor | Gate |
+|---|---:|---:|---:|
+| Point batch p95 | 0.02050 ms | 0.01087 ms | pass (`<= 0.050 ms`, no regression) |
+| Aggregate p50 | 432.492 ms | 419.073 ms | fail (3.10%, requires 10% or `<= 230 ms`) |
+| Aggregate p95/p50 | 102.75% | 101.87% | pass (`<= 115%`) |
+| Query RSS delta | 1.125 MiB | 1.125 MiB | pass (`<= baseline + 2 MiB`) |
+| Peak full-leaf entries / struct bytes / payload bytes | 60 / 7,200 / 4,020 | 0 / 0 / 0 | pass |
+
+The cursor is retained as the durable traversal boundary: it removes leaf-local
+result ownership, cuts selective point latency, preserves exact
+1,000,000/499,999,500,000 count/checksum, and bounds prefix resume work to a
+restart block. It does not avoid deserializing all 1M `AevtKey` values for an
+aggregate, so the performance receipt rejects rollout. The next measured slice
+is an allocation-free AEVT projection decoder inside this cursor, not a return
+to full-leaf materialization or a larger prefetch batch.
+
+The clean canonical storage-layout rerun at source `2efa2ac` validates and
+passes its mutation audit after the cursor change. Fill 90 keeps the exact
+269.586 MiB image and passes size, checkpoint (3,650.368/4,112.685 ms),
+aggregate (435.765/446.391 ms), and RSS gates. Its 0.01876 ms point p95 fails
+the receipt-owned regression threshold, while every other fill fails at least
+one size, checkpoint, or point gate. `selectedFillPercent` therefore remains
+`null`; the rerun is regression evidence, not rollout authority. Its receipt is
+preserved under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-leaf-cursor-full/`.
+
+Raw receipts are preserved under
+`benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-full/`.
+
+The follow-up borrowed AEVT projection keeps that cursor boundary and decodes
+the existing `(AevtKey, FactRef)` postcard bytes into borrowed attribute/value
+views. The clean full receipt compares against the page-backed cursor candidate,
+not the older full-leaf baseline:
+
+| Metric | Page-backed cursor | Borrowed projection | Gate |
+|---|---:|---:|---:|
+| Point batch p95 | 0.01087 ms | 0.01584 ms | fail (absolute `<= 0.050 ms` passes; recorded no-regression gate fails) |
+| Aggregate p50 | 419.073 ms | 413.713 ms | fail (1.28%, requires 10% or `<= 230 ms`) |
+| Aggregate p95/p50 | 101.87% | 104.80% | pass (`<= 115%`) |
+| Query RSS delta | 1.125 MiB | 1.250 MiB | pass (`<= baseline + 2 MiB`) |
+| Projected emitted / owned AEVT decode | n/a | 1,000,000 / 0 | pass |
+| Peak full-leaf entries / struct bytes / payload bytes | 0 / 0 / 0 | 0 / 0 / 0 | pass |
+
+Projection decode time in the diagnostic probe falls from 177.422 ms to
+132.585 ms (25.27%), while end-to-end aggregate p50 improves only 5.360 ms.
+The remaining aggregate cost is therefore outside owned AEVT leaf-key decode;
+the next measurement must split reducer/entity flush and aggregate-sink time
+before another implementation slice. The point workload never enters the
+projection path (`aevtProjectionDecodes = 0` in its probe), so its recorded
+no-regression failure is retained as host-level gate evidence rather than
+attributed to this cursor. v12 rollout remains open, and no browser package or
+canonical storage-layout evidence is replaced from this receipt.
+
+The clean projection receipts are preserved under
+`benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/`.
+
+```bash
+just leaf-read-path-smoke
+just leaf-read-path-full
+just leaf-read-path-compare \
+  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/baseline.json \
+  benchmarks/baselines/leaf-read-path/2026-07-13-hal7800-projection-full/candidate.json
 ```
 
 ---

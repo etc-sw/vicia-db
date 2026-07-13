@@ -3,13 +3,15 @@ use crate::graph::FactStorage;
 ///
 /// This module bridges the gap between high-level fact operations and
 /// low-level page-based storage backends.
-use crate::graph::types::{Fact, RETRACT_ALL_VALID_FROM, VALID_TIME_FOREVER, Value};
+use crate::graph::types::{
+    EntityId, Fact, RETRACT_ALL_VALID_FROM, TxId, VALID_TIME_FOREVER, Value,
+};
 use crate::storage::FACT_PAGE_FORMAT_PACKED;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::backend::file::FileBackend;
 use crate::storage::btree_v6::{
     BtreeBuildOptions, MutexStorageBackend, OnDiskIndexReader, btree_entries,
-    build_btree_from_key_entries, build_btree_with_options, merge_sorted_vecs, stream_all_entries,
+    build_btree_from_key_entries, build_btree_with_options, merge_sorted_iters, stream_all_entries,
 };
 use crate::storage::cache::PageCache;
 use crate::storage::delta_growth::{DeltaGrowthMetrics, DeltaMaintenanceDecision};
@@ -56,6 +58,12 @@ pub struct CheckpointConstructionDiagnostics {
     pub peak_fact_pages_in_memory: u64,
     /// Maximum typed entries retained for one index.
     pub peak_typed_entries: u64,
+    /// Maximum pending fact-position references retained for sorting.
+    pub peak_sort_reference_entries: u64,
+    /// Maximum bytes owned by the pending fact-position sort buffer.
+    pub peak_sort_reference_bytes: u64,
+    /// Canonical value bytes cached once across all pending index sorts.
+    pub cached_value_bytes: u64,
     /// Candidate fact pages visited across index passes.
     pub fact_page_visits: u64,
     /// Maximum serialized entries retained by a B-tree frontier.
@@ -106,6 +114,9 @@ thread_local! {
         const { Cell::new(CheckpointConstructionDiagnostics {
             peak_fact_pages_in_memory: 0,
             peak_typed_entries: 0,
+            peak_sort_reference_entries: 0,
+            peak_sort_reference_bytes: 0,
+            cached_value_bytes: 0,
             fact_page_visits: 0,
             peak_serialized_entries: 0,
             peak_serialized_bytes: 0,
@@ -661,9 +672,12 @@ impl BrowserV11BootstrapPlan {
 
         let header = FileHeader::from_bytes(page0)?;
         header.validate()?;
-        if header.version != crate::storage::FORMAT_VERSION {
+        if header.version < crate::storage::INTEGRITY_FORMAT_VERSION
+            || header.version > crate::storage::FORMAT_VERSION
+        {
             anyhow::bail!(
-                "Sparse browser bootstrap requires v{} format, got v{}",
+                "Sparse browser bootstrap requires a paged-ready v{}..=v{} format, got v{}",
+                crate::storage::INTEGRITY_FORMAT_VERSION,
                 crate::storage::FORMAT_VERSION,
                 header.version
             );
@@ -1080,6 +1094,7 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     committed_fact_pages: Arc<AtomicU64>,
     committed_fact_page_start: Arc<AtomicU64>,
     base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
+    loaded_format_version: u32,
     write_blocked_legacy: bool,
     btree_build_options: BtreeBuildOptions,
 }
@@ -1132,6 +1147,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             committed_fact_pages,
             committed_fact_page_start,
             base_integrity: None,
+            loaded_format_version: crate::storage::FORMAT_VERSION,
             write_blocked_legacy: false,
             btree_build_options,
         };
@@ -2088,6 +2104,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.committed_fact_page_start
             .store(candidate.base_fact_page_start, Ordering::SeqCst);
         self.base_integrity = Some(candidate.base_integrity);
+        self.loaded_format_version = candidate.header.version;
         self.last_checkpointed_tx_count = candidate.checkpoint_tx_count;
         self.dirty = false;
         self.wire_committed_readers(&candidate.header, Vec::new())?;
@@ -2111,6 +2128,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             h.validate()?;
             (h, header_page)
         };
+        self.loaded_format_version = header.version;
 
         // Migrate v1 → v2 if needed
         if header.version < 2 {
@@ -2145,7 +2163,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
         self.committed_fact_page_start
             .store(base_fact_page_start, Ordering::SeqCst);
-        self.base_integrity = if header.version == crate::storage::FORMAT_VERSION {
+        self.base_integrity = if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION {
             let extension = header_extension
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("v11 database is missing its header extension"))?;
@@ -2285,7 +2303,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         // Old files (pre-fix): checksum covers only fact pages.
         // Try full checksum first; fall back to fact-only for backwards compat.
         let needs_format_upgrade =
-            header.version < crate::storage::FORMAT_VERSION && !self.write_blocked_legacy;
+            header.version < crate::storage::INTEGRITY_FORMAT_VERSION && !self.write_blocked_legacy;
         let needs_rebuild = if selected_delta_has_segments {
             if needs_format_upgrade {
                 anyhow::bail!("Delta manifest requires the current file format");
@@ -2302,8 +2320,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             true
         } else if num_fact_pages == 0 || header.eavt_root_page == 0 {
             num_fact_pages > 0 // rebuild if facts exist but no index root
-        } else if header.version == crate::storage::FORMAT_VERSION {
-            false // v11 base pages are verified lazily through the catalog.
+        } else if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION {
+            false // v11+ base pages are verified lazily through the catalog.
         } else {
             let backend = self
                 .backend
@@ -2675,7 +2693,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             Err(e) => anyhow::bail!("Failed to read header from existing file: {}", e),
         };
         let curr_header = FileHeader::from_bytes(&curr_header_page)?;
-        if curr_header.version != crate::storage::FORMAT_VERSION
+        if curr_header.version < crate::storage::INTEGRITY_FORMAT_VERSION
+            || curr_header.version > crate::storage::FORMAT_VERSION
             || curr_header.fact_page_format != FACT_PAGE_FORMAT_PACKED
             || curr_header.eavt_root_page == 0
             || curr_header.aevt_root_page == 0
@@ -2891,15 +2910,24 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             diagnostics.fact_sync_micros = checkpoint_elapsed_micros(phase_started);
         });
 
-        // ── Step C: build sorted index entries for pending facts ────────────────
+        // ── Step C: prepare one reusable pending fact-reference sort buffer ─────
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let (pending_eavt, pending_aevt, pending_avet, pending_vaet) =
-            build_sorted_index_entries(&pending_facts, &new_fact_refs);
+        let mut pending_order = PendingIndexOrder::new(&pending_facts, &new_fact_refs);
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.pending_index_sort_micros = checkpoint_elapsed_micros(phase_started);
-            diagnostics.peak_typed_entries = u64::try_from(pending_facts.len()).unwrap_or(u64::MAX);
+            diagnostics.peak_typed_entries = u64::from(!pending_facts.is_empty());
+            diagnostics.peak_sort_reference_entries =
+                u64::try_from(pending_facts.len()).unwrap_or(u64::MAX);
+            diagnostics.peak_sort_reference_bytes = u64::try_from(
+                pending_facts
+                    .len()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )
+            .unwrap_or(u64::MAX);
+            diagnostics.cached_value_bytes =
+                u64::try_from(pending_order.cached_value_bytes()).unwrap_or(u64::MAX);
         });
 
         // ── Step D: merge committed + pending entries, build new B+trees ─────────
@@ -2909,13 +2937,24 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let eavt_entries: Box<dyn Iterator<Item = (EavtKey, FactRef)>> =
-            if !committed_eavt.is_empty() {
-                Box::new(merge_sorted_vecs(committed_eavt, pending_eavt))
-            } else {
-                Box::new(pending_eavt.into_iter())
-            };
-        let (eavt_root, next1) = self.build_btree_keys(eavt_entries, &mut *backend, index_start)?;
+        pending_order.sort_eavt();
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.eavt_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let (eavt_root, next1) = if committed_eavt.is_empty() {
+            self.build_btree_keys(
+                pending_order.borrowed_eavt_entries(),
+                &mut *backend,
+                index_start,
+            )?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_eavt.into_iter(), pending_order.eavt_entries());
+            self.build_btree_keys(entries, &mut *backend, index_start)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.eavt_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -2923,13 +2962,20 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let aevt_entries: Box<dyn Iterator<Item = (AevtKey, FactRef)>> =
-            if !committed_aevt.is_empty() {
-                Box::new(merge_sorted_vecs(committed_aevt, pending_aevt))
-            } else {
-                Box::new(pending_aevt.into_iter())
-            };
-        let (aevt_root, next2) = self.build_btree_keys(aevt_entries, &mut *backend, next1)?;
+        pending_order.sort_aevt();
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.aevt_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let (aevt_root, next2) = if committed_aevt.is_empty() {
+            self.build_btree_keys(pending_order.borrowed_aevt_entries(), &mut *backend, next1)?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_aevt.into_iter(), pending_order.aevt_entries());
+            self.build_btree_keys(entries, &mut *backend, next1)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.aevt_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -2937,13 +2983,20 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let avet_entries: Box<dyn Iterator<Item = (AvetKey, FactRef)>> =
-            if !committed_avet.is_empty() {
-                Box::new(merge_sorted_vecs(committed_avet, pending_avet))
-            } else {
-                Box::new(pending_avet.into_iter())
-            };
-        let (avet_root, next3) = self.build_btree_keys(avet_entries, &mut *backend, next2)?;
+        pending_order.sort_avet();
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.avet_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let (avet_root, next3) = if committed_avet.is_empty() {
+            self.build_btree_keys(pending_order.borrowed_avet_entries(), &mut *backend, next2)?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_avet.into_iter(), pending_order.avet_entries());
+            self.build_btree_keys(entries, &mut *backend, next2)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.avet_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -2951,13 +3004,20 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let vaet_entries: Box<dyn Iterator<Item = (VaetKey, FactRef)>> =
-            if !committed_vaet.is_empty() {
-                Box::new(merge_sorted_vecs(committed_vaet, pending_vaet))
-            } else {
-                Box::new(pending_vaet.into_iter())
-            };
-        let (vaet_root, next4) = self.build_btree_keys(vaet_entries, &mut *backend, next3)?;
+        pending_order.sort_vaet();
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.vaet_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let (vaet_root, next4) = if committed_vaet.is_empty() {
+            self.build_btree_keys(pending_order.borrowed_vaet_entries(), &mut *backend, next3)?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_vaet.into_iter(), pending_order.vaet_entries());
+            self.build_btree_keys(entries, &mut *backend, next3)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.vaet_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -3088,6 +3148,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn delta_maintenance_decision(&self) -> DeltaMaintenanceDecision {
+        if self.loaded_format_version < crate::storage::FORMAT_VERSION {
+            return DeltaMaintenanceDecision::ScheduleBackgroundRecompact;
+        }
         match &self.delta_manifest_selection {
             PersistedManifestSelection::Use { manifest, .. } => {
                 DeltaGrowthMetrics::from_manifest(manifest).decide()
@@ -3129,6 +3192,12 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
 
         match &self.delta_manifest_selection {
+            PersistedManifestSelection::NoDeltaManifest
+                if self.loaded_format_version < crate::storage::FORMAT_VERSION =>
+            {
+                let candidate = self.write_recompact_candidate_from_visible_facts()?;
+                self.publish_recompact_candidate(candidate)
+            }
             PersistedManifestSelection::NoDeltaManifest => Ok(CheckpointOutcome::Noop),
             PersistedManifestSelection::RecoveryRequired { reason } => {
                 anyhow::bail!("Cannot recompact delta manifest requiring recovery: {reason:?}");
@@ -3251,8 +3320,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let page0 = backend.read_page(0)?;
         let header = FileHeader::from_bytes(&page0)?;
         header.validate()?;
-        if header.version != crate::storage::FORMAT_VERSION {
-            anyhow::bail!("Paged browser export requires the current file format");
+        if header.version < crate::storage::INTEGRITY_FORMAT_VERSION
+            || header.version > crate::storage::FORMAT_VERSION
+        {
+            anyhow::bail!("Paged browser export requires a paged-ready file format");
         }
         let extension = HeaderExtension::read_from_page0(header.version, &page0)?
             .ok_or_else(|| anyhow::anyhow!("Paged browser export requires header metadata"))?;
@@ -3856,7 +3927,7 @@ fn build_header_page_with_base_integrity(
     base_fact_page_start: u64,
     base_integrity: BasePageIntegrityDescriptor,
 ) -> Result<Vec<u8>> {
-    if header.version == crate::storage::FORMAT_VERSION {
+    if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION {
         let extension = HeaderExtension::empty()
             .with_base_fact_page_start(base_fact_page_start)?
             .with_base_integrity(base_integrity)?;
@@ -3883,35 +3954,47 @@ fn new_index_entries_with_capacity(capacity: usize) -> SortedIndexEntries {
 }
 
 fn eavt_key(fact: &Fact) -> EavtKey {
+    eavt_key_with_value_bytes(fact, encode_value(&fact.value))
+}
+
+fn eavt_key_with_value_bytes(fact: &Fact, value_bytes: Vec<u8>) -> EavtKey {
     EavtKey {
         entity: fact.entity,
         attribute: fact.attribute.clone(),
         valid_from: fact.valid_from,
         valid_to: fact.valid_to,
         tx_count: fact.tx_count,
-        value_bytes: encode_value(&fact.value),
+        value_bytes,
         tx_id: fact.tx_id,
         asserted: fact.asserted,
     }
 }
 
 fn aevt_key(fact: &Fact) -> AevtKey {
+    aevt_key_with_value_bytes(fact, encode_value(&fact.value))
+}
+
+fn aevt_key_with_value_bytes(fact: &Fact, value_bytes: Vec<u8>) -> AevtKey {
     AevtKey {
         attribute: fact.attribute.clone(),
         entity: fact.entity,
         valid_from: fact.valid_from,
         valid_to: fact.valid_to,
         tx_count: fact.tx_count,
-        value_bytes: encode_value(&fact.value),
+        value_bytes,
         tx_id: fact.tx_id,
         asserted: fact.asserted,
     }
 }
 
 fn avet_key(fact: &Fact) -> AvetKey {
+    avet_key_with_value_bytes(fact, encode_value(&fact.value))
+}
+
+fn avet_key_with_value_bytes(fact: &Fact, value_bytes: Vec<u8>) -> AvetKey {
     AvetKey {
         attribute: fact.attribute.clone(),
-        value_bytes: encode_value(&fact.value),
+        value_bytes,
         valid_from: fact.valid_from,
         valid_to: fact.valid_to,
         entity: fact.entity,
@@ -3935,6 +4018,362 @@ fn vaet_key(fact: &Fact) -> Option<VaetKey> {
         tx_id: fact.tx_id,
         asserted: fact.asserted,
     })
+}
+
+struct PendingIndexOrder<'a> {
+    facts: &'a [Fact],
+    refs: &'a [FactRef],
+    value_bytes: Vec<Vec<u8>>,
+    order: Vec<usize>,
+    uniform_attribute: bool,
+    eavt_ordered: bool,
+}
+
+// Initial base construction can serialize these borrowed views immediately into
+// the B-tree page frontier. Keeping the owned key types for committed/pending
+// merges avoids changing their ordering contract while removing three copies of
+// every pending attribute and canonical value from the common empty-base path.
+#[derive(Serialize)]
+struct BorrowedEavtKey<'a> {
+    entity: EntityId,
+    attribute: &'a str,
+    valid_from: i64,
+    valid_to: i64,
+    tx_count: u64,
+    value_bytes: &'a [u8],
+    tx_id: TxId,
+    asserted: bool,
+}
+
+#[derive(Serialize)]
+struct BorrowedAevtKey<'a> {
+    attribute: &'a str,
+    entity: EntityId,
+    valid_from: i64,
+    valid_to: i64,
+    tx_count: u64,
+    value_bytes: &'a [u8],
+    tx_id: TxId,
+    asserted: bool,
+}
+
+#[derive(Serialize)]
+struct BorrowedAvetKey<'a> {
+    attribute: &'a str,
+    value_bytes: &'a [u8],
+    valid_from: i64,
+    valid_to: i64,
+    entity: EntityId,
+    tx_count: u64,
+    tx_id: TxId,
+    asserted: bool,
+}
+
+#[derive(Serialize)]
+struct BorrowedVaetKey<'a> {
+    ref_target: EntityId,
+    attribute: &'a str,
+    valid_from: i64,
+    valid_to: i64,
+    source_entity: EntityId,
+    tx_count: u64,
+    tx_id: TxId,
+    asserted: bool,
+}
+
+fn required_index<T>(slice: &[T], index: usize) -> &T {
+    match slice.get(index) {
+        Some(value) => value,
+        None => unreachable!("pending sort index must originate from the fact slice"),
+    }
+}
+
+impl<'a> PendingIndexOrder<'a> {
+    fn new(facts: &'a [Fact], refs: &'a [FactRef]) -> Self {
+        debug_assert_eq!(facts.len(), refs.len());
+        let uniform_attribute = facts
+            .first()
+            .is_none_or(|first| facts.iter().all(|fact| fact.attribute == first.attribute));
+        Self {
+            facts,
+            refs,
+            value_bytes: facts.iter().map(|fact| encode_value(&fact.value)).collect(),
+            order: Vec::with_capacity(facts.len()),
+            uniform_attribute,
+            eavt_ordered: false,
+        }
+    }
+
+    fn reset_all(&mut self) {
+        self.order.clear();
+        self.order.extend(0..self.facts.len());
+        self.eavt_ordered = false;
+    }
+
+    fn sort_eavt(&mut self) {
+        self.reset_all();
+        let facts = self.facts;
+        let values = &self.value_bytes;
+        self.order.sort_unstable_by(|&left, &right| {
+            let left_fact = required_index(facts, left);
+            let right_fact = required_index(facts, right);
+            (
+                left_fact.entity,
+                &left_fact.attribute,
+                left_fact.valid_from,
+                left_fact.valid_to,
+                left_fact.tx_count,
+                required_index(values, left),
+                left_fact.tx_id,
+                left_fact.asserted,
+            )
+                .cmp(&(
+                    right_fact.entity,
+                    &right_fact.attribute,
+                    right_fact.valid_from,
+                    right_fact.valid_to,
+                    right_fact.tx_count,
+                    required_index(values, right),
+                    right_fact.tx_id,
+                    right_fact.asserted,
+                ))
+        });
+        self.eavt_ordered = true;
+    }
+
+    fn sort_aevt(&mut self) {
+        // With one attribute EAVT and AEVT have the same remaining key order,
+        // so the immediately preceding EAVT sort is already the exact answer.
+        if self.uniform_attribute && self.eavt_ordered {
+            return;
+        }
+        self.reset_all();
+        let facts = self.facts;
+        let values = &self.value_bytes;
+        self.order.sort_unstable_by(|&left, &right| {
+            let left_fact = required_index(facts, left);
+            let right_fact = required_index(facts, right);
+            (
+                &left_fact.attribute,
+                left_fact.entity,
+                left_fact.valid_from,
+                left_fact.valid_to,
+                left_fact.tx_count,
+                required_index(values, left),
+                left_fact.tx_id,
+                left_fact.asserted,
+            )
+                .cmp(&(
+                    &right_fact.attribute,
+                    right_fact.entity,
+                    right_fact.valid_from,
+                    right_fact.valid_to,
+                    right_fact.tx_count,
+                    required_index(values, right),
+                    right_fact.tx_id,
+                    right_fact.asserted,
+                ))
+        });
+    }
+
+    fn sort_avet(&mut self) {
+        self.reset_all();
+        let facts = self.facts;
+        let values = &self.value_bytes;
+        self.order.sort_unstable_by(|&left, &right| {
+            let left_fact = required_index(facts, left);
+            let right_fact = required_index(facts, right);
+            (
+                &left_fact.attribute,
+                required_index(values, left),
+                left_fact.valid_from,
+                left_fact.valid_to,
+                left_fact.entity,
+                left_fact.tx_count,
+                left_fact.tx_id,
+                left_fact.asserted,
+            )
+                .cmp(&(
+                    &right_fact.attribute,
+                    required_index(values, right),
+                    right_fact.valid_from,
+                    right_fact.valid_to,
+                    right_fact.entity,
+                    right_fact.tx_count,
+                    right_fact.tx_id,
+                    right_fact.asserted,
+                ))
+        });
+    }
+
+    fn sort_vaet(&mut self) {
+        self.order.clear();
+        self.order.extend(
+            self.facts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, fact)| matches!(fact.value, Value::Ref(_)).then_some(index)),
+        );
+        let facts = self.facts;
+        self.order.sort_unstable_by(|&left, &right| {
+            let left_fact = required_index(facts, left);
+            let right_fact = required_index(facts, right);
+            let Value::Ref(left_target) = &left_fact.value else {
+                unreachable!("VAET order contains only Ref values")
+            };
+            let Value::Ref(right_target) = &right_fact.value else {
+                unreachable!("VAET order contains only Ref values")
+            };
+            (
+                left_target,
+                &left_fact.attribute,
+                left_fact.valid_from,
+                left_fact.valid_to,
+                left_fact.entity,
+                left_fact.tx_count,
+                left_fact.tx_id,
+                left_fact.asserted,
+            )
+                .cmp(&(
+                    right_target,
+                    &right_fact.attribute,
+                    right_fact.valid_from,
+                    right_fact.valid_to,
+                    right_fact.entity,
+                    right_fact.tx_count,
+                    right_fact.tx_id,
+                    right_fact.asserted,
+                ))
+        });
+    }
+
+    fn eavt_entries(&self) -> impl Iterator<Item = (EavtKey, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            let value_bytes = required_index(&self.value_bytes, index).clone();
+            (
+                eavt_key_with_value_bytes(fact, value_bytes),
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    fn borrowed_eavt_entries(&self) -> impl Iterator<Item = (BorrowedEavtKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            (
+                BorrowedEavtKey {
+                    entity: fact.entity,
+                    attribute: &fact.attribute,
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    tx_count: fact.tx_count,
+                    value_bytes: required_index(&self.value_bytes, index).as_slice(),
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    fn aevt_entries(&self) -> impl Iterator<Item = (AevtKey, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            let value_bytes = required_index(&self.value_bytes, index).clone();
+            (
+                aevt_key_with_value_bytes(fact, value_bytes),
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    fn borrowed_aevt_entries(&self) -> impl Iterator<Item = (BorrowedAevtKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            (
+                BorrowedAevtKey {
+                    attribute: &fact.attribute,
+                    entity: fact.entity,
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    tx_count: fact.tx_count,
+                    value_bytes: required_index(&self.value_bytes, index).as_slice(),
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    fn avet_entries(&self) -> impl Iterator<Item = (AvetKey, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            let value_bytes = required_index(&self.value_bytes, index).clone();
+            (
+                avet_key_with_value_bytes(fact, value_bytes),
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    fn borrowed_avet_entries(&self) -> impl Iterator<Item = (BorrowedAvetKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            (
+                BorrowedAvetKey {
+                    attribute: &fact.attribute,
+                    value_bytes: required_index(&self.value_bytes, index).as_slice(),
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    entity: fact.entity,
+                    tx_count: fact.tx_count,
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    fn vaet_entries(&self) -> impl Iterator<Item = (VaetKey, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            let key = match vaet_key(fact) {
+                Some(key) => key,
+                None => unreachable!("VAET order contains only Ref values"),
+            };
+            (key, *required_index(self.refs, index))
+        })
+    }
+
+    fn borrowed_vaet_entries(&self) -> impl Iterator<Item = (BorrowedVaetKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            let Value::Ref(ref_target) = &fact.value else {
+                unreachable!("VAET order contains only Ref values")
+            };
+            (
+                BorrowedVaetKey {
+                    ref_target: *ref_target,
+                    attribute: &fact.attribute,
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    source_entity: fact.entity,
+                    tx_count: fact.tx_count,
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn cached_value_bytes(&self) -> usize {
+        self.value_bytes.iter().map(Vec::len).sum()
+    }
 }
 
 fn push_index_entries_for_fact(entries: &mut SortedIndexEntries, fact: &Fact, fact_ref: FactRef) {
@@ -4024,6 +4463,219 @@ mod tests {
     use std::io::Write;
     use std::time::Instant;
     use uuid::Uuid;
+
+    #[test]
+    fn pending_reference_order_matches_owned_key_order_for_all_value_kinds() {
+        let entities = [Uuid::from_u128(3), Uuid::from_u128(1), Uuid::from_u128(2)];
+        let values = vec![
+            Value::String("zeta".to_string()),
+            Value::Integer(-7),
+            Value::Float(f64::NAN),
+            Value::Boolean(true),
+            Value::Keyword(":kind/value".to_string()),
+            Value::Null,
+            Value::Ref(Uuid::from_u128(9)),
+        ];
+        let mut facts = Vec::new();
+        for (index, value) in values.into_iter().enumerate() {
+            let entity = entities[index % entities.len()];
+            let mut fact = Fact::with_valid_time(
+                entity,
+                if index % 2 == 0 { ":z/attr" } else { ":a/attr" }.to_string(),
+                value,
+                100 + index as u64,
+                10 + index as u64,
+                -20 + index as i64,
+                200 + index as i64,
+            );
+            if index == 5 {
+                fact.asserted = false;
+            }
+            facts.push(fact);
+        }
+        let refs: Vec<FactRef> = (0..facts.len())
+            .map(|index| FactRef {
+                page_id: 40 + index as u64,
+                slot_index: index as u16,
+            })
+            .collect();
+        let eager = build_sorted_index_entries(&facts, &refs);
+        let mut order = PendingIndexOrder::new(&facts, &refs);
+
+        order.sort_eavt();
+        assert_eq!(order.eavt_entries().collect::<Vec<_>>(), eager.0);
+        order.sort_aevt();
+        assert_eq!(order.aevt_entries().collect::<Vec<_>>(), eager.1);
+        order.sort_avet();
+        assert_eq!(order.avet_entries().collect::<Vec<_>>(), eager.2);
+        order.sort_vaet();
+        assert_eq!(order.vaet_entries().collect::<Vec<_>>(), eager.3);
+    }
+
+    #[test]
+    fn uniform_attribute_reuses_exact_eavt_order_for_aevt() {
+        let facts: Vec<Fact> = [7u128, 2, 9, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, entity)| {
+                Fact::with_valid_time(
+                    Uuid::from_u128(entity),
+                    ":layout/value".to_string(),
+                    Value::Integer(index as i64),
+                    100 + index as u64,
+                    10 + index as u64,
+                    index as i64,
+                    200 + index as i64,
+                )
+            })
+            .collect();
+        let refs: Vec<FactRef> = (0..facts.len())
+            .map(|index| FactRef {
+                page_id: 20 + index as u64,
+                slot_index: 0,
+            })
+            .collect();
+        let eager = build_sorted_index_entries(&facts, &refs);
+        let mut order = PendingIndexOrder::new(&facts, &refs);
+
+        order.sort_eavt();
+        let eavt_positions = order.order.clone();
+        order.sort_aevt();
+
+        assert_eq!(order.order, eavt_positions);
+        assert_eq!(order.aevt_entries().collect::<Vec<_>>(), eager.1);
+    }
+
+    #[test]
+    fn borrowed_pending_keys_build_byte_identical_index_pages() {
+        let facts = vec![
+            Fact::with_valid_time(
+                Uuid::from_u128(2),
+                ":person/name".to_string(),
+                Value::String("beta".to_string()),
+                12,
+                2,
+                100,
+                400,
+            ),
+            Fact::with_valid_time(
+                Uuid::from_u128(1),
+                ":person/score".to_string(),
+                Value::Float(-3.5),
+                11,
+                1,
+                50,
+                500,
+            ),
+            Fact::retract_with_valid_time(
+                Uuid::from_u128(2),
+                ":person/friend".to_string(),
+                Value::Ref(Uuid::from_u128(9)),
+                13,
+                3,
+                200,
+                300,
+            ),
+        ];
+        let refs = vec![
+            FactRef {
+                page_id: 8,
+                slot_index: 1,
+            },
+            FactRef {
+                page_id: 8,
+                slot_index: 0,
+            },
+            FactRef {
+                page_id: 9,
+                slot_index: 0,
+            },
+        ];
+        let eager = build_sorted_index_entries(&facts, &refs);
+        let mut eager_backend = MemoryBackend::new();
+        let eager_cache = PageCache::new(64);
+        let (_, next1) = build_btree_from_key_entries(
+            eager.0.into_iter(),
+            &mut eager_backend,
+            &eager_cache,
+            1,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        let (_, next2) = build_btree_from_key_entries(
+            eager.1.into_iter(),
+            &mut eager_backend,
+            &eager_cache,
+            next1,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        let (_, next3) = build_btree_from_key_entries(
+            eager.2.into_iter(),
+            &mut eager_backend,
+            &eager_cache,
+            next2,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        let (_, eager_end) = build_btree_from_key_entries(
+            eager.3.into_iter(),
+            &mut eager_backend,
+            &eager_cache,
+            next3,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+
+        let mut reference_backend = MemoryBackend::new();
+        let reference_cache = PageCache::new(64);
+        let mut order = PendingIndexOrder::new(&facts, &refs);
+        order.sort_eavt();
+        let (_, next1) = build_btree_from_key_entries(
+            order.borrowed_eavt_entries(),
+            &mut reference_backend,
+            &reference_cache,
+            1,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        order.sort_aevt();
+        let (_, next2) = build_btree_from_key_entries(
+            order.borrowed_aevt_entries(),
+            &mut reference_backend,
+            &reference_cache,
+            next1,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        order.sort_avet();
+        let (_, next3) = build_btree_from_key_entries(
+            order.borrowed_avet_entries(),
+            &mut reference_backend,
+            &reference_cache,
+            next2,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+        order.sort_vaet();
+        let (_, reference_end) = build_btree_from_key_entries(
+            order.borrowed_vaet_entries(),
+            &mut reference_backend,
+            &reference_cache,
+            next3,
+            BtreeBuildOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(reference_end, eager_end);
+        for page_id in 1..eager_end {
+            assert_eq!(
+                reference_backend.read_page(page_id).unwrap(),
+                eager_backend.read_page(page_id).unwrap(),
+                "reference-sorted index page must match eager bytes"
+            );
+        }
+    }
 
     #[test]
     fn test_persistent_fact_storage_new() {
@@ -4484,6 +5136,22 @@ mod tests {
         let page0 = build_header_page_with_extension(header, v10_extension).unwrap();
         bytes.get_mut(..PAGE_SIZE).unwrap().copy_from_slice(&page0);
         bytes.truncate(usize::try_from(base_end).unwrap() * PAGE_SIZE);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn downgrade_current_base_to_v11(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let (mut header, extension) = read_header_and_extension(path);
+
+        header.version = crate::storage::INTEGRITY_FORMAT_VERSION;
+        header.header_checksum = compute_header_checksum(&header);
+        let v11_extension = HeaderExtension::new(extension.primary(), extension.secondary())
+            .with_base_fact_page_start(extension.base_fact_page_start())
+            .unwrap()
+            .with_base_integrity(extension.base_integrity())
+            .unwrap();
+        let page0 = build_header_page_with_extension(header, v11_extension).unwrap();
+        bytes.get_mut(..PAGE_SIZE).unwrap().copy_from_slice(&page0);
         std::fs::write(path, bytes).unwrap();
     }
 
@@ -6608,6 +7276,76 @@ mod tests {
             fact_projection(storage.storage())?,
             "idle maintenance must preserve visible fact identity"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_v11_open_and_delta_checkpoint_defer_v12_upgrade_until_idle_maintenance() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("v11-idle-upgrade.graph");
+        let original_entity = write_single_fact_v11(&path);
+        downgrade_current_base_to_v11(&path);
+        let v11_bytes = std::fs::read(&path)?;
+
+        let mut storage = PersistentFactStorage::new(FileBackend::open(&path)?, 256)?;
+        assert_eq!(
+            std::fs::read(&path)?,
+            v11_bytes,
+            "opening v11 must not rewrite the published image"
+        );
+        assert_eq!(
+            storage.delta_maintenance_decision(),
+            DeltaMaintenanceDecision::ScheduleBackgroundRecompact
+        );
+        assert!(
+            storage
+                .storage()
+                .get_all_facts()?
+                .iter()
+                .any(|fact| fact.entity == original_entity)
+        );
+
+        let delta_entity = Uuid::new_v4();
+        storage.storage().transact(
+            vec![(
+                delta_entity,
+                ":integrity/name".to_string(),
+                Value::String("Delta B".to_string()),
+            )],
+            None,
+        )?;
+        storage.mark_dirty();
+        assert_eq!(storage.save()?, CheckpointOutcome::DeltaSegment);
+        let (delta_header, _) = read_header_and_extension(&path);
+        assert_eq!(
+            delta_header.version,
+            crate::storage::INTEGRITY_FORMAT_VERSION,
+            "foreground delta checkpoint must preserve v11"
+        );
+
+        assert_eq!(
+            storage.run_idle_delta_maintenance()?,
+            CheckpointOutcome::FullRebuildFromVisibleDelta
+        );
+        let (upgraded_header, _) = read_header_and_extension(&path);
+        assert_eq!(upgraded_header.version, crate::storage::FORMAT_VERSION);
+        let upgraded_bytes = std::fs::read(&path)?;
+        assert_eq!(
+            storage.run_idle_delta_maintenance()?,
+            CheckpointOutcome::Noop
+        );
+        assert_eq!(
+            std::fs::read(&path)?,
+            upgraded_bytes,
+            "a healthy v12 base must not be rewritten by later idle maintenance"
+        );
+
+        drop(storage);
+        let reopened = PersistentFactStorage::new(FileBackend::open(&path)?, 256)?;
+        let visible = reopened.storage().get_all_facts()?;
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().any(|fact| fact.entity == original_entity));
+        assert!(visible.iter().any(|fact| fact.entity == delta_entity));
         Ok(())
     }
 

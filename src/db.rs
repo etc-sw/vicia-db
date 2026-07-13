@@ -872,6 +872,9 @@ impl Minigraf {
     /// - Execution fails.
     /// - WAL write fails (file-backed databases).
     pub fn execute(&self, input: &str) -> Result<QueryResult> {
+        #[cfg(feature = "bench-internals")]
+        crate::storage::btree_v6::reset_leaf_read_diagnostics();
+
         // Detect same-thread reentrant write (would deadlock on the Mutex).
         if is_write_tx_active() {
             bail!(
@@ -997,6 +1000,18 @@ impl Minigraf {
         self.inner
             .fact_storage
             .last_current_attribute_cursor_diagnostics()
+    }
+
+    /// Return leaf-page read diagnostics from the most recent `execute` call.
+    #[cfg(feature = "bench-internals")]
+    pub fn last_leaf_read_diagnostics(&self) -> crate::LeafReadDiagnostics {
+        crate::storage::btree_v6::leaf_read_diagnostics()
+    }
+
+    /// Enable or disable the repository-only leaf diagnostic probe on this thread.
+    #[cfg(feature = "bench-internals")]
+    pub fn set_leaf_read_diagnostics_enabled(&self, enabled: bool) {
+        crate::storage::btree_v6::set_leaf_read_diagnostics_enabled(enabled);
     }
 
     /// Return live pending-container memory accounting without cloning data.

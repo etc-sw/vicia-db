@@ -117,6 +117,8 @@ pub use graph::storage::{
     CurrentAttributeCursorDiagnostics, PendingMemoryComponent, PendingMemoryDiagnostics,
 };
 #[cfg(feature = "bench-internals")]
+pub use storage::btree_v6::LeafReadDiagnostics;
+#[cfg(feature = "bench-internals")]
 pub use storage::layout_diagnostics::{
     PrefixEstimate, StorageIndexLayout, StorageLayoutDiagnostics, StoragePageLayout,
     inspect_storage_layout,

@@ -22,6 +22,9 @@ try {
   rejectMutation("order", (receipt) => {
     receipt.checkpointOrder[0].reverse();
   });
+  rejectMutation("leaf-codec", (receipt) => {
+    receipt.candidates[0].checkpoint.layout.aevt.prefixLeafPages += 1;
+  });
   console.log(`audited ${source.schema} ${profile} validator rejection`);
 } finally {
   rmSync(directory, { recursive: true, force: true });

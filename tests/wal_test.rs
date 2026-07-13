@@ -800,7 +800,7 @@ fn test_legacy_file_opens_and_upgrades_to_current_on_checkpoint() {
     let magic = &raw[0..4];
     let version = u32::from_le_bytes(raw[4..8].try_into().unwrap());
     let last_checkpointed_tx_count = u64::from_le_bytes(raw[24..32].try_into().unwrap());
-    assert_eq!(version, 11, "file must be upgraded on checkpoint");
+    assert_eq!(version, 12, "file must be upgraded on checkpoint");
     assert_eq!(magic, b"MGRF", "magic number must be preserved");
     assert!(
         last_checkpointed_tx_count > 0,

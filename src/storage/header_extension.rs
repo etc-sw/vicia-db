@@ -6,6 +6,7 @@ const LEGACY_HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX001";
 const HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX002";
 pub(crate) const LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 10;
 pub(crate) const HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 11;
+pub(crate) const PREFIX_LEAF_FILE_FORMAT_VERSION: u32 = 12;
 pub(crate) const LEGACY_HEADER_EXTENSION_LEN: usize =
     HeaderExtension::PREFIX_LEN + (HeaderManifestSlot::LEN * 2) + HeaderExtension::BASE_LAYOUT_LEN;
 pub(crate) const HEADER_EXTENSION_LEN: usize =
@@ -435,7 +436,9 @@ impl HeaderExtension {
             LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION => {
                 (LEGACY_HEADER_EXTENSION_MAGIC, LEGACY_HEADER_EXTENSION_LEN)
             }
-            HEADER_EXTENSION_FILE_FORMAT_VERSION => (HEADER_EXTENSION_MAGIC, HEADER_EXTENSION_LEN),
+            HEADER_EXTENSION_FILE_FORMAT_VERSION | PREFIX_LEAF_FILE_FORMAT_VERSION => {
+                (HEADER_EXTENSION_MAGIC, HEADER_EXTENSION_LEN)
+            }
             _ => bail!("Unsupported header extension file format version"),
         };
         let mut bytes = Vec::with_capacity(capacity);
@@ -445,7 +448,7 @@ impl HeaderExtension {
         bytes.extend_from_slice(&self.secondary.to_bytes());
         bytes.extend_from_slice(&self.base_fact_page_start.to_le_bytes());
         bytes.extend_from_slice(&self.base_layout_checksum.to_le_bytes());
-        if file_format_version == HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        if file_format_version >= HEADER_EXTENSION_FILE_FORMAT_VERSION {
             bytes.extend_from_slice(&self.base_integrity.to_bytes());
         } else if !self.base_integrity.is_empty() {
             bail!("v10 header extension cannot encode v11 base integrity metadata");
@@ -477,6 +480,7 @@ impl HeaderExtension {
         }
         if file_format_version != LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
             && file_format_version != HEADER_EXTENSION_FILE_FORMAT_VERSION
+            && file_format_version != PREFIX_LEAF_FILE_FORMAT_VERSION
         {
             bail!("Unsupported header extension file format version");
         }
@@ -562,7 +566,7 @@ impl HeaderExtension {
             raw_base_fact_page_start
         };
 
-        let base_integrity = if file_format_version == HEADER_EXTENSION_FILE_FORMAT_VERSION {
+        let base_integrity = if file_format_version >= HEADER_EXTENSION_FILE_FORMAT_VERSION {
             BasePageIntegrityDescriptor::from_bytes(
                 extension_bytes
                     .get(LEGACY_HEADER_EXTENSION_LEN..HEADER_EXTENSION_LEN)
@@ -677,9 +681,10 @@ pub(crate) fn build_header_page(header: FileHeader) -> Result<Vec<u8>> {
 
     if header.version == LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
         || header.version == HEADER_EXTENSION_FILE_FORMAT_VERSION
+        || header.version == PREFIX_LEAF_FILE_FORMAT_VERSION
     {
         HeaderExtension::empty().write_to_page0_for_version(header.version, &mut page)?;
-    } else if header.version > HEADER_EXTENSION_FILE_FORMAT_VERSION {
+    } else if header.version > PREFIX_LEAF_FILE_FORMAT_VERSION {
         bail!("Unsupported header extension file format version");
     }
 
@@ -693,8 +698,9 @@ pub(crate) fn build_header_page_with_extension(
     header.validate()?;
     if header.version != LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
         && header.version != HEADER_EXTENSION_FILE_FORMAT_VERSION
+        && header.version != PREFIX_LEAF_FILE_FORMAT_VERSION
     {
-        bail!("Header extension requires v10 or v11 file format");
+        bail!("Header extension requires v10, v11, or v12 file format");
     }
     let mut page = header.to_bytes();
     if page.len() > PAGE_SIZE {
@@ -736,8 +742,8 @@ mod tests {
         HEADER_EXTENSION_OFFSET, HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
         HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection,
         LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION, LEGACY_HEADER_EXTENSION_LEN,
-        build_header_page, build_header_page_with_extension, select_header_manifest_slot,
-        select_header_manifest_slot_from_page0,
+        PREFIX_LEAF_FILE_FORMAT_VERSION, build_header_page, build_header_page_with_extension,
+        select_header_manifest_slot, select_header_manifest_slot_from_page0,
     };
     use crate::storage::{FORMAT_VERSION, FileHeader, PAGE_SIZE};
 
@@ -765,9 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn current_format_publishes_v11_header_extension_gate() {
-        assert_eq!(FORMAT_VERSION, 11);
-        assert_eq!(FileHeader::new().version, 11);
+    fn current_format_publishes_v12_header_extension_gate() {
+        assert_eq!(FORMAT_VERSION, 12);
+        assert_eq!(FileHeader::new().version, 12);
+        assert_eq!(PREFIX_LEAF_FILE_FORMAT_VERSION, 12);
         assert_eq!(HEADER_EXTENSION_FILE_FORMAT_VERSION, 11);
         assert_eq!(LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION, 10);
     }
