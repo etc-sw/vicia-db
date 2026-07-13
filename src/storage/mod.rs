@@ -432,6 +432,37 @@ pub trait CommittedIndexReader: Send + Sync {
         end: Option<&crate::storage::index::EavtKey>,
     ) -> anyhow::Result<Vec<crate::storage::index::FactRef>>;
 
+    /// Visit keyed EAVT entries without retaining the full range.
+    fn visit_eavt_entries(
+        &self,
+        _start: &crate::storage::index::EavtKey,
+        _end: Option<&crate::storage::index::EavtKey>,
+        _visit: &mut dyn FnMut(
+            &crate::storage::index::EavtKey,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("committed index reader does not expose keyed EAVT visitation")
+    }
+
+    /// Visit borrowed covering fields for an exact EAVT range.
+    fn visit_current_eavt_entries(
+        &self,
+        start: &crate::storage::index::EavtKey,
+        end: Option<&crate::storage::index::EavtKey>,
+        visit: &mut dyn for<'a> FnMut(
+            crate::storage::index::CurrentEavtEntryRef<'a>,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        self.visit_eavt_entries(start, end, &mut |key, fact_ref| {
+            visit(
+                crate::storage::index::CurrentEavtEntryRef::from_owned(key),
+                fact_ref,
+            )
+        })
+    }
+
     /// Returns all committed AEVT entries in `[start, end)`. `end: None` means unbounded upper.
     #[allow(dead_code)]
     fn range_scan_aevt(

@@ -1,5 +1,7 @@
 use crate::storage::CommittedIndexReader;
-use crate::storage::index::{AevtKey, AvetKey, CurrentAevtEntryRef, EavtKey, FactRef, VaetKey};
+use crate::storage::index::{
+    AevtKey, AvetKey, CurrentAevtEntryRef, CurrentEavtEntryRef, EavtKey, FactRef, VaetKey,
+};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -10,6 +12,20 @@ pub(crate) trait KeyedIndexReader: Send + Sync {
         start: &EavtKey,
         end: Option<&EavtKey>,
     ) -> Result<Vec<(EavtKey, FactRef)>>;
+
+    fn visit_current_eavt_entries(
+        &self,
+        start: &EavtKey,
+        end: Option<&EavtKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentEavtEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        for (key, fact_ref) in self.range_scan_eavt_entries(start, end)? {
+            if !visit(CurrentEavtEntryRef::from_owned(&key), fact_ref)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 
     fn range_scan_aevt_entries(
         &self,
@@ -126,6 +142,42 @@ impl CommittedIndexReader for LayeredIndexReader {
         let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
         let delta = range_delta_entries(&delta.eavt, start, end);
         Ok(merge_entry_refs(base, delta))
+    }
+
+    fn visit_current_eavt_entries(
+        &self,
+        start: &EavtKey,
+        end: Option<&EavtKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentEavtEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
+        let mut delta = range_delta_entries(&delta.eavt, start, end)
+            .into_iter()
+            .peekable();
+        let base_complete =
+            self.base
+                .visit_current_eavt_entries(start, end, &mut |base_entry, base_ref| {
+                    while delta
+                        .peek()
+                        .is_some_and(|(delta_key, _)| base_entry.cmp_owned(delta_key).is_gt())
+                    {
+                        if let Some((key, fact_ref)) = delta.next()
+                            && !visit(CurrentEavtEntryRef::from_owned(&key), fact_ref)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    visit(base_entry, base_ref)
+                })?;
+        if !base_complete {
+            return Ok(false);
+        }
+        for (key, fact_ref) in delta {
+            if !visit(CurrentEavtEntryRef::from_owned(&key), fact_ref)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn range_scan_aevt(&self, start: &AevtKey, end: Option<&AevtKey>) -> Result<Vec<FactRef>> {

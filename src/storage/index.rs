@@ -112,6 +112,132 @@ pub struct EavtKey {
     pub asserted: bool,
 }
 
+/// Borrowed current-view projection of one on-disk EAVT key.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CurrentEavtEntryRef<'a> {
+    pub(crate) entity: EntityId,
+    pub(crate) attribute: &'a str,
+    pub(crate) valid_from: i64,
+    pub(crate) valid_to: i64,
+    pub(crate) tx_count: u64,
+    pub(crate) value_bytes: &'a [u8],
+    pub(crate) tx_id: TxId,
+    pub(crate) asserted: bool,
+}
+
+impl<'a> CurrentEavtEntryRef<'a> {
+    pub(crate) fn from_owned(key: &'a EavtKey) -> Self {
+        Self {
+            entity: key.entity,
+            attribute: &key.attribute,
+            valid_from: key.valid_from,
+            valid_to: key.valid_to,
+            tx_count: key.tx_count,
+            value_bytes: &key.value_bytes,
+            tx_id: key.tx_id,
+            asserted: key.asserted,
+        }
+    }
+
+    pub(crate) fn value_projection(self) -> CurrentAevtEntryRef<'a> {
+        CurrentAevtEntryRef {
+            entity: self.entity,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            tx_count: self.tx_count,
+            value_bytes: self.value_bytes,
+            tx_id: self.tx_id,
+            asserted: self.asserted,
+        }
+    }
+
+    pub(crate) fn cmp_owned(&self, key: &EavtKey) -> Ordering {
+        (
+            self.entity,
+            self.attribute,
+            self.valid_from,
+            self.valid_to,
+            self.tx_count,
+            self.value_bytes,
+            self.tx_id,
+            self.asserted,
+        )
+            .cmp(&(
+                key.entity,
+                key.attribute.as_str(),
+                key.valid_from,
+                key.valid_to,
+                key.tx_count,
+                key.value_bytes.as_slice(),
+                key.tx_id,
+                key.asserted,
+            ))
+    }
+
+    pub(crate) fn write_resume_key(&self, key: &mut EavtKey) -> bool {
+        let reused = key.attribute.capacity() >= self.attribute.len()
+            && key.value_bytes.capacity() >= self.value_bytes.len();
+        key.entity = self.entity;
+        key.attribute.clear();
+        key.attribute.push_str(self.attribute);
+        key.valid_from = self.valid_from;
+        key.valid_to = self.valid_to;
+        key.tx_count = self.tx_count;
+        key.value_bytes.clear();
+        key.value_bytes.extend_from_slice(self.value_bytes);
+        key.tx_id = self.tx_id;
+        key.asserted = self.asserted;
+        reused
+    }
+}
+
+/// Private borrowed postcard wire shape for `(EavtKey, FactRef)` entries.
+#[derive(Deserialize)]
+pub(crate) struct EavtEntryWire<'a> {
+    entity: EntityId,
+    #[serde(borrow)]
+    attribute: &'a str,
+    valid_from: i64,
+    valid_to: i64,
+    tx_count: u64,
+    #[serde(borrow)]
+    value_bytes: &'a [u8],
+    tx_id: TxId,
+    asserted: bool,
+}
+
+impl<'a> EavtEntryWire<'a> {
+    pub(crate) fn decode_entry(bytes: &'a [u8]) -> anyhow::Result<(Self, FactRef)> {
+        let (entry, remaining) = postcard::take_from_bytes(bytes)?;
+        if !remaining.is_empty() {
+            anyhow::bail!("trailing bytes after projected EAVT entry")
+        }
+        Ok(entry)
+    }
+
+    pub(crate) fn project(&self) -> CurrentEavtEntryRef<'a> {
+        CurrentEavtEntryRef {
+            entity: self.entity,
+            attribute: self.attribute,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            tx_count: self.tx_count,
+            value_bytes: self.value_bytes,
+            tx_id: self.tx_id,
+            asserted: self.asserted,
+        }
+    }
+
+    pub(crate) fn cmp_owned(&self, key: &EavtKey) -> Ordering {
+        self.project().cmp_owned(key)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn borrowed_lengths(&self) -> (usize, usize) {
+        (self.attribute.len(), self.value_bytes.len())
+    }
+}
+
 /// AEVT: sort by (Attribute, Entity, ValidFrom, ValidTo, TxCount, ValueBytes, TxId, Asserted)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AevtKey {
@@ -488,6 +614,76 @@ impl Indexes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn eavt_projection_key(value: Value, attribute: &str, tx: u64, asserted: bool) -> EavtKey {
+        EavtKey {
+            entity: Uuid::from_u128(u128::MAX - u128::from(tx)),
+            attribute: attribute.to_owned(),
+            valid_from: -9_000_000_000,
+            valid_to: i64::MAX,
+            tx_count: tx,
+            value_bytes: encode_value(&value),
+            tx_id: u64::MAX - tx,
+            asserted,
+        }
+    }
+
+    #[test]
+    fn borrowed_eavt_wire_decodes_existing_postcard_shape_for_all_values() {
+        let values = [
+            Value::String("borrowed".to_owned()),
+            Value::Integer(i64::MIN),
+            Value::Float(-0.0),
+            Value::Boolean(true),
+            Value::Ref(Uuid::from_u128(42)),
+            Value::Keyword(":kind/value".to_owned()),
+            Value::Null,
+        ];
+        for (index, value) in values.into_iter().enumerate() {
+            let attribute = if index == 0 {
+                format!(":projection/{}", "a".repeat(192))
+            } else {
+                ":projection/value".to_owned()
+            };
+            let key = eavt_projection_key(value, &attribute, index as u64 + 128, index % 2 == 0);
+            let fact_ref = FactRef {
+                page_id: u64::MAX - index as u64,
+                slot_index: u16::MAX,
+            };
+            let bytes = postcard::to_allocvec(&(&key, &fact_ref)).unwrap();
+            let (wire, decoded_ref) = EavtEntryWire::decode_entry(&bytes).unwrap();
+            let projected = wire.project();
+            assert_eq!(wire.cmp_owned(&key), Ordering::Equal);
+            assert_eq!(projected.entity, key.entity);
+            assert_eq!(projected.attribute, key.attribute);
+            assert_eq!(projected.value_bytes, key.value_bytes);
+            assert_eq!(projected.tx_count, key.tx_count);
+            assert_eq!(projected.asserted, key.asserted);
+            assert_eq!(decoded_ref, fact_ref);
+        }
+    }
+
+    #[test]
+    fn borrowed_eavt_wire_preserves_order_and_rejects_corruption() {
+        let low = eavt_projection_key(Value::Integer(-1), ":a/value", 1, false);
+        let high = eavt_projection_key(Value::Integer(i64::MAX), ":b/value", u64::MAX, true);
+        let bytes = postcard::to_allocvec(&(
+            &low,
+            &FactRef {
+                page_id: 7,
+                slot_index: 3,
+            },
+        ))
+        .unwrap();
+        let (wire, _) = EavtEntryWire::decode_entry(&bytes).unwrap();
+        assert_eq!(wire.cmp_owned(&low), Ordering::Equal);
+        assert_eq!(wire.cmp_owned(&high), low.cmp(&high));
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(EavtEntryWire::decode_entry(&trailing).is_err());
+        assert!(EavtEntryWire::decode_entry(&bytes[..bytes.len() - 1]).is_err());
+    }
 
     fn projection_key(value: Value, attribute: &str, tx: u64, asserted: bool) -> AevtKey {
         AevtKey {

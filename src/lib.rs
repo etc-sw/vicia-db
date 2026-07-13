@@ -97,6 +97,8 @@ pub mod browser;
 #[cfg(not(target_arch = "wasm32"))]
 pub use db::{BackupOutcome, OpenOptionsWithPath};
 pub use db::{
+    CURRENT_ENTITIES_MAX_ATTRIBUTES, CURRENT_ENTITIES_MAX_HISTORY_ENTRIES,
+    CURRENT_ENTITIES_MAX_IDS, CURRENT_ENTITIES_MAX_PAIRS, CurrentEntitiesRequest, CurrentFact,
     MaintenanceAdvice, MaintenanceCheckpointEffect, MaintenanceDeltaEffect, MaintenanceOutcome,
     Minigraf, OpenOptions, READ_VIEW_MAX_ROWS, ReadView, ReadViewOptions, ReadViewValidAt,
     WriteTransaction,

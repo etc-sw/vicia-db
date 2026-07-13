@@ -4,7 +4,9 @@ use crate::graph::types::{
     Value, tx_id_now,
 };
 use crate::query::datalog::types::AsOf;
-use crate::storage::index::{AevtKey, CurrentAevtEntryRef, FactRef, encode_value};
+use crate::storage::index::{
+    AevtKey, CurrentAevtEntryRef, CurrentEavtEntryRef, EavtKey, FactRef, encode_value,
+};
 use anyhow::Result;
 #[cfg(any(test, feature = "bench-internals"))]
 use std::sync::Mutex;
@@ -141,6 +143,23 @@ pub(crate) struct CurrentAttributeCursor {
     diagnostics_slot: Arc<Mutex<Option<CurrentAttributeCursorDiagnostics>>>,
 }
 
+/// Resumable current-view reduction for one exact `(entity, attribute)` range.
+pub(crate) struct CurrentEntityAttributeCursor {
+    end: EavtKey,
+    next_start: EavtKey,
+    pending: Vec<PendingFactId>,
+    pending_position: usize,
+    values: std::collections::HashMap<Vec<u8>, CurrentValueState>,
+    as_of: Option<AsOf>,
+    valid_time: CurrentValidTime,
+    committed_fact_reader: Option<Arc<dyn crate::storage::CommittedFactReader>>,
+    committed_index_reader: Option<Arc<dyn crate::storage::CommittedIndexReader>>,
+    publication_generation: u64,
+    last_key: Option<EavtKey>,
+    committed_complete: bool,
+    complete: bool,
+}
+
 impl CurrentAttributeCursor {
     fn begin_step(&mut self) {
         if self.yielded {
@@ -220,6 +239,11 @@ pub(crate) enum CurrentAttributeStep {
         entries: usize,
     },
     Complete,
+}
+
+pub(crate) enum CurrentEntityAttributeStep {
+    Yielded { entries: usize },
+    Complete { entries: usize },
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -1522,6 +1546,208 @@ impl FactStorage {
                 return Ok(());
             }
         }
+    }
+
+    pub(crate) fn current_entity_attribute_cursor(
+        &self,
+        entity: EntityId,
+        attribute: &str,
+        as_of: Option<&AsOf>,
+        valid_time: CurrentValidTime,
+    ) -> Result<CurrentEntityAttributeCursor> {
+        let start = EavtKey {
+            entity,
+            attribute: attribute.to_owned(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        };
+        let mut end_attribute = String::with_capacity(attribute.len() + 1);
+        end_attribute.push_str(attribute);
+        end_attribute.push('\0');
+        let end = EavtKey {
+            entity,
+            attribute: end_attribute,
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            tx_count: 0,
+            value_bytes: Vec::new(),
+            tx_id: 0,
+            asserted: false,
+        };
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        Ok(CurrentEntityAttributeCursor {
+            pending: d.pending.range_eavt_bounded(
+                &start,
+                &end,
+                crate::db::CURRENT_ENTITIES_MAX_HISTORY_ENTRIES,
+            )?,
+            end,
+            next_start: start,
+            pending_position: 0,
+            values: Default::default(),
+            as_of: as_of.cloned(),
+            valid_time,
+            committed_fact_reader: d.committed.clone(),
+            committed_index_reader: d.committed_index_reader.clone(),
+            publication_generation: d.publication_generation,
+            last_key: None,
+            committed_complete: false,
+            complete: false,
+        })
+    }
+
+    pub(crate) fn step_current_entity_attribute_cursor(
+        &self,
+        cursor: &mut CurrentEntityAttributeCursor,
+        max_entries: usize,
+        visit: &mut dyn FnMut(&Value) -> Result<()>,
+    ) -> Result<CurrentEntityAttributeStep> {
+        if cursor.complete {
+            return Ok(CurrentEntityAttributeStep::Complete { entries: 0 });
+        }
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        if d.publication_generation != cursor.publication_generation {
+            anyhow::bail!(
+                "current entity/attribute cursor publication changed during the read view"
+            );
+        }
+        let mut processed = 0usize;
+        let bounded = max_entries != usize::MAX;
+
+        let accept = |cursor: &mut CurrentEntityAttributeCursor,
+                      key: CurrentEavtEntryRef<'_>,
+                      fact_ref: CursorFactRef| {
+            let value_key = key.value_projection();
+            if entry_visible_as_of(value_key, cursor.as_of.as_ref()) {
+                reduce_current_entry(&mut cursor.values, value_key, fact_ref);
+            }
+        };
+
+        if !cursor.committed_complete {
+            let last_key = cursor.last_key.clone();
+            let next_start = cursor.next_start.clone();
+            let end = cursor.end.clone();
+            let committed_index_reader = cursor.committed_index_reader.clone();
+            let complete = committed_index_reader.as_ref().map_or(Ok(true), |reader| {
+                reader.visit_current_eavt_entries(&next_start, Some(&end), &mut |key, fact_ref| {
+                    if last_key
+                        .as_ref()
+                        .is_some_and(|last| !key.cmp_owned(last).is_gt())
+                    {
+                        return Ok(true);
+                    }
+                    while cursor.pending_position < cursor.pending.len()
+                        && cursor
+                            .pending
+                            .get(cursor.pending_position)
+                            .is_some_and(|id| {
+                                d.pending
+                                    .compare_eavt_projection(*id, key)
+                                    .is_ok_and(|order| order.is_lt())
+                            })
+                    {
+                        let pending_id = *cursor
+                            .pending
+                            .get(cursor.pending_position)
+                            .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+                        accept(
+                            cursor,
+                            d.pending.get(pending_id)?.current_eavt_entry(),
+                            CursorFactRef::Pending(pending_id),
+                        );
+                        cursor.pending_position += 1;
+                        processed += 1;
+                        if processed >= max_entries {
+                            return Ok(false);
+                        }
+                    }
+                    accept(cursor, key, CursorFactRef::Committed(fact_ref));
+                    if bounded {
+                        let reused = if let Some(last) = &mut cursor.last_key {
+                            key.write_resume_key(last)
+                        } else {
+                            let mut last = cursor.next_start.clone();
+                            key.write_resume_key(&mut last);
+                            cursor.last_key = Some(last);
+                            false
+                        };
+                        crate::storage::btree_v6::note_resume_key(reused);
+                    }
+                    processed += 1;
+                    Ok(processed < max_entries)
+                })
+            })?;
+            cursor.committed_complete = complete;
+            if bounded && let Some(last) = &cursor.last_key {
+                cursor.next_start = last.clone();
+            }
+            if !complete {
+                return Ok(CurrentEntityAttributeStep::Yielded { entries: processed });
+            }
+        }
+
+        while cursor.pending_position < cursor.pending.len() && processed < max_entries {
+            let pending_id = *cursor
+                .pending
+                .get(cursor.pending_position)
+                .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+            accept(
+                cursor,
+                d.pending.get(pending_id)?.current_eavt_entry(),
+                CursorFactRef::Pending(pending_id),
+            );
+            cursor.pending_position += 1;
+            processed += 1;
+        }
+        if cursor.pending_position < cursor.pending.len() {
+            return Ok(CurrentEntityAttributeStep::Yielded { entries: processed });
+        }
+
+        let mut output = Vec::new();
+        for (encoded, state) in &cursor.values {
+            let visible_fact = state.assertions.iter().find_map(
+                |((valid_from, valid_to), (assert_tx, fact_ref))| {
+                    let scoped_retract = state
+                        .max_scoped_retract_tx
+                        .get(&(*valid_from, *valid_to))
+                        .copied()
+                        .unwrap_or(0);
+                    (*assert_tx > state.max_unscoped_retract_tx.max(scoped_retract)
+                        && !matches!(cursor.valid_time, CurrentValidTime::At(at) if !(*valid_from <= at && at < *valid_to)))
+                    .then_some(*fact_ref)
+                },
+            );
+            let Some(fact_ref) = visible_fact else {
+                continue;
+            };
+            let value = if encoded.first() == Some(&0x03) {
+                match fact_ref {
+                    CursorFactRef::Pending(id) => d.pending.get(id)?.to_fact().value,
+                    CursorFactRef::Committed(fact_ref) => {
+                        cursor
+                            .committed_fact_reader
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("current cursor has no fact reader"))?
+                            .resolve(fact_ref)?
+                            .value
+                    }
+                }
+            } else {
+                decode_index_value(encoded)?
+            };
+            output.push((encoded, value));
+        }
+        output.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        for (_, value) in &output {
+            visit(value)?;
+        }
+        cursor.values.clear();
+        cursor.complete = true;
+        Ok(CurrentEntityAttributeStep::Complete { entries: processed })
     }
 }
 

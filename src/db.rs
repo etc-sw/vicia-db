@@ -72,6 +72,84 @@ use crate::query::datalog::types::{
 
 /// Largest result admitted by the foreground read-view API.
 pub const READ_VIEW_MAX_ROWS: usize = 10_000;
+/// Maximum exact entities admitted by one current-view request.
+pub const CURRENT_ENTITIES_MAX_IDS: usize = 128;
+/// Maximum attributes admitted by one current-view request.
+pub const CURRENT_ENTITIES_MAX_ATTRIBUTES: usize = 32;
+/// Maximum distinct entity/attribute ranges in one current-view request.
+pub const CURRENT_ENTITIES_MAX_PAIRS: usize = 256;
+/// Maximum historical index entries consumed by one foreground current read.
+pub const CURRENT_ENTITIES_MAX_HISTORY_ENTRIES: usize = 65_536;
+pub(crate) const CURRENT_ENTITIES_STEP_ENTRIES: usize = 4_096;
+
+pub(crate) fn normalize_current_entities_request(
+    ids: &[crate::EntityId],
+    attributes: &[&str],
+    limit: usize,
+) -> Result<(Vec<crate::EntityId>, Vec<String>)> {
+    if ids.is_empty() || ids.len() > CURRENT_ENTITIES_MAX_IDS {
+        bail!(
+            "current_entities ids must be in 1..={CURRENT_ENTITIES_MAX_IDS}; got {}",
+            ids.len()
+        );
+    }
+    if attributes.is_empty() || attributes.len() > CURRENT_ENTITIES_MAX_ATTRIBUTES {
+        bail!(
+            "current_entities attributes must be in 1..={CURRENT_ENTITIES_MAX_ATTRIBUTES}; got {}",
+            attributes.len()
+        );
+    }
+    if limit == 0 || limit > READ_VIEW_MAX_ROWS {
+        bail!("current_entities limit must be in 1..={READ_VIEW_MAX_ROWS}; got {limit}");
+    }
+
+    let mut unique_ids = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !unique_ids.contains(id) {
+            unique_ids.push(*id);
+        }
+    }
+    let mut unique_attributes = Vec::with_capacity(attributes.len());
+    for attribute in attributes {
+        if !attribute.starts_with(':') || !attribute.contains('/') || attribute.contains('\0') {
+            bail!("current_entities attribute must be namespace-qualified: {attribute}");
+        }
+        if !unique_attributes.iter().any(|known| known == attribute) {
+            unique_attributes.push((*attribute).to_owned());
+        }
+    }
+    let pairs = unique_ids
+        .len()
+        .checked_mul(unique_attributes.len())
+        .ok_or_else(|| anyhow::anyhow!("current_entities pair count overflow"))?;
+    if pairs > CURRENT_ENTITIES_MAX_PAIRS {
+        bail!(
+            "current_entities has {pairs} distinct entity/attribute pairs; maximum is {CURRENT_ENTITIES_MAX_PAIRS}"
+        );
+    }
+    Ok((unique_ids, unique_attributes))
+}
+
+/// One net-asserted EAV value from a transaction-pinned current view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CurrentFact {
+    /// Entity selected by the request.
+    pub entity: crate::EntityId,
+    /// Exact requested attribute.
+    pub attribute: String,
+    /// Current value under the view's transaction and valid-time coordinates.
+    pub value: Value,
+}
+
+/// Exact entity/attribute selection for [`ReadView::current_entities`].
+pub struct CurrentEntitiesRequest<'a> {
+    /// Entity ids, deduplicated while preserving first occurrence.
+    pub ids: &'a [crate::EntityId],
+    /// Attributes, deduplicated while preserving first occurrence.
+    pub attributes: &'a [&'a str],
+    /// Maximum complete result rows. Exceeding it rejects the whole request.
+    pub limit: usize,
+}
 
 /// Valid-time selection pinned by a [`ReadView`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,6 +249,80 @@ impl ReadView<'_> {
             );
         }
         Ok(result)
+    }
+
+    /// Read exact current values without parsing Datalog or materializing an
+    /// entity- or attribute-wide fact vector.
+    pub fn current_entities(
+        &self,
+        request: CurrentEntitiesRequest<'_>,
+    ) -> Result<Vec<CurrentFact>> {
+        let (ids, attributes) =
+            normalize_current_entities_request(request.ids, request.attributes, request.limit)?;
+
+        let as_of = AsOf::Counter(self.tx_count);
+        let valid_time = match self.valid_at {
+            ValidAt::Timestamp(timestamp) => crate::graph::storage::CurrentValidTime::At(timestamp),
+            ValidAt::AnyValidTime => crate::graph::storage::CurrentValidTime::Any,
+            ValidAt::Slot(_) => bail!("internal: read view retained a valid-time slot"),
+        };
+        let mut history_entries = 0usize;
+        let mut results = Vec::new();
+        for entity in ids {
+            for attribute in &attributes {
+                let mut cursor = self.db.inner.fact_storage.current_entity_attribute_cursor(
+                    entity,
+                    attribute,
+                    Some(&as_of),
+                    valid_time,
+                )?;
+                loop {
+                    let remaining_history =
+                        CURRENT_ENTITIES_MAX_HISTORY_ENTRIES.saturating_sub(history_entries);
+                    if remaining_history == 0 {
+                        bail!(
+                            "current_entities history work exceeds {CURRENT_ENTITIES_MAX_HISTORY_ENTRIES} entries; use raw Datalog or maintenance context"
+                        );
+                    }
+                    let step = self.db.inner.fact_storage.step_current_entity_attribute_cursor(
+                        &mut cursor,
+                        CURRENT_ENTITIES_STEP_ENTRIES.min(remaining_history),
+                        &mut |value| {
+                            if results.len() >= request.limit {
+                                bail!(
+                                    "current_entities result exceeds limit {}; result was rejected without truncation",
+                                    request.limit
+                                );
+                            }
+                            results.push(CurrentFact {
+                                entity,
+                                attribute: attribute.clone(),
+                                value: value.clone(),
+                            });
+                            Ok(())
+                        },
+                    )?;
+                    let (entries, complete) = match step {
+                        crate::graph::storage::CurrentEntityAttributeStep::Yielded { entries } => {
+                            (entries, false)
+                        }
+                        crate::graph::storage::CurrentEntityAttributeStep::Complete { entries } => {
+                            (entries, true)
+                        }
+                    };
+                    history_entries = history_entries.saturating_add(entries);
+                    if !complete && history_entries >= CURRENT_ENTITIES_MAX_HISTORY_ENTRIES {
+                        bail!(
+                            "current_entities history work exceeds {CURRENT_ENTITIES_MAX_HISTORY_ENTRIES} entries; use raw Datalog or maintenance context"
+                        );
+                    }
+                    if complete {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(results)
     }
 }
 use crate::storage::backend::MemoryBackend;
@@ -4206,6 +4358,236 @@ mod tests {
         let view = db.read_view(ReadViewOptions::default()).unwrap();
         let result = view.query("(query [:find ?card :where [?card :card/space :space]])", 1);
         assert!(result.is_err(), "an incomplete result must be rejected");
+    }
+
+    #[test]
+    fn current_entities_is_typed_ordered_and_transaction_pinned() {
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact [[#uuid "{first}" :card/title "First"] [#uuid "{first}" :card/space #uuid "{second}"] [#uuid "{second}" :card/title "Second"]])"#
+        ))
+        .unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+        db.execute(&format!(
+            r#"(retract [[#uuid "{first}" :card/title "First"]])"#
+        ))
+        .unwrap();
+        db.execute(&format!(
+            r#"(transact [[#uuid "{first}" :card/title "Changed"]])"#
+        ))
+        .unwrap();
+
+        let results = view
+            .current_entities(CurrentEntitiesRequest {
+                ids: &[second, first, first],
+                attributes: &[":card/title", ":card/space", ":card/title"],
+                limit: 8,
+            })
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].entity, second);
+        assert_eq!(results[0].attribute, ":card/title");
+        assert_eq!(results[0].value, Value::String("Second".to_owned()));
+        assert_eq!(results[1].entity, first);
+        assert_eq!(results[1].attribute, ":card/title");
+        assert_eq!(results[1].value, Value::String("First".to_owned()));
+        assert_eq!(results[2].entity, first);
+        assert_eq!(results[2].attribute, ":card/space");
+        assert_eq!(results[2].value, Value::Ref(second));
+    }
+
+    #[test]
+    fn current_entities_preserves_valid_time_and_retraction_semantics() {
+        let entity = uuid::Uuid::from_u128(7);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact {{:valid-from "2023-01-01" :valid-to "2023-06-30"}} [[#uuid "{entity}" :status/value :active]])"#
+        ))
+        .unwrap();
+        let view = db
+            .read_view(ReadViewOptions {
+                as_of: None,
+                valid_at: ReadViewValidAt::Timestamp(1_681_516_800_000),
+            })
+            .unwrap();
+        let visible = view
+            .current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &[":status/value"],
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].value, Value::Keyword(":active".to_owned()));
+
+        let outside = db
+            .read_view(ReadViewOptions {
+                as_of: None,
+                valid_at: ReadViewValidAt::Timestamp(1_704_067_200_000),
+            })
+            .unwrap()
+            .current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &[":status/value"],
+                limit: 1,
+            })
+            .unwrap();
+        assert!(outside.is_empty());
+    }
+
+    #[test]
+    fn current_entities_rejects_incomplete_or_unbounded_requests() {
+        let entity = uuid::Uuid::from_u128(9);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact [[#uuid "{entity}" :tag/value "one"] [#uuid "{entity}" :tag/value "two"]])"#
+        ))
+        .unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+        assert!(
+            view.current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &[":tag/value"],
+                limit: 1,
+            })
+            .is_err()
+        );
+        assert!(
+            view.current_entities(CurrentEntitiesRequest {
+                ids: &[],
+                attributes: &[":tag/value"],
+                limit: 1,
+            })
+            .is_err()
+        );
+        assert!(
+            view.current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &["tag"],
+                limit: 1,
+            })
+            .is_err()
+        );
+        assert!(
+            view.current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &[":tag/val\0ue"],
+                limit: 1,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn current_entities_isolates_exact_attribute_and_resolves_float() {
+        let entity = uuid::Uuid::from_u128(10);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact [[#uuid "{entity}" :metric/value 1.25] [#uuid "{entity}" :metric/value-extra 9.5]])"#
+        ))
+        .unwrap();
+        let results = db
+            .read_view(ReadViewOptions::default())
+            .unwrap()
+            .current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &[":metric/value"],
+                limit: 2,
+            })
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute, ":metric/value");
+        assert_eq!(results[0].value, Value::Float(1.25));
+    }
+
+    #[test]
+    fn current_entities_honors_scoped_and_unscoped_retractions() {
+        let entity = uuid::Uuid::from_u128(11);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact {{:valid-from "2020-01-01" :valid-to "2021-01-01"}} [[#uuid "{entity}" :status/value :old]])"#
+        ))
+        .unwrap();
+        db.execute(&format!(
+            r#"(transact {{:valid-from "2021-01-01" :valid-to "2022-01-01"}} [[#uuid "{entity}" :status/value :old]])"#
+        ))
+        .unwrap();
+        db.execute(&format!(
+            r#"(retract {{:valid-from "2020-01-01" :valid-to "2021-01-01"}} [[#uuid "{entity}" :status/value :old]])"#
+        ))
+        .unwrap();
+        let any = db
+            .read_view(ReadViewOptions {
+                valid_at: ReadViewValidAt::AnyValidTime,
+                ..Default::default()
+            })
+            .unwrap()
+            .current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &[":status/value"],
+                limit: 2,
+            })
+            .unwrap();
+        assert_eq!(any.len(), 1, "the un-retracted window remains current");
+
+        db.execute(&format!(
+            r#"(retract [[#uuid "{entity}" :status/value :old]])"#
+        ))
+        .unwrap();
+        let none = db
+            .read_view(ReadViewOptions {
+                valid_at: ReadViewValidAt::AnyValidTime,
+                ..Default::default()
+            })
+            .unwrap()
+            .current_entities(CurrentEntitiesRequest {
+                ids: &[entity],
+                attributes: &[":status/value"],
+                limit: 2,
+            })
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn current_entities_merges_prefix_leaf_base_with_resident_delta() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current-entities.graph");
+        let target = uuid::Uuid::from_u128(32);
+        {
+            let db = Minigraf::open(&path).unwrap();
+            let facts = (1u128..=64)
+                .map(|id| {
+                    format!(
+                        r#"[#uuid "{}" :card/title "base-{id}"]"#,
+                        uuid::Uuid::from_u128(id)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            db.execute(&format!("(transact [{facts}])")).unwrap();
+            db.checkpoint().unwrap();
+        }
+
+        let db = Minigraf::open(&path).unwrap();
+        db.execute(&format!(
+            r#"(transact [[#uuid "{target}" :card/title "delta"]])"#
+        ))
+        .unwrap();
+        let results = db
+            .read_view(ReadViewOptions::default())
+            .unwrap()
+            .current_entities(CurrentEntitiesRequest {
+                ids: &[target],
+                attributes: &[":card/title"],
+                limit: 4,
+            })
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].value, Value::String("base-32".to_owned()));
+        assert_eq!(results[1].value, Value::String("delta".to_owned()));
     }
 
     // ── read-only handle drop must not modify the file ────────────────────────

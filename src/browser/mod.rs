@@ -894,6 +894,176 @@ impl BrowserReadView {
         }
         Ok(json)
     }
+
+    /// Read exact current entity/attribute values as structured JavaScript rows.
+    ///
+    /// Entity and attribute order are preserved after first-occurrence
+    /// deduplication. Oversized or over-budget reads reject without truncation.
+    #[wasm_bindgen(js_name = currentEntities)]
+    pub async fn current_entities(
+        &self,
+        ids: Vec<String>,
+        attributes: Vec<String>,
+        limit: usize,
+    ) -> Result<js_sys::Array, JsValue> {
+        let parsed_ids = ids
+            .iter()
+            .map(|id| {
+                crate::EntityId::parse_str(id).map_err(|error| {
+                    JsValue::from_str(&format!("current_entities invalid entity id {id}: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let attribute_refs = attributes.iter().map(String::as_str).collect::<Vec<_>>();
+        let (ids, attributes) =
+            crate::db::normalize_current_entities_request(&parsed_ids, &attribute_refs, limit)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+        let db = BrowserDb {
+            inner: Rc::clone(&self.inner),
+        };
+        db.ensure_usable()?;
+        let guarded = db.begin_paged_read()?;
+        let result = self
+            .read_current_entities(&db, ids, attributes, limit)
+            .await;
+        if guarded {
+            db.finish_paged_read();
+        }
+        let facts = result?;
+        current_facts_to_js(facts)
+    }
+}
+
+impl BrowserReadView {
+    async fn read_current_entities(
+        &self,
+        db: &BrowserDb,
+        ids: Vec<crate::EntityId>,
+        attributes: Vec<String>,
+        limit: usize,
+    ) -> Result<Vec<crate::db::CurrentFact>, JsValue> {
+        let as_of = crate::query::datalog::types::AsOf::Counter(self.tx_count);
+        let valid_time = match self.valid_at {
+            ValidAt::Timestamp(timestamp) => crate::graph::storage::CurrentValidTime::At(timestamp),
+            ValidAt::AnyValidTime => crate::graph::storage::CurrentValidTime::Any,
+            ValidAt::Slot(_) => {
+                return Err(JsValue::from_str(
+                    "internal: browser read view retained a valid-time slot",
+                ));
+            }
+        };
+        let mut history_entries = 0usize;
+        let mut facts = Vec::new();
+
+        for entity in ids {
+            for attribute in &attributes {
+                let mut cursor = self
+                    .inner
+                    .borrow()
+                    .fact_storage
+                    .current_entity_attribute_cursor(entity, attribute, Some(&as_of), valid_time)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                loop {
+                    let remaining = crate::db::CURRENT_ENTITIES_MAX_HISTORY_ENTRIES
+                        .saturating_sub(history_entries);
+                    if remaining == 0 {
+                        return Err(JsValue::from_str(&format!(
+                            "current_entities history work exceeds {} entries; use raw Datalog or maintenance context",
+                            crate::db::CURRENT_ENTITIES_MAX_HISTORY_ENTRIES
+                        )));
+                    }
+                    let mut values = Vec::new();
+                    let step = self
+                        .inner
+                        .borrow()
+                        .fact_storage
+                        .step_current_entity_attribute_cursor(
+                            &mut cursor,
+                            crate::db::CURRENT_ENTITIES_STEP_ENTRIES.min(remaining),
+                            &mut |value| {
+                                values.push(value.clone());
+                                Ok(())
+                            },
+                        );
+                    match step {
+                        Ok(step) => {
+                            let (entries, complete) = match step {
+                                crate::graph::storage::CurrentEntityAttributeStep::Yielded {
+                                    entries,
+                                } => (entries, false),
+                                crate::graph::storage::CurrentEntityAttributeStep::Complete {
+                                    entries,
+                                } => (entries, true),
+                            };
+                            history_entries = history_entries.saturating_add(entries);
+                            if facts.len().saturating_add(values.len()) > limit {
+                                return Err(JsValue::from_str(&format!(
+                                    "current_entities result exceeds limit {limit}; result was rejected without truncation"
+                                )));
+                            }
+                            facts.extend(values.into_iter().map(|value| crate::db::CurrentFact {
+                                entity,
+                                attribute: attribute.clone(),
+                                value,
+                            }));
+                            if complete {
+                                break;
+                            }
+                            if history_entries >= crate::db::CURRENT_ENTITIES_MAX_HISTORY_ENTRIES {
+                                return Err(JsValue::from_str(&format!(
+                                    "current_entities history work exceeds {} entries; use raw Datalog or maintenance context",
+                                    crate::db::CURRENT_ENTITIES_MAX_HISTORY_ENTRIES
+                                )));
+                            }
+                            db.evict_aggregate_staging();
+                            yield_browser_task().await?;
+                        }
+                        Err(error) => match page_not_resident_id(&error) {
+                            Some(page_id) => {
+                                db.fetch_and_stage_page(page_id).await?;
+                                db.evict_aggregate_staging();
+                            }
+                            None => return Err(JsValue::from_str(&error.to_string())),
+                        },
+                    }
+                }
+            }
+        }
+        Ok(facts)
+    }
+}
+
+fn current_facts_to_js(facts: Vec<crate::db::CurrentFact>) -> Result<js_sys::Array, JsValue> {
+    let rows = js_sys::Array::new();
+    let mut result_bytes = 0usize;
+    for fact in facts {
+        let value_json = to_tagged_json(&fact.value).to_string();
+        result_bytes = result_bytes
+            .saturating_add(36)
+            .saturating_add(fact.attribute.len())
+            .saturating_add(value_json.len());
+        if result_bytes > BROWSER_READ_VIEW_MAX_RESULT_BYTES {
+            return Err(JsValue::from_str(&format!(
+                "current_entities result exceeds {BROWSER_READ_VIEW_MAX_RESULT_BYTES} bytes; result was rejected without truncation"
+            )));
+        }
+        let row = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &row,
+            &JsValue::from_str("entity"),
+            &JsValue::from_str(&fact.entity.to_string()),
+        )?;
+        js_sys::Reflect::set(
+            &row,
+            &JsValue::from_str("attribute"),
+            &JsValue::from_str(&fact.attribute),
+        )?;
+        let value = js_sys::JSON::parse(&value_json)?;
+        js_sys::Reflect::set(&row, &JsValue::from_str("value"), &value)?;
+        rows.push(&row);
+    }
+    Ok(rows)
 }
 
 impl BrowserDb {
@@ -4239,6 +4409,67 @@ mod tests {
             .await
             .is_err(),
             "oversized JSON must be rejected, not truncated"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_read_view_returns_structured_current_entities() {
+        let entity = uuid::Uuid::from_u128(91);
+        let target = uuid::Uuid::from_u128(92);
+        let db = BrowserDb::open_in_memory().expect("open in memory");
+        db.execute(format!(
+            r#"(transact [[#uuid "{entity}" :card/title "Draft"] [#uuid "{entity}" :card/space #uuid "{target}"]])"#
+        ))
+        .await
+        .expect("seed current entities");
+        let view = db.read_view().expect("read view");
+        db.execute(format!(
+            r#"(retract [[#uuid "{entity}" :card/title "Draft"]])"#
+        ))
+        .await
+        .expect("retract after view");
+
+        let rows = view
+            .current_entities(
+                vec![entity.to_string()],
+                vec![":card/title".to_owned(), ":card/space".to_owned()],
+                4,
+            )
+            .await
+            .expect("structured current entities");
+        assert_eq!(rows.length(), 2);
+        let entity_string = entity.to_string();
+        let target_string = target.to_string();
+        let title = rows.get(0);
+        assert_eq!(
+            js_sys::Reflect::get(&title, &JsValue::from_str("entity"))
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some(entity_string.as_str())
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&title, &JsValue::from_str("attribute"))
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some(":card/title")
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&title, &JsValue::from_str("value"))
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some("Draft")
+        );
+        let reference = js_sys::Reflect::get(
+            &js_sys::Reflect::get(&rows.get(1), &JsValue::from_str("value")).unwrap(),
+            &JsValue::from_str("$ref"),
+        )
+        .unwrap();
+        assert_eq!(
+            reference.as_string().as_deref(),
+            Some(target_string.as_str())
         );
     }
 

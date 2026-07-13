@@ -508,8 +508,8 @@ Gate:
 
 ### H2 — Bounded current reads and consistent read views
 
-Status: transaction-pinned query boundary implemented; structured current-reader
-facade and Vetch fixture admission remain open.
+Status: transaction-pinned query boundary and bounded typed `current.entities`
+implemented; `refsTo` and Vetch fixture admission remain open.
 
 The implemented native `ReadView` captures its cursor while serialized with
 batch publication, then injects that cursor and one valid-time selection into
@@ -523,14 +523,16 @@ results fail as incomplete rather than being truncated.
 This closes the H0 interleaving defect without introducing the broader
 `ViciaLedger` facade or a second query engine. The real-Chrome regression proves
 that a paged exact-entity view performs demand reads without a full-store read.
-H2 remains open until the typed `current.entities`/`refsTo` surface and exact
-Vetch fixture equivalence are present. The current row/byte checks are result
-admission bounds; a non-aggregate attribute query can still materialize its
-selective range before the oversized-result rejection. The typed current-reader
-cursor must close that remaining peak-work bound rather than presenting this
-query facade as the final bounded-current API.
+`ReadView::current_entities` and browser `BrowserReadView.currentEntities()` now
+scan exact EAVT `(entity, attribute)` ranges with borrowed raw/prefix-leaf
+projection, merge the resident delta in index order, and preserve scoped and
+unscoped retract, `asOf`, and `validAt` semantics. Requests are bounded to 128
+ids, 32 attributes, 256 distinct pairs, 10,000 complete rows, and 65,536
+historical entries; browser results also retain the 8 MiB structured-result
+ceiling. Exceeding any bound rejects without truncation. H2 remains open until
+the typed `refsTo` surface and exact Vetch fixture equivalence are present.
 
-- Expose exact entity/attribute reads through the indexed current-view path.
+- Expose exact entity/attribute reads through the indexed current-view path. ✅
 - Add browser prepared/bound query parity if H0 proves repeated parsing is
   material.
 - Add consistent `asOf` and `validAt` read-view selection.

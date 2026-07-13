@@ -4,7 +4,9 @@
 #![allow(clippy::indexing_slicing)]
 
 use crate::graph::types::{Fact, Value};
-use crate::storage::index::{AevtKey, CurrentAevtEntryRef, EavtKey, encode_value};
+use crate::storage::index::{
+    AevtKey, CurrentAevtEntryRef, CurrentEavtEntryRef, EavtKey, encode_value,
+};
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -75,6 +77,19 @@ impl PendingFactRecord {
     pub(crate) fn current_aevt_entry(&self) -> CurrentAevtEntryRef<'_> {
         CurrentAevtEntryRef {
             entity: self.entity,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            tx_count: self.tx_count,
+            value_bytes: &self.value_bytes,
+            tx_id: self.tx_id,
+            asserted: self.asserted,
+        }
+    }
+
+    pub(crate) fn current_eavt_entry(&self) -> CurrentEavtEntryRef<'_> {
+        CurrentEavtEntryRef {
+            entity: self.entity,
+            attribute: &self.attribute,
             valid_from: self.valid_from,
             valid_to: self.valid_to,
             tx_count: self.tx_count,
@@ -162,7 +177,8 @@ impl SortedRuns {
         order: IndexOrder,
         lower: impl Fn(&PendingFactRecord) -> Ordering,
         upper: impl Fn(&PendingFactRecord) -> Ordering,
-    ) -> Vec<PendingFactId> {
+        max_entries: usize,
+    ) -> (Vec<PendingFactId>, bool) {
         struct Cursor<'a> {
             run: &'a [PendingFactId],
             position: usize,
@@ -186,7 +202,7 @@ impl SortedRuns {
         let capacity = cursors.iter().fold(0_usize, |total, cursor| {
             total.saturating_add(cursor.end.saturating_sub(cursor.position))
         });
-        let mut result = Vec::with_capacity(capacity);
+        let mut result = Vec::with_capacity(capacity.min(max_entries.saturating_add(1)));
         while !cursors.is_empty() {
             let mut selected = 0usize;
             for index in 1..cursors.len() {
@@ -198,12 +214,15 @@ impl SortedRuns {
             }
             let cursor = &mut cursors[selected];
             result.push(cursor.run[cursor.position]);
+            if result.len() > max_entries {
+                return (result, true);
+            }
             cursor.position = cursor.position.saturating_add(1);
             if cursor.position == cursor.end {
                 cursors.swap_remove(selected);
             }
         }
-        result
+        (result, false)
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -314,21 +333,50 @@ impl PendingOverlay {
     }
 
     pub(crate) fn range_eavt(&self, start: &EavtKey, end: &EavtKey) -> Vec<PendingFactId> {
-        self.indexes.eavt.range(
+        self.indexes
+            .eavt
+            .range(
+                &self.records,
+                IndexOrder::Eavt,
+                |record| compare_eavt_bound(record, start),
+                |record| compare_eavt_bound(record, end),
+                usize::MAX,
+            )
+            .0
+    }
+
+    pub(crate) fn range_eavt_bounded(
+        &self,
+        start: &EavtKey,
+        end: &EavtKey,
+        max_entries: usize,
+    ) -> Result<Vec<PendingFactId>> {
+        let (entries, overflowed) = self.indexes.eavt.range(
             &self.records,
             IndexOrder::Eavt,
             |record| compare_eavt_bound(record, start),
             |record| compare_eavt_bound(record, end),
-        )
+            max_entries,
+        );
+        if overflowed {
+            anyhow::bail!(
+                "current_entities history work exceeds {max_entries} entries; use raw Datalog or maintenance context"
+            );
+        }
+        Ok(entries)
     }
 
     pub(crate) fn range_aevt(&self, start: &AevtKey, end: Option<&AevtKey>) -> Vec<PendingFactId> {
-        self.indexes.aevt.range(
-            &self.records,
-            IndexOrder::Aevt,
-            |record| compare_aevt_bound(record, start),
-            |record| end.map_or(Ordering::Less, |end| compare_aevt_bound(record, end)),
-        )
+        self.indexes
+            .aevt
+            .range(
+                &self.records,
+                IndexOrder::Aevt,
+                |record| compare_aevt_bound(record, start),
+                |record| end.map_or(Ordering::Less, |end| compare_aevt_bound(record, end)),
+                usize::MAX,
+            )
+            .0
     }
 
     pub(crate) fn index_counts(&self) -> (usize, usize, usize, usize) {
@@ -357,6 +405,34 @@ impl PendingOverlay {
         )
             .cmp(&(
                 key.entity,
+                key.valid_from,
+                key.valid_to,
+                key.tx_count,
+                key.value_bytes,
+                key.tx_id,
+                key.asserted,
+            )))
+    }
+
+    pub(crate) fn compare_eavt_projection(
+        &self,
+        id: PendingFactId,
+        key: CurrentEavtEntryRef<'_>,
+    ) -> Result<Ordering> {
+        let record = self.get(id)?.current_eavt_entry();
+        Ok((
+            record.entity,
+            record.attribute,
+            record.valid_from,
+            record.valid_to,
+            record.tx_count,
+            record.value_bytes,
+            record.tx_id,
+            record.asserted,
+        )
+            .cmp(&(
+                key.entity,
+                key.attribute,
                 key.valid_from,
                 key.valid_to,
                 key.tx_count,
