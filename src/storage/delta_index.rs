@@ -1,6 +1,7 @@
 use crate::storage::CommittedIndexReader;
 use crate::storage::index::{
-    AevtKey, AvetKey, CurrentAevtEntryRef, CurrentEavtEntryRef, EavtKey, FactRef, VaetKey,
+    AevtKey, AvetKey, CurrentAevtEntryRef, CurrentEavtEntryRef, CurrentVaetEntryRef, EavtKey,
+    FactRef, VaetKey,
 };
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -69,6 +70,20 @@ pub(crate) trait KeyedIndexReader: Send + Sync {
         start: &VaetKey,
         end: Option<&VaetKey>,
     ) -> Result<Vec<(VaetKey, FactRef)>>;
+
+    fn visit_current_vaet_entries(
+        &self,
+        start: &VaetKey,
+        end: Option<&VaetKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentVaetEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        for (key, fact_ref) in self.range_scan_vaet_entries(start, end)? {
+            if !visit(CurrentVaetEntryRef::from_owned(&key), fact_ref)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -275,6 +290,42 @@ impl CommittedIndexReader for LayeredIndexReader {
         let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
         let delta = range_delta_entries(&delta.vaet, start, end);
         Ok(merge_entry_refs(base, delta))
+    }
+
+    fn visit_current_vaet_entries(
+        &self,
+        start: &VaetKey,
+        end: Option<&VaetKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentVaetEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
+        let mut delta = range_delta_entries(&delta.vaet, start, end)
+            .into_iter()
+            .peekable();
+        let base_complete =
+            self.base
+                .visit_current_vaet_entries(start, end, &mut |base_entry, base_ref| {
+                    while delta
+                        .peek()
+                        .is_some_and(|(delta_key, _)| base_entry.cmp_owned(delta_key).is_gt())
+                    {
+                        if let Some((key, fact_ref)) = delta.next()
+                            && !visit(CurrentVaetEntryRef::from_owned(&key), fact_ref)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    visit(base_entry, base_ref)
+                })?;
+        if !base_complete {
+            return Ok(false);
+        }
+        for (key, fact_ref) in delta {
+            if !visit(CurrentVaetEntryRef::from_owned(&key), fact_ref)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 

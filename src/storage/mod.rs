@@ -522,6 +522,37 @@ pub trait CommittedIndexReader: Send + Sync {
         start: &crate::storage::index::VaetKey,
         end: Option<&crate::storage::index::VaetKey>,
     ) -> anyhow::Result<Vec<crate::storage::index::FactRef>>;
+
+    /// Visit keyed VAET entries without retaining the full range.
+    fn visit_vaet_entries(
+        &self,
+        _start: &crate::storage::index::VaetKey,
+        _end: Option<&crate::storage::index::VaetKey>,
+        _visit: &mut dyn FnMut(
+            &crate::storage::index::VaetKey,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("committed index reader does not expose keyed VAET visitation")
+    }
+
+    /// Visit borrowed covering fields for an exact reverse-reference range.
+    fn visit_current_vaet_entries(
+        &self,
+        start: &crate::storage::index::VaetKey,
+        end: Option<&crate::storage::index::VaetKey>,
+        visit: &mut dyn for<'a> FnMut(
+            crate::storage::index::CurrentVaetEntryRef<'a>,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        self.visit_vaet_entries(start, end, &mut |key, fact_ref| {
+            visit(
+                crate::storage::index::CurrentVaetEntryRef::from_owned(key),
+                fact_ref,
+            )
+        })
+    }
 }
 
 #[cfg(test)]

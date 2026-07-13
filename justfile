@@ -56,6 +56,14 @@ leaf-read-path-smoke OUTPUT_DIR="target/leaf-read-path/smoke":
 leaf-read-path-full OUTPUT_DIR="target/leaf-read-path/full":
     ./scripts/run-leaf-read-path-bench.sh full "{{OUTPUT_DIR}}"
 
+# Prove typed current entity and reverse-reference reads stay selective at 10K.
+current-reader-smoke OUTPUT_DIR="target/current-reader/smoke":
+    ./scripts/run-current-reader-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run the typed current-reader structural gate over a 1M VAET/EAVT fixture.
+current-reader-full OUTPUT_DIR="target/current-reader/full":
+    ./scripts/run-current-reader-bench.sh full "{{OUTPUT_DIR}}"
+
 # Compare two leaf-read receipts and enforce the candidate acceptance gates.
 leaf-read-path-compare BASELINE CANDIDATE:
     node scripts/compare-leaf-read-path-receipts.mjs "{{BASELINE}}" "{{CANDIDATE}}"

@@ -5,7 +5,8 @@
 
 use crate::graph::types::{Fact, Value};
 use crate::storage::index::{
-    AevtKey, CurrentAevtEntryRef, CurrentEavtEntryRef, EavtKey, encode_value,
+    AevtKey, CurrentAevtEntryRef, CurrentEavtEntryRef, CurrentVaetEntryRef, EavtKey, VaetKey,
+    encode_value,
 };
 use anyhow::Result;
 use std::cmp::Ordering;
@@ -97,6 +98,22 @@ impl PendingFactRecord {
             tx_id: self.tx_id,
             asserted: self.asserted,
         }
+    }
+
+    pub(crate) fn current_vaet_entry(&self) -> Result<CurrentVaetEntryRef<'_>> {
+        let Value::Ref(ref_target) = self.value else {
+            anyhow::bail!("pending VAET entry is not a reference")
+        };
+        Ok(CurrentVaetEntryRef {
+            ref_target,
+            attribute: &self.attribute,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            source_entity: self.entity,
+            tx_count: self.tx_count,
+            tx_id: self.tx_id,
+            asserted: self.asserted,
+        })
     }
 
     fn equals_fact(&self, fact: &Fact, encoded: &[u8]) -> bool {
@@ -379,6 +396,27 @@ impl PendingOverlay {
             .0
     }
 
+    pub(crate) fn range_vaet_bounded(
+        &self,
+        start: &VaetKey,
+        end: &VaetKey,
+        max_entries: usize,
+    ) -> Result<Vec<PendingFactId>> {
+        let (entries, overflowed) = self.indexes.vaet.range(
+            &self.records,
+            IndexOrder::Vaet,
+            |record| compare_vaet_bound(record, start),
+            |record| compare_vaet_bound(record, end),
+            max_entries,
+        );
+        if overflowed {
+            anyhow::bail!(
+                "current_refs history work exceeds {max_entries} entries; use raw Datalog or maintenance context"
+            );
+        }
+        Ok(entries)
+    }
+
     pub(crate) fn index_counts(&self) -> (usize, usize, usize, usize) {
         (
             self.indexes.eavt.len,
@@ -437,6 +475,34 @@ impl PendingOverlay {
                 key.valid_to,
                 key.tx_count,
                 key.value_bytes,
+                key.tx_id,
+                key.asserted,
+            )))
+    }
+
+    pub(crate) fn compare_vaet_projection(
+        &self,
+        id: PendingFactId,
+        key: CurrentVaetEntryRef<'_>,
+    ) -> Result<Ordering> {
+        let record = self.get(id)?.current_vaet_entry()?;
+        Ok((
+            record.ref_target,
+            record.attribute,
+            record.valid_from,
+            record.valid_to,
+            record.source_entity,
+            record.tx_count,
+            record.tx_id,
+            record.asserted,
+        )
+            .cmp(&(
+                key.ref_target,
+                key.attribute,
+                key.valid_from,
+                key.valid_to,
+                key.source_entity,
+                key.tx_count,
                 key.tx_id,
                 key.asserted,
             )))
@@ -662,6 +728,18 @@ fn compare_aevt_bound(record: &PendingFactRecord, key: &AevtKey) -> Ordering {
         .then_with(|| record.valid_to.cmp(&key.valid_to))
         .then_with(|| record.tx_count.cmp(&key.tx_count))
         .then_with(|| record.value_bytes.as_ref().cmp(&key.value_bytes))
+        .then_with(|| record.tx_id.cmp(&key.tx_id))
+        .then_with(|| record.asserted.cmp(&key.asserted))
+}
+
+fn compare_vaet_bound(record: &PendingFactRecord, key: &VaetKey) -> Ordering {
+    ref_target(record)
+        .cmp(&key.ref_target)
+        .then_with(|| record.attribute.as_ref().cmp(&key.attribute))
+        .then_with(|| record.valid_from.cmp(&key.valid_from))
+        .then_with(|| record.valid_to.cmp(&key.valid_to))
+        .then_with(|| record.entity.cmp(&key.source_entity))
+        .then_with(|| record.tx_count.cmp(&key.tx_count))
         .then_with(|| record.tx_id.cmp(&key.tx_id))
         .then_with(|| record.asserted.cmp(&key.asserted))
 }

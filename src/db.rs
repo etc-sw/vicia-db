@@ -81,6 +81,9 @@ pub const CURRENT_ENTITIES_MAX_PAIRS: usize = 256;
 /// Maximum historical index entries consumed by one foreground current read.
 pub const CURRENT_ENTITIES_MAX_HISTORY_ENTRIES: usize = 65_536;
 pub(crate) const CURRENT_ENTITIES_STEP_ENTRIES: usize = 4_096;
+/// Maximum historical VAET entries consumed by one foreground reverse-reference read.
+pub const CURRENT_REFS_MAX_HISTORY_ENTRIES: usize = 65_536;
+pub(crate) const CURRENT_REFS_STEP_ENTRIES: usize = 4_096;
 
 pub(crate) fn normalize_current_entities_request(
     ids: &[crate::EntityId],
@@ -148,6 +151,16 @@ pub struct CurrentEntitiesRequest<'a> {
     /// Attributes, deduplicated while preserving first occurrence.
     pub attributes: &'a [&'a str],
     /// Maximum complete result rows. Exceeding it rejects the whole request.
+    pub limit: usize,
+}
+
+/// Exact reverse-reference selection for [`ReadView::refs_to`].
+pub struct CurrentRefsRequest<'a> {
+    /// Ref-valued attribute to select.
+    pub attribute: &'a str,
+    /// Referenced entity target.
+    pub value: crate::EntityId,
+    /// Maximum complete source-entity result count.
     pub limit: usize,
 }
 
@@ -257,6 +270,8 @@ impl ReadView<'_> {
         &self,
         request: CurrentEntitiesRequest<'_>,
     ) -> Result<Vec<CurrentFact>> {
+        #[cfg(feature = "bench-internals")]
+        crate::storage::btree_v6::reset_leaf_read_diagnostics();
         let (ids, attributes) =
             normalize_current_entities_request(request.ids, request.attributes, request.limit)?;
 
@@ -323,6 +338,76 @@ impl ReadView<'_> {
             }
         }
         Ok(results)
+    }
+
+    /// Read current source entities that reference one target through one exact attribute.
+    pub fn refs_to(&self, request: CurrentRefsRequest<'_>) -> Result<Vec<crate::EntityId>> {
+        #[cfg(feature = "bench-internals")]
+        crate::storage::btree_v6::reset_leaf_read_diagnostics();
+        if !request.attribute.starts_with(':')
+            || !request.attribute.contains('/')
+            || request.attribute.contains('\0')
+        {
+            bail!(
+                "current_refs attribute must be namespace-qualified: {}",
+                request.attribute
+            );
+        }
+        if request.limit == 0 || request.limit > READ_VIEW_MAX_ROWS {
+            bail!(
+                "current_refs limit must be in 1..={READ_VIEW_MAX_ROWS}; got {}",
+                request.limit
+            );
+        }
+        let as_of = AsOf::Counter(self.tx_count);
+        let valid_time = match self.valid_at {
+            ValidAt::Timestamp(timestamp) => crate::graph::storage::CurrentValidTime::At(timestamp),
+            ValidAt::AnyValidTime => crate::graph::storage::CurrentValidTime::Any,
+            ValidAt::Slot(_) => bail!("internal: read view retained a valid-time slot"),
+        };
+        let mut cursor = self.db.inner.fact_storage.current_refs_cursor(
+            request.attribute,
+            request.value,
+            Some(&as_of),
+            valid_time,
+        )?;
+        let mut history_entries = 0usize;
+        let mut results = Vec::new();
+        loop {
+            let remaining = CURRENT_REFS_MAX_HISTORY_ENTRIES.saturating_sub(history_entries);
+            if remaining == 0 {
+                bail!(
+                    "current_refs history work exceeds {CURRENT_REFS_MAX_HISTORY_ENTRIES} entries; use raw Datalog or maintenance context"
+                );
+            }
+            let step = self.db.inner.fact_storage.step_current_refs_cursor(
+                &mut cursor,
+                CURRENT_REFS_STEP_ENTRIES.min(remaining),
+                &mut |source| {
+                    if results.len() >= request.limit {
+                        bail!(
+                            "current_refs result exceeds limit {}; result was rejected without truncation",
+                            request.limit
+                        );
+                    }
+                    results.push(source);
+                    Ok(())
+                },
+            )?;
+            let (entries, complete) = match step {
+                crate::graph::storage::CurrentRefsStep::Yielded { entries } => (entries, false),
+                crate::graph::storage::CurrentRefsStep::Complete { entries } => (entries, true),
+            };
+            history_entries = history_entries.saturating_add(entries);
+            if !complete && history_entries >= CURRENT_REFS_MAX_HISTORY_ENTRIES {
+                bail!(
+                    "current_refs history work exceeds {CURRENT_REFS_MAX_HISTORY_ENTRIES} entries; use raw Datalog or maintenance context"
+                );
+            }
+            if complete {
+                return Ok(results);
+            }
+        }
     }
 }
 use crate::storage::backend::MemoryBackend;
@@ -4588,6 +4673,305 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].value, Value::String("base-32".to_owned()));
         assert_eq!(results[1].value, Value::String("delta".to_owned()));
+    }
+
+    #[test]
+    fn current_refs_is_typed_exact_ordered_and_transaction_pinned() {
+        let target = uuid::Uuid::from_u128(100);
+        let first = uuid::Uuid::from_u128(2);
+        let second = uuid::Uuid::from_u128(1);
+        let unrelated = uuid::Uuid::from_u128(3);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact [[#uuid "{first}" :edge/to #uuid "{target}"] [#uuid "{second}" :edge/to #uuid "{target}"] [#uuid "{unrelated}" :edge/to-extra #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+        db.execute(&format!(
+            r#"(retract [[#uuid "{first}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        let refs = view
+            .refs_to(CurrentRefsRequest {
+                attribute: ":edge/to",
+                value: target,
+                limit: 4,
+            })
+            .unwrap();
+        assert_eq!(refs, vec![second, first]);
+    }
+
+    #[test]
+    fn current_refs_honors_valid_time_and_retraction_scope() {
+        let target = uuid::Uuid::from_u128(101);
+        let source = uuid::Uuid::from_u128(4);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact {{:valid-from "2020-01-01" :valid-to "2021-01-01"}} [[#uuid "{source}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        db.execute(&format!(
+            r#"(transact {{:valid-from "2021-01-01" :valid-to "2022-01-01"}} [[#uuid "{source}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        db.execute(&format!(
+            r#"(retract {{:valid-from "2020-01-01" :valid-to "2021-01-01"}} [[#uuid "{source}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        let refs = db
+            .read_view(ReadViewOptions {
+                valid_at: ReadViewValidAt::AnyValidTime,
+                ..Default::default()
+            })
+            .unwrap()
+            .refs_to(CurrentRefsRequest {
+                attribute: ":edge/to",
+                value: target,
+                limit: 2,
+            })
+            .unwrap();
+        assert_eq!(refs, vec![source]);
+        db.execute(&format!(
+            r#"(retract [[#uuid "{source}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        let refs = db
+            .read_view(ReadViewOptions {
+                valid_at: ReadViewValidAt::AnyValidTime,
+                ..Default::default()
+            })
+            .unwrap()
+            .refs_to(CurrentRefsRequest {
+                attribute: ":edge/to",
+                value: target,
+                limit: 2,
+            })
+            .unwrap();
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn current_refs_merges_prefix_leaf_base_with_resident_delta() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current-refs.graph");
+        let target = uuid::Uuid::from_u128(102);
+        {
+            let db = Minigraf::open(&path).unwrap();
+            let facts = (1u128..=64)
+                .map(|id| {
+                    format!(
+                        r#"[#uuid "{}" :edge/to #uuid "{target}"]"#,
+                        uuid::Uuid::from_u128(id)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            db.execute(&format!("(transact [{facts}])")).unwrap();
+            db.checkpoint().unwrap();
+        }
+        let db = Minigraf::open(&path).unwrap();
+        let delta = uuid::Uuid::from_u128(65);
+        db.execute(&format!(
+            r#"(transact [[#uuid "{delta}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        let refs = db
+            .read_view(ReadViewOptions::default())
+            .unwrap()
+            .refs_to(CurrentRefsRequest {
+                attribute: ":edge/to",
+                value: target,
+                limit: 66,
+            })
+            .unwrap();
+        assert_eq!(refs.len(), 65);
+        assert_eq!(refs.first(), Some(&uuid::Uuid::from_u128(1)));
+        assert_eq!(refs.last(), Some(&delta));
+    }
+
+    #[test]
+    fn current_refs_resume_keeps_unconsumed_committed_candidate_after_pending_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current-refs-resume.graph");
+        let target = uuid::Uuid::from_u128(104);
+        let committed = uuid::Uuid::from_u128(100);
+        let pending = uuid::Uuid::from_u128(1);
+        let valid_time = r#"{:valid-from "2020-01-01" :valid-to "2030-01-01"}"#;
+        {
+            let db = Minigraf::open(&path).unwrap();
+            db.execute(&format!(
+                r#"(transact {valid_time} [[#uuid "{committed}" :edge/to #uuid "{target}"]])"#
+            ))
+            .unwrap();
+            db.checkpoint().unwrap();
+        }
+        let db = Minigraf::open(&path).unwrap();
+        db.execute(&format!(
+            r#"(transact {valid_time} [[#uuid "{pending}" :edge/to #uuid "{target}"]])"#
+        ))
+        .unwrap();
+        let mut cursor = db
+            .inner
+            .fact_storage
+            .current_refs_cursor(
+                ":edge/to",
+                target,
+                None,
+                crate::graph::storage::CurrentValidTime::Any,
+            )
+            .unwrap();
+        let mut refs = Vec::new();
+        loop {
+            let step = db
+                .inner
+                .fact_storage
+                .step_current_refs_cursor(&mut cursor, 1, &mut |source| {
+                    refs.push(source);
+                    Ok(())
+                })
+                .unwrap();
+            if matches!(
+                step,
+                crate::graph::storage::CurrentRefsStep::Complete { .. }
+            ) {
+                break;
+            }
+        }
+        assert_eq!(refs, vec![pending, committed]);
+    }
+
+    #[test]
+    fn current_refs_rejects_invalid_or_incomplete_requests() {
+        let target = uuid::Uuid::from_u128(103);
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&format!(
+            r#"(transact [[#uuid "{}" :edge/to #uuid "{target}"] [#uuid "{}" :edge/to #uuid "{target}"]])"#,
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2)
+        ))
+        .unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+        assert!(
+            view.refs_to(CurrentRefsRequest {
+                attribute: ":edge/to",
+                value: target,
+                limit: 1,
+            })
+            .is_err()
+        );
+        assert!(
+            view.refs_to(CurrentRefsRequest {
+                attribute: "edge",
+                value: target,
+                limit: 2,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vetch_current_reader_fixture_matches_raw_datalog() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            schema: String,
+            transaction: String,
+            entity_cases: Vec<EntityCase>,
+            ref_cases: Vec<RefCase>,
+        }
+        #[derive(serde::Deserialize)]
+        struct EntityCase {
+            id: String,
+            entity: uuid::Uuid,
+            attributes: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RefCase {
+            id: String,
+            attribute: String,
+            target: uuid::Uuid,
+        }
+
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../benchmarks/fixtures/vetch-current-reader.v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.schema, "vicia.vetch-current-reader-fixture.v1");
+        let db = Minigraf::in_memory().unwrap();
+        db.execute(&fixture.transaction).unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+
+        for case in fixture.entity_cases {
+            let attribute_refs = case
+                .attributes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let typed = view
+                .current_entities(CurrentEntitiesRequest {
+                    ids: &[case.entity],
+                    attributes: &attribute_refs,
+                    limit: 32,
+                })
+                .unwrap();
+            for attribute in &case.attributes {
+                let raw = view
+                    .query(
+                        &format!(
+                            r#"(query [:find ?value :where [#uuid "{}" {attribute} ?value]])"#,
+                            case.entity
+                        ),
+                        32,
+                    )
+                    .unwrap();
+                let QueryResult::QueryResults { results, .. } = raw else {
+                    panic!("fixture entity query did not return rows");
+                };
+                let mut raw_values = results
+                    .into_iter()
+                    .filter_map(|mut row| row.pop())
+                    .collect::<Vec<_>>();
+                raw_values.sort_by(Value::cmp);
+                let mut typed_values = typed
+                    .iter()
+                    .filter(|fact| fact.attribute == *attribute)
+                    .map(|fact| fact.value.clone())
+                    .collect::<Vec<_>>();
+                typed_values.sort_by(Value::cmp);
+                assert_eq!(typed_values, raw_values, "fixture case {}", case.id);
+            }
+        }
+
+        for case in fixture.ref_cases {
+            let typed = view
+                .refs_to(CurrentRefsRequest {
+                    attribute: &case.attribute,
+                    value: case.target,
+                    limit: 32,
+                })
+                .unwrap();
+            let raw = view
+                .query(
+                    &format!(
+                        r#"(query [:find ?source :where [?source {} #uuid "{}"]])"#,
+                        case.attribute, case.target
+                    ),
+                    32,
+                )
+                .unwrap();
+            let QueryResult::QueryResults { results, .. } = raw else {
+                panic!("fixture refs query did not return rows");
+            };
+            let mut raw_sources = results
+                .into_iter()
+                .filter_map(|row| match row.into_iter().next() {
+                    Some(Value::Ref(entity)) => Some(entity),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            raw_sources.sort_unstable();
+            assert_eq!(typed, raw_sources, "fixture case {}", case.id);
+        }
     }
 
     // ── read-only handle drop must not modify the file ────────────────────────

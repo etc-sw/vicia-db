@@ -391,6 +391,117 @@ pub struct VaetKey {
     pub asserted: bool,
 }
 
+/// Borrowed current-view projection of one on-disk VAET key.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CurrentVaetEntryRef<'a> {
+    pub(crate) ref_target: EntityId,
+    pub(crate) attribute: &'a str,
+    pub(crate) valid_from: i64,
+    pub(crate) valid_to: i64,
+    pub(crate) source_entity: EntityId,
+    pub(crate) tx_count: u64,
+    pub(crate) tx_id: TxId,
+    pub(crate) asserted: bool,
+}
+
+impl<'a> CurrentVaetEntryRef<'a> {
+    pub(crate) fn from_owned(key: &'a VaetKey) -> Self {
+        Self {
+            ref_target: key.ref_target,
+            attribute: &key.attribute,
+            valid_from: key.valid_from,
+            valid_to: key.valid_to,
+            source_entity: key.source_entity,
+            tx_count: key.tx_count,
+            tx_id: key.tx_id,
+            asserted: key.asserted,
+        }
+    }
+
+    pub(crate) fn cmp_owned(&self, key: &VaetKey) -> Ordering {
+        (
+            self.ref_target,
+            self.attribute,
+            self.valid_from,
+            self.valid_to,
+            self.source_entity,
+            self.tx_count,
+            self.tx_id,
+            self.asserted,
+        )
+            .cmp(&(
+                key.ref_target,
+                key.attribute.as_str(),
+                key.valid_from,
+                key.valid_to,
+                key.source_entity,
+                key.tx_count,
+                key.tx_id,
+                key.asserted,
+            ))
+    }
+
+    pub(crate) fn write_resume_key(&self, key: &mut VaetKey) -> bool {
+        let reused = key.attribute.capacity() >= self.attribute.len();
+        key.ref_target = self.ref_target;
+        key.attribute.clear();
+        key.attribute.push_str(self.attribute);
+        key.valid_from = self.valid_from;
+        key.valid_to = self.valid_to;
+        key.source_entity = self.source_entity;
+        key.tx_count = self.tx_count;
+        key.tx_id = self.tx_id;
+        key.asserted = self.asserted;
+        reused
+    }
+}
+
+/// Private borrowed postcard wire shape for `(VaetKey, FactRef)` entries.
+#[derive(Deserialize)]
+pub(crate) struct VaetEntryWire<'a> {
+    ref_target: EntityId,
+    #[serde(borrow)]
+    attribute: &'a str,
+    valid_from: i64,
+    valid_to: i64,
+    source_entity: EntityId,
+    tx_count: u64,
+    tx_id: TxId,
+    asserted: bool,
+}
+
+impl<'a> VaetEntryWire<'a> {
+    pub(crate) fn decode_entry(bytes: &'a [u8]) -> anyhow::Result<(Self, FactRef)> {
+        let (entry, remaining) = postcard::take_from_bytes(bytes)?;
+        if !remaining.is_empty() {
+            anyhow::bail!("trailing bytes after projected VAET entry")
+        }
+        Ok(entry)
+    }
+
+    pub(crate) fn project(&self) -> CurrentVaetEntryRef<'a> {
+        CurrentVaetEntryRef {
+            ref_target: self.ref_target,
+            attribute: self.attribute,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            source_entity: self.source_entity,
+            tx_count: self.tx_count,
+            tx_id: self.tx_id,
+            asserted: self.asserted,
+        }
+    }
+
+    pub(crate) fn cmp_owned(&self, key: &VaetKey) -> Ordering {
+        self.project().cmp_owned(key)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn borrowed_attribute_len(&self) -> usize {
+        self.attribute.len()
+    }
+}
+
 // ─── Indexes ─────────────────────────────────────────────────────────────────
 
 /// All four covering indexes held in memory alongside the fact list.
@@ -614,6 +725,51 @@ impl Indexes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vaet_projection_key(attribute: &str, tx: u64, asserted: bool) -> VaetKey {
+        VaetKey {
+            ref_target: Uuid::from_u128(99),
+            attribute: attribute.to_owned(),
+            valid_from: -9_000_000_000,
+            valid_to: i64::MAX,
+            source_entity: Uuid::from_u128(u128::from(tx) + 1),
+            tx_count: tx,
+            tx_id: u64::MAX - tx,
+            asserted,
+        }
+    }
+
+    #[test]
+    fn borrowed_vaet_wire_decodes_existing_postcard_shape_and_preserves_order() {
+        let low = vaet_projection_key(":edge/to", 128, false);
+        let high = vaet_projection_key(&format!(":edge/{}", "z".repeat(192)), 129, true);
+        for key in [&low, &high] {
+            let fact_ref = FactRef {
+                page_id: key.tx_count + 1,
+                slot_index: u16::MAX,
+            };
+            let bytes = postcard::to_allocvec(&(key, fact_ref)).unwrap();
+            let (wire, decoded_ref) = VaetEntryWire::decode_entry(&bytes).unwrap();
+            assert_eq!(wire.cmp_owned(key), Ordering::Equal);
+            assert_eq!(wire.project().attribute, key.attribute);
+            assert_eq!(wire.project().source_entity, key.source_entity);
+            assert_eq!(decoded_ref, fact_ref);
+        }
+        let bytes = postcard::to_allocvec(&(
+            &low,
+            FactRef {
+                page_id: 7,
+                slot_index: 3,
+            },
+        ))
+        .unwrap();
+        let (wire, _) = VaetEntryWire::decode_entry(&bytes).unwrap();
+        assert_eq!(wire.cmp_owned(&high), low.cmp(&high));
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(VaetEntryWire::decode_entry(&trailing).is_err());
+        assert!(VaetEntryWire::decode_entry(&bytes[..bytes.len() - 1]).is_err());
+    }
 
     fn eavt_projection_key(value: Value, attribute: &str, tx: u64, asserted: bool) -> EavtKey {
         EavtKey {

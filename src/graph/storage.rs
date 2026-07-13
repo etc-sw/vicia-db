@@ -5,7 +5,8 @@ use crate::graph::types::{
 };
 use crate::query::datalog::types::AsOf;
 use crate::storage::index::{
-    AevtKey, CurrentAevtEntryRef, CurrentEavtEntryRef, EavtKey, FactRef, encode_value,
+    AevtKey, CurrentAevtEntryRef, CurrentEavtEntryRef, CurrentVaetEntryRef, EavtKey, FactRef,
+    VaetKey, encode_value,
 };
 use anyhow::Result;
 #[cfg(any(test, feature = "bench-internals"))]
@@ -160,6 +161,22 @@ pub(crate) struct CurrentEntityAttributeCursor {
     complete: bool,
 }
 
+/// Resumable current reverse-reference reduction for one exact VAET range.
+pub(crate) struct CurrentRefsCursor {
+    end: VaetKey,
+    next_start: VaetKey,
+    pending: Vec<PendingFactId>,
+    pending_position: usize,
+    sources: std::collections::HashMap<EntityId, CurrentValueState>,
+    as_of: Option<AsOf>,
+    valid_time: CurrentValidTime,
+    committed_index_reader: Option<Arc<dyn crate::storage::CommittedIndexReader>>,
+    publication_generation: u64,
+    last_key: Option<VaetKey>,
+    committed_complete: bool,
+    complete: bool,
+}
+
 impl CurrentAttributeCursor {
     fn begin_step(&mut self) {
         if self.yielded {
@@ -242,6 +259,11 @@ pub(crate) enum CurrentAttributeStep {
 }
 
 pub(crate) enum CurrentEntityAttributeStep {
+    Yielded { entries: usize },
+    Complete { entries: usize },
+}
+
+pub(crate) enum CurrentRefsStep {
     Yielded { entries: usize },
     Complete { entries: usize },
 }
@@ -1749,13 +1771,206 @@ impl FactStorage {
         cursor.complete = true;
         Ok(CurrentEntityAttributeStep::Complete { entries: processed })
     }
+
+    pub(crate) fn current_refs_cursor(
+        &self,
+        attribute: &str,
+        target: EntityId,
+        as_of: Option<&AsOf>,
+        valid_time: CurrentValidTime,
+    ) -> Result<CurrentRefsCursor> {
+        let start = VaetKey {
+            ref_target: target,
+            attribute: attribute.to_owned(),
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            source_entity: EntityId::nil(),
+            tx_count: 0,
+            tx_id: 0,
+            asserted: false,
+        };
+        let mut end_attribute = String::with_capacity(attribute.len() + 1);
+        end_attribute.push_str(attribute);
+        end_attribute.push('\0');
+        let end = VaetKey {
+            ref_target: target,
+            attribute: end_attribute,
+            valid_from: i64::MIN,
+            valid_to: i64::MIN,
+            source_entity: EntityId::nil(),
+            tx_count: 0,
+            tx_id: 0,
+            asserted: false,
+        };
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        Ok(CurrentRefsCursor {
+            pending: d.pending.range_vaet_bounded(
+                &start,
+                &end,
+                crate::db::CURRENT_REFS_MAX_HISTORY_ENTRIES,
+            )?,
+            end,
+            next_start: start,
+            pending_position: 0,
+            sources: Default::default(),
+            as_of: as_of.cloned(),
+            valid_time,
+            committed_index_reader: d.committed_index_reader.clone(),
+            publication_generation: d.publication_generation,
+            last_key: None,
+            committed_complete: false,
+            complete: false,
+        })
+    }
+
+    pub(crate) fn step_current_refs_cursor(
+        &self,
+        cursor: &mut CurrentRefsCursor,
+        max_entries: usize,
+        visit: &mut dyn FnMut(EntityId) -> Result<()>,
+    ) -> Result<CurrentRefsStep> {
+        if cursor.complete {
+            return Ok(CurrentRefsStep::Complete { entries: 0 });
+        }
+        let d = self.data.read().unwrap_or_else(|error| error.into_inner());
+        if d.publication_generation != cursor.publication_generation {
+            anyhow::bail!("current refs cursor publication changed during the read view");
+        }
+        let mut processed = 0usize;
+        let bounded = max_entries != usize::MAX;
+        let accept = |cursor: &mut CurrentRefsCursor,
+                      key: CurrentVaetEntryRef<'_>,
+                      fact_ref: CursorFactRef| {
+            if entry_visible_at_tx(key.tx_count, key.tx_id, cursor.as_of.as_ref()) {
+                reduce_current_state(
+                    cursor.sources.entry(key.source_entity).or_default(),
+                    key.valid_from,
+                    key.valid_to,
+                    key.tx_count,
+                    key.asserted,
+                    fact_ref,
+                );
+            }
+        };
+
+        if !cursor.committed_complete {
+            let last_key = cursor.last_key.clone();
+            let next_start = cursor.next_start.clone();
+            let end = cursor.end.clone();
+            let committed_index_reader = cursor.committed_index_reader.clone();
+            let complete = committed_index_reader.as_ref().map_or(Ok(true), |reader| {
+                reader.visit_current_vaet_entries(&next_start, Some(&end), &mut |key, fact_ref| {
+                    if last_key
+                        .as_ref()
+                        .is_some_and(|last| !key.cmp_owned(last).is_gt())
+                    {
+                        return Ok(true);
+                    }
+                    while cursor.pending_position < cursor.pending.len()
+                        && cursor
+                            .pending
+                            .get(cursor.pending_position)
+                            .is_some_and(|id| {
+                                d.pending
+                                    .compare_vaet_projection(*id, key)
+                                    .is_ok_and(|order| order.is_lt())
+                            })
+                    {
+                        let pending_id = *cursor
+                            .pending
+                            .get(cursor.pending_position)
+                            .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+                        accept(
+                            cursor,
+                            d.pending.get(pending_id)?.current_vaet_entry()?,
+                            CursorFactRef::Pending(pending_id),
+                        );
+                        cursor.pending_position += 1;
+                        processed += 1;
+                        if processed >= max_entries {
+                            return Ok(false);
+                        }
+                    }
+                    accept(cursor, key, CursorFactRef::Committed(fact_ref));
+                    if bounded {
+                        let reused = if let Some(last) = &mut cursor.last_key {
+                            key.write_resume_key(last)
+                        } else {
+                            let mut last = cursor.next_start.clone();
+                            key.write_resume_key(&mut last);
+                            cursor.last_key = Some(last);
+                            false
+                        };
+                        crate::storage::btree_v6::note_resume_key(reused);
+                    }
+                    processed += 1;
+                    Ok(processed < max_entries)
+                })
+            })?;
+            cursor.committed_complete = complete;
+            if bounded && let Some(last) = &cursor.last_key {
+                cursor.next_start = last.clone();
+            }
+            if !complete {
+                return Ok(CurrentRefsStep::Yielded { entries: processed });
+            }
+        }
+
+        while cursor.pending_position < cursor.pending.len() && processed < max_entries {
+            let pending_id = *cursor
+                .pending
+                .get(cursor.pending_position)
+                .ok_or_else(|| anyhow::anyhow!("pending cursor out of bounds"))?;
+            accept(
+                cursor,
+                d.pending.get(pending_id)?.current_vaet_entry()?,
+                CursorFactRef::Pending(pending_id),
+            );
+            cursor.pending_position += 1;
+            processed += 1;
+        }
+        if cursor.pending_position < cursor.pending.len() {
+            return Ok(CurrentRefsStep::Yielded { entries: processed });
+        }
+
+        let mut sources = cursor
+            .sources
+            .iter()
+            .filter_map(|(source, state)| {
+                state
+                    .assertions
+                    .iter()
+                    .any(|((valid_from, valid_to), (assert_tx, _))| {
+                        let scoped_retract = state
+                            .max_scoped_retract_tx
+                            .get(&(*valid_from, *valid_to))
+                            .copied()
+                            .unwrap_or(0);
+                        *assert_tx > state.max_unscoped_retract_tx.max(scoped_retract)
+                            && !matches!(cursor.valid_time, CurrentValidTime::At(at) if !(*valid_from <= at && at < *valid_to))
+                    })
+                    .then_some(*source)
+            })
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+        for source in sources {
+            visit(source)?;
+        }
+        cursor.sources.clear();
+        cursor.complete = true;
+        Ok(CurrentRefsStep::Complete { entries: processed })
+    }
 }
 
 fn entry_visible_as_of(key: CurrentAevtEntryRef<'_>, as_of: Option<&AsOf>) -> bool {
+    entry_visible_at_tx(key.tx_count, key.tx_id, as_of)
+}
+
+fn entry_visible_at_tx(tx_count: u64, tx_id: u64, as_of: Option<&AsOf>) -> bool {
     match as_of {
         None => true,
-        Some(AsOf::Counter(counter)) => key.tx_count <= *counter,
-        Some(AsOf::Timestamp(timestamp)) => key.tx_id <= u64::try_from(*timestamp).unwrap_or(0),
+        Some(AsOf::Counter(counter)) => tx_count <= *counter,
+        Some(AsOf::Timestamp(timestamp)) => tx_id <= u64::try_from(*timestamp).unwrap_or(0),
         Some(AsOf::Slot(_)) => false,
     }
 }
@@ -1765,56 +1980,80 @@ fn reduce_current_entry(
     key: CurrentAevtEntryRef<'_>,
     fact_ref: CursorFactRef,
 ) -> bool {
-    fn reduce_state(
-        state: &mut CurrentValueState,
-        key: CurrentAevtEntryRef<'_>,
-        fact_ref: CursorFactRef,
-    ) -> bool {
-        let windows_before = state
-            .assertions
-            .len()
-            .saturating_add(state.max_scoped_retract_tx.len());
-        if key.asserted {
-            state
-                .assertions
-                .entry((key.valid_from, key.valid_to))
-                .and_modify(|winner| {
-                    if key.tx_count > winner.0 {
-                        *winner = (key.tx_count, fact_ref);
-                    }
-                })
-                .or_insert((key.tx_count, fact_ref));
-        } else if key.valid_from == RETRACT_ALL_VALID_FROM && key.valid_to == VALID_TIME_FOREVER {
-            state.max_unscoped_retract_tx = state.max_unscoped_retract_tx.max(key.tx_count);
-        } else {
-            state
-                .max_scoped_retract_tx
-                .entry((key.valid_from, key.valid_to))
-                .and_modify(|tx| *tx = (*tx).max(key.tx_count))
-                .or_insert(key.tx_count);
-        }
-        state
-            .assertions
-            .len()
-            .saturating_add(state.max_scoped_retract_tx.len())
-            > windows_before
-    }
-
     // The common current-view shape starts each entity with one value. Avoid
     // a borrowed miss probe before the unavoidable first owned map key.
     if values.is_empty() {
         let mut state = CurrentValueState::default();
-        let added = reduce_state(&mut state, key, fact_ref);
+        let added = reduce_current_state(
+            &mut state,
+            key.valid_from,
+            key.valid_to,
+            key.tx_count,
+            key.asserted,
+            fact_ref,
+        );
         values.insert(key.value_bytes.to_vec(), state);
         return added;
     }
     if let Some(state) = values.get_mut(key.value_bytes) {
-        return reduce_state(state, key, fact_ref);
+        return reduce_current_state(
+            state,
+            key.valid_from,
+            key.valid_to,
+            key.tx_count,
+            key.asserted,
+            fact_ref,
+        );
     }
     let mut state = CurrentValueState::default();
-    let added = reduce_state(&mut state, key, fact_ref);
+    let added = reduce_current_state(
+        &mut state,
+        key.valid_from,
+        key.valid_to,
+        key.tx_count,
+        key.asserted,
+        fact_ref,
+    );
     values.insert(key.value_bytes.to_vec(), state);
     added
+}
+
+fn reduce_current_state(
+    state: &mut CurrentValueState,
+    valid_from: i64,
+    valid_to: i64,
+    tx_count: u64,
+    asserted: bool,
+    fact_ref: CursorFactRef,
+) -> bool {
+    let windows_before = state
+        .assertions
+        .len()
+        .saturating_add(state.max_scoped_retract_tx.len());
+    if asserted {
+        state
+            .assertions
+            .entry((valid_from, valid_to))
+            .and_modify(|winner| {
+                if tx_count > winner.0 {
+                    *winner = (tx_count, fact_ref);
+                }
+            })
+            .or_insert((tx_count, fact_ref));
+    } else if valid_from == RETRACT_ALL_VALID_FROM && valid_to == VALID_TIME_FOREVER {
+        state.max_unscoped_retract_tx = state.max_unscoped_retract_tx.max(tx_count);
+    } else {
+        state
+            .max_scoped_retract_tx
+            .entry((valid_from, valid_to))
+            .and_modify(|tx| *tx = (*tx).max(tx_count))
+            .or_insert(tx_count);
+    }
+    state
+        .assertions
+        .len()
+        .saturating_add(state.max_scoped_retract_tx.len())
+        > windows_before
 }
 
 fn decode_index_value(encoded: &[u8]) -> Result<Value> {

@@ -184,6 +184,33 @@
       ]
     },
     {
+      "id": "current-reader",
+      "milestone": "M9-h2-bounded-current-reader",
+      "kind": "absolute-acceptance",
+      "owner": "vicia-vetch-boundary",
+      "decision": "Do typed entity and reverse-reference reads remain exact, selective, and allocation-free over the 1M committed base?",
+      "profiles": [
+        {
+          "id": "smoke",
+          "tier": "pull-request-smoke",
+          "acceptanceEligible": false,
+          "command": "just current-reader-smoke",
+          "budgets": [
+            { "name": "typed current read p95", "metrics": ["entities", "refsTo"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" }
+          ]
+        },
+        {
+          "id": "full",
+          "tier": "release-dedicated-host",
+          "acceptanceEligible": true,
+          "command": "just current-reader-full",
+          "budgets": [
+            { "name": "typed current read p95", "metrics": ["entities", "refsTo"], "statistic": "p95", "comparator": "<=", "limit": 10.0, "unit": "ms" }
+          ]
+        }
+      ]
+    },
+    {
       "id": "vetch-gate-d-exact-trace",
       "milestone": "M6-vetch-product-acceptance",
       "kind": "external-absolute-acceptance",

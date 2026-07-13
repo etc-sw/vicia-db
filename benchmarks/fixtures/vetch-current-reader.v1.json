@@ -1,0 +1,19 @@
+{
+  "schema": "vicia.vetch-current-reader-fixture.v1",
+  "source": {
+    "repository": "/home/upopo/projects/vetch-app",
+    "commit": "13970fa"
+  },
+  "transaction": "(transact [[#uuid \"50000000-0000-0000-0000-000000000001\" :vetch_card/title \"Current card\"] [#uuid \"50000000-0000-0000-0000-000000000001\" :vetch_card/space #uuid \"50000000-0000-0000-0000-000000000010\"] [#uuid \"50000000-0000-0000-0000-000000000002\" :vetch_proposal/status :accepted] [#uuid \"50000000-0000-0000-0000-000000000003\" :vetch_verdict/proposal #uuid \"50000000-0000-0000-0000-000000000002\"] [#uuid \"50000000-0000-0000-0000-000000000003\" :vetch_verdict/outcome :accepted] [#uuid \"50000000-0000-0000-0000-000000000004\" :vetch_source/title \"Bounded context source\"] [#uuid \"50000000-0000-0000-0000-000000000005\" :vetch_decision/source #uuid \"50000000-0000-0000-0000-000000000004\"] [#uuid \"50000000-0000-0000-0000-000000000005\" :vetch_decision/status :current] [#uuid \"50000000-0000-0000-0000-000000000006\" :vetch_receipt/decision #uuid \"50000000-0000-0000-0000-000000000005\"] [#uuid \"50000000-0000-0000-0000-000000000006\" :vetch_receipt/outcome :observed]])",
+  "entityCases": [
+    { "id": "current-card", "entity": "50000000-0000-0000-0000-000000000001", "attributes": [":vetch_card/title", ":vetch_card/space"] },
+    { "id": "proposal-status", "entity": "50000000-0000-0000-0000-000000000002", "attributes": [":vetch_proposal/status"] },
+    { "id": "receipt", "entity": "50000000-0000-0000-0000-000000000006", "attributes": [":vetch_receipt/decision", ":vetch_receipt/outcome"] },
+    { "id": "agent-brief", "entity": "50000000-0000-0000-0000-000000000005", "attributes": [":vetch_decision/source", ":vetch_decision/status"] }
+  ],
+  "refCases": [
+    { "id": "current-space-membership", "attribute": ":vetch_card/space", "target": "50000000-0000-0000-0000-000000000010" },
+    { "id": "proposal-verdict", "attribute": ":vetch_verdict/proposal", "target": "50000000-0000-0000-0000-000000000002" },
+    { "id": "agent-brief-receipt", "attribute": ":vetch_receipt/decision", "target": "50000000-0000-0000-0000-000000000005" }
+  ]
+}

@@ -933,6 +933,51 @@ impl BrowserReadView {
         let facts = result?;
         current_facts_to_js(facts)
     }
+
+    /// Read current source entities that reference one target through one exact attribute.
+    #[wasm_bindgen(js_name = refsTo)]
+    pub async fn refs_to(
+        &self,
+        attribute: String,
+        value: String,
+        limit: usize,
+    ) -> Result<js_sys::Array, JsValue> {
+        if !attribute.starts_with(':') || !attribute.contains('/') || attribute.contains('\0') {
+            return Err(JsValue::from_str(&format!(
+                "current_refs attribute must be namespace-qualified: {attribute}"
+            )));
+        }
+        if limit == 0 || limit > crate::db::READ_VIEW_MAX_ROWS {
+            return Err(JsValue::from_str(&format!(
+                "current_refs limit must be in 1..={}; got {limit}",
+                crate::db::READ_VIEW_MAX_ROWS
+            )));
+        }
+        let target = crate::EntityId::parse_str(&value).map_err(|error| {
+            JsValue::from_str(&format!("current_refs invalid target id {value}: {error}"))
+        })?;
+        let db = BrowserDb {
+            inner: Rc::clone(&self.inner),
+        };
+        db.ensure_usable()?;
+        let guarded = db.begin_paged_read()?;
+        let result = self.read_current_refs(&db, &attribute, target, limit).await;
+        if guarded {
+            db.finish_paged_read();
+        }
+        let sources = result?;
+        let bytes = sources.len().saturating_mul(36);
+        if bytes > BROWSER_READ_VIEW_MAX_RESULT_BYTES {
+            return Err(JsValue::from_str(&format!(
+                "current_refs result exceeds {BROWSER_READ_VIEW_MAX_RESULT_BYTES} bytes; result was rejected without truncation"
+            )));
+        }
+        let result = js_sys::Array::new();
+        for source in sources {
+            result.push(&JsValue::from_str(&source.to_string()));
+        }
+        Ok(result)
+    }
 }
 
 impl BrowserReadView {
@@ -1031,6 +1076,89 @@ impl BrowserReadView {
             }
         }
         Ok(facts)
+    }
+
+    async fn read_current_refs(
+        &self,
+        db: &BrowserDb,
+        attribute: &str,
+        target: crate::EntityId,
+        limit: usize,
+    ) -> Result<Vec<crate::EntityId>, JsValue> {
+        let as_of = crate::query::datalog::types::AsOf::Counter(self.tx_count);
+        let valid_time = match self.valid_at {
+            ValidAt::Timestamp(timestamp) => crate::graph::storage::CurrentValidTime::At(timestamp),
+            ValidAt::AnyValidTime => crate::graph::storage::CurrentValidTime::Any,
+            ValidAt::Slot(_) => {
+                return Err(JsValue::from_str(
+                    "internal: browser read view retained a valid-time slot",
+                ));
+            }
+        };
+        let mut cursor = self
+            .inner
+            .borrow()
+            .fact_storage
+            .current_refs_cursor(attribute, target, Some(&as_of), valid_time)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let mut history_entries = 0usize;
+        let mut sources = Vec::new();
+        loop {
+            let remaining =
+                crate::db::CURRENT_REFS_MAX_HISTORY_ENTRIES.saturating_sub(history_entries);
+            if remaining == 0 {
+                return Err(JsValue::from_str(&format!(
+                    "current_refs history work exceeds {} entries; use raw Datalog or maintenance context",
+                    crate::db::CURRENT_REFS_MAX_HISTORY_ENTRIES
+                )));
+            }
+            let mut emitted = Vec::new();
+            let step = self.inner.borrow().fact_storage.step_current_refs_cursor(
+                &mut cursor,
+                crate::db::CURRENT_REFS_STEP_ENTRIES.min(remaining),
+                &mut |source| {
+                    emitted.push(source);
+                    Ok(())
+                },
+            );
+            match step {
+                Ok(step) => {
+                    let (entries, complete) = match step {
+                        crate::graph::storage::CurrentRefsStep::Yielded { entries } => {
+                            (entries, false)
+                        }
+                        crate::graph::storage::CurrentRefsStep::Complete { entries } => {
+                            (entries, true)
+                        }
+                    };
+                    history_entries = history_entries.saturating_add(entries);
+                    if sources.len().saturating_add(emitted.len()) > limit {
+                        return Err(JsValue::from_str(&format!(
+                            "current_refs result exceeds limit {limit}; result was rejected without truncation"
+                        )));
+                    }
+                    sources.extend(emitted);
+                    if complete {
+                        return Ok(sources);
+                    }
+                    if history_entries >= crate::db::CURRENT_REFS_MAX_HISTORY_ENTRIES {
+                        return Err(JsValue::from_str(&format!(
+                            "current_refs history work exceeds {} entries; use raw Datalog or maintenance context",
+                            crate::db::CURRENT_REFS_MAX_HISTORY_ENTRIES
+                        )));
+                    }
+                    db.evict_aggregate_staging();
+                    yield_browser_task().await?;
+                }
+                Err(error) => match page_not_resident_id(&error) {
+                    Some(page_id) => {
+                        db.fetch_and_stage_page(page_id).await?;
+                        db.evict_aggregate_staging();
+                    }
+                    None => return Err(JsValue::from_str(&error.to_string())),
+                },
+            }
+        }
     }
 }
 
@@ -4470,6 +4598,110 @@ mod tests {
         assert_eq!(
             reference.as_string().as_deref(),
             Some(target_string.as_str())
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_read_view_returns_pinned_structured_refs_to() {
+        let target = uuid::Uuid::from_u128(191);
+        let first = uuid::Uuid::from_u128(2);
+        let second = uuid::Uuid::from_u128(1);
+        let db = BrowserDb::open_in_memory().expect("open in memory");
+        db.execute(format!(
+            r#"(transact [[#uuid "{first}" :edge/to #uuid "{target}"] [#uuid "{second}" :edge/to #uuid "{target}"]])"#
+        ))
+        .await
+        .expect("seed refs");
+        let view = db.read_view().expect("read view");
+        db.execute(format!(
+            r#"(retract [[#uuid "{first}" :edge/to #uuid "{target}"]])"#
+        ))
+        .await
+        .expect("retract after view");
+
+        let refs = view
+            .refs_to(":edge/to".to_owned(), target.to_string(), 4)
+            .await
+            .expect("structured refs");
+        assert_eq!(refs.length(), 2);
+        let first_string = first.to_string();
+        let second_string = second.to_string();
+        assert_eq!(
+            refs.get(0).as_string().as_deref(),
+            Some(second_string.as_str())
+        );
+        assert_eq!(
+            refs.get(1).as_string().as_deref(),
+            Some(first_string.as_str())
+        );
+        assert!(
+            view.refs_to(":edge/to".to_owned(), target.to_string(), 1)
+                .await
+                .is_err(),
+            "incomplete refs result must be rejected"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_vetch_current_reader_fixture_matches_raw_datalog() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            transaction: String,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../benchmarks/fixtures/vetch-current-reader.v1.json"
+        ))
+        .unwrap();
+        let card = uuid::Uuid::parse_str("50000000-0000-0000-0000-000000000001").unwrap();
+        let space = uuid::Uuid::parse_str("50000000-0000-0000-0000-000000000010").unwrap();
+        let db = BrowserDb::open_in_memory().expect("open in memory");
+        db.execute(fixture.transaction)
+            .await
+            .expect("load Vetch fixture");
+        let view = db.read_view().expect("read view");
+
+        let entities = view
+            .current_entities(
+                vec![card.to_string()],
+                vec![":vetch_card/title".to_owned()],
+                4,
+            )
+            .await
+            .expect("typed current card");
+        let typed_title = js_sys::Reflect::get(&entities.get(0), &JsValue::from_str("value"))
+            .unwrap()
+            .as_string();
+        let raw_title = view
+            .query(
+                format!(
+                    r#"(query [:find ?value :where [#uuid "{card}" :vetch_card/title ?value]])"#
+                ),
+                4,
+                4_096,
+            )
+            .await
+            .expect("raw current card");
+        let raw_title: serde_json::Value = serde_json::from_str(&raw_title).unwrap();
+        assert_eq!(typed_title.as_deref(), raw_title["results"][0][0].as_str());
+
+        let refs = view
+            .refs_to(":vetch_card/space".to_owned(), space.to_string(), 4)
+            .await
+            .expect("typed space membership");
+        let raw_refs = view
+            .query(
+                format!(
+                    r#"(query [:find ?source :where [?source :vetch_card/space #uuid "{space}"]])"#
+                ),
+                4,
+                4_096,
+            )
+            .await
+            .expect("raw space membership");
+        let raw_refs: serde_json::Value = serde_json::from_str(&raw_refs).unwrap();
+        assert_eq!(
+            refs.get(0).as_string().as_deref(),
+            raw_refs["results"][0][0]["$ref"].as_str()
         );
     }
 
