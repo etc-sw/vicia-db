@@ -45,4 +45,51 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-- Add diagnostic phase timing around current-entity reduction/flush and the typed aggregate sink, then choose one measured bottleneck inside the existing borrowed cursor path. Do not add another decode format, prefetch batch, public API, or external storage dependency. Require the same leaf-read receipt to reach aggregate p50 `<= 230 ms` or improve by at least 10%, and re-establish point no-regression, before rerunning storage-layout and real-browser rollout gates. Do not replace Vetch's browser package until those gates pass; when they do, replace the complete package, never only the `.wasm` binary.
+### Slice: current-read phase attribution and one measured repair
+
+This is a direct risk probe inside the v12 current-read rollout. The product
+boundary remains the selected-attribute current-view pipeline: page-backed AEVT
+projection -> temporal reducer -> entity flush -> typed aggregate sink. It does
+not admit a new query API, change-feed, cache, file encoding, or Vetch-owned
+projection authority.
+
+1. Add repository-only phase diagnostics without contaminating timed samples.
+   Reuse the existing explicit diagnostic-query toggle so `Instant` sampling is
+   disabled during the 20 performance samples and enabled only for the separate
+   receipt probe. Record:
+   - total committed merge/visit time;
+   - `reduce_current_entry` time and accepted-entry count;
+   - entity-flush preparation time and flush count, excluding the visitor;
+   - visitor time and emitted-value count, which is the typed aggregate push for
+     this workload;
+   - aggregate finish/projection time after the cursor completes.
+   Keep the existing raw/prefix projection decode timers so the receipt can
+   derive the remaining page traversal, merge, and comparison share rather than
+   double-count nested phases.
+2. Extend `vicia.leaf-read-path.v1` additively. Put the cursor and aggregate
+   phase counters under the aggregate diagnostic section, preserve fixture
+   provenance, and make the validator reject missing/non-finite phases,
+   accepted/emitted count drift, owned projected AEVT decode, or any return of
+   full-leaf materialization. Add focused tests proving that disabled timing
+   remains zero and enabled timing preserves exact count `1,000,000` and
+   checksum `499999500000`.
+3. Run smoke, then one clean 1M full receipt against the current projected
+   cursor receipt. Rank phases by exclusive elapsed time and choose exactly one
+   production repair only when it owns at least 10% of diagnostic query time or
+   explains at least half of the gap to the `230 ms` target. The repair must
+   stay inside the existing borrowed cursor/reducer/sink boundary and keep
+   v11/v12 bytes and Datalog/bi-temporal semantics unchanged.
+4. Verify the chosen repair with targeted reducer/aggregate/corruption tests,
+   `cargo test`, `cargo fmt -- --check`, `cargo clippy --lib -- -D warnings`,
+   the browser WASM check, and the same leaf-read smoke/full receipt. Accept it
+   only if aggregate p50 is `<= 230 ms` or improves by at least 10%, aggregate
+   p95 is `<= 115%` of p50, point batch p95 is `<= 0.050 ms` and no worse than
+   the current cursor receipt, query RSS grows by no more than `2 MiB`, and all
+   structural zero-allocation counters remain green.
+
+Stop after attribution without a production change when no phase meets the
+ownership threshold; record the measured distribution and name the next probe.
+If semantics, corruption handling, point latency, or RSS regresses, reject the
+repair and keep v12 rollout open. Only after every gate passes should the
+storage-layout and real-Chrome suites run and the complete Vetch browser package
+be replaced; never replace only the `.wasm` binary.
