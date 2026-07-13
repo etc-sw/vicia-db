@@ -21,6 +21,24 @@ for (const candidate of receipt.candidates) {
   validateSamples(candidate.checkpoint.baselineRssSamplesBytes, repetitions, `${label}: checkpoint baseline RSS`);
   validateSamples(candidate.checkpoint.peakRssSamplesBytes, repetitions, `${label}: checkpoint peak RSS`);
   validateSamples(candidate.checkpoint.deltaRssSamplesBytes, repetitions, `${label}: checkpoint delta RSS`);
+  assert(Array.isArray(candidate.checkpoint.diagnosticsSamples) && candidate.checkpoint.diagnosticsSamples.length === repetitions, `${label}: checkpoint diagnostics samples`);
+  for (const [index, diagnostics] of candidate.checkpoint.diagnosticsSamples.entries()) {
+    const phaseMicros = [
+      diagnostics.factPackingMicros,
+      diagnostics.committedIndexReadMicros,
+      diagnostics.pendingIndexSortMicros,
+      diagnostics.factSyncMicros,
+      diagnostics.eavtCollectSortMicros, diagnostics.eavtBuildMicros,
+      diagnostics.aevtCollectSortMicros, diagnostics.aevtBuildMicros,
+      diagnostics.avetCollectSortMicros, diagnostics.avetBuildMicros,
+      diagnostics.vaetCollectSortMicros, diagnostics.vaetBuildMicros,
+      diagnostics.dataSyncMicros, diagnostics.integrityCatalogMicros,
+      diagnostics.headerAssemblyMicros, diagnostics.publishWriteMicros,
+      diagnostics.publishSyncMicros, diagnostics.publishFinalizeMicros,
+    ];
+    assert(phaseMicros.every((value) => Number.isSafeInteger(value) && value >= 0), `${label}: phase diagnostics ${index}`);
+    assert(phaseMicros.reduce((sum, value) => sum + value, 0) <= candidate.checkpoint.elapsedSamplesMs[index] * 1000, `${label}: phase diagnostics bounded ${index}`);
+  }
   validateSamples(candidate.query.pointSamplesMs, repetitions, `${label}: point`);
   validateSamples(candidate.query.aggregateSamplesMs, repetitions, `${label}: aggregate`);
   validateSamples(candidate.query.baselineRssSamplesBytes, repetitions, `${label}: query baseline RSS`);

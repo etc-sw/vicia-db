@@ -44,6 +44,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(feature = "bench-internals")]
 use std::cell::Cell;
+#[cfg(feature = "bench-internals")]
+use std::time::Instant;
 
 #[cfg(feature = "bench-internals")]
 /// Repository-only ownership counters for a full base construction.
@@ -60,6 +62,42 @@ pub struct CheckpointConstructionDiagnostics {
     pub peak_serialized_entries: u64,
     /// Maximum serialized payload bytes retained by a B-tree frontier.
     pub peak_serialized_bytes: u64,
+    /// Time spent streaming and writing candidate fact pages.
+    pub fact_packing_micros: u64,
+    /// Time spent loading committed index entries before an incremental rebuild.
+    pub committed_index_read_micros: u64,
+    /// Time spent building and sorting pending entries for all indexes.
+    pub pending_index_sort_micros: u64,
+    /// Time spent syncing newly packed fact pages before index construction.
+    pub fact_sync_micros: u64,
+    /// Time spent collecting and sorting EAVT entries.
+    pub eavt_collect_sort_micros: u64,
+    /// Time spent serializing and writing the EAVT tree.
+    pub eavt_build_micros: u64,
+    /// Time spent collecting and sorting AEVT entries.
+    pub aevt_collect_sort_micros: u64,
+    /// Time spent serializing and writing the AEVT tree.
+    pub aevt_build_micros: u64,
+    /// Time spent collecting and sorting AVET entries.
+    pub avet_collect_sort_micros: u64,
+    /// Time spent serializing and writing the AVET tree.
+    pub avet_build_micros: u64,
+    /// Time spent collecting and sorting VAET entries.
+    pub vaet_collect_sort_micros: u64,
+    /// Time spent serializing and writing the VAET tree.
+    pub vaet_build_micros: u64,
+    /// Time spent syncing candidate fact and index pages before cataloging.
+    pub data_sync_micros: u64,
+    /// Time spent hashing and writing the base integrity catalog.
+    pub integrity_catalog_micros: u64,
+    /// Time spent assembling the candidate header page.
+    pub header_assembly_micros: u64,
+    /// Time spent writing the publication header page.
+    pub publish_write_micros: u64,
+    /// Time spent durably syncing the published header and candidate pages.
+    pub publish_sync_micros: u64,
+    /// Time spent installing readers and clearing the published overlay.
+    pub publish_finalize_micros: u64,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -71,7 +109,37 @@ thread_local! {
             fact_page_visits: 0,
             peak_serialized_entries: 0,
             peak_serialized_bytes: 0,
+            fact_packing_micros: 0,
+            committed_index_read_micros: 0,
+            pending_index_sort_micros: 0,
+            fact_sync_micros: 0,
+            eavt_collect_sort_micros: 0,
+            eavt_build_micros: 0,
+            aevt_collect_sort_micros: 0,
+            aevt_build_micros: 0,
+            avet_collect_sort_micros: 0,
+            avet_build_micros: 0,
+            vaet_collect_sort_micros: 0,
+            vaet_build_micros: 0,
+            data_sync_micros: 0,
+            integrity_catalog_micros: 0,
+            header_assembly_micros: 0,
+            publish_write_micros: 0,
+            publish_sync_micros: 0,
+            publish_finalize_micros: 0,
         }) };
+}
+
+#[cfg(feature = "bench-internals")]
+fn checkpoint_elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "bench-internals")]
+fn update_checkpoint_diagnostics(update: impl FnOnce(&mut CheckpointConstructionDiagnostics)) {
+    let mut diagnostics = CHECKPOINT_DIAGNOSTICS.get();
+    update(&mut diagnostics);
+    CHECKPOINT_DIAGNOSTICS.set(diagnostics);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1755,6 +1823,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         #[cfg(feature = "bench-internals")]
         reset_checkpoint_construction_diagnostics();
+        #[cfg(feature = "bench-internals")]
+        let fact_packing_started = Instant::now();
 
         let mut packer = PackedFactPacker::new(base_fact_page_start);
         let mut node_count = 0u64;
@@ -1806,6 +1876,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         CHECKPOINT_DIAGNOSTICS.set(CheckpointConstructionDiagnostics {
             peak_fact_pages_in_memory: 1,
             fact_page_visits: num_fact_pages.saturating_mul(4),
+            fact_packing_micros: checkpoint_elapsed_micros(fact_packing_started),
             ..CheckpointConstructionDiagnostics::default()
         });
 
@@ -1814,6 +1885,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .ok_or_else(|| {
                 anyhow::anyhow!("page count overflow computing recompact index_start")
             })?;
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let mut eavt_entries = Vec::with_capacity(usize::try_from(node_count).unwrap_or(0));
         visit_fact_refs_in_pages(
             &*backend,
@@ -1826,9 +1899,21 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         )?;
         eavt_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         observe_checkpoint_typed_entries(eavt_entries.len());
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.eavt_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let (eavt_root, next1) =
             self.build_btree_keys(eavt_entries.into_iter(), &mut *backend, index_start)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.eavt_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let mut aevt_entries = Vec::with_capacity(usize::try_from(node_count).unwrap_or(0));
         visit_fact_refs_in_pages(
             &*backend,
@@ -1841,9 +1926,21 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         )?;
         aevt_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         observe_checkpoint_typed_entries(aevt_entries.len());
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.aevt_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let (aevt_root, next2) =
             self.build_btree_keys(aevt_entries.into_iter(), &mut *backend, next1)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.aevt_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let mut avet_entries = Vec::with_capacity(usize::try_from(node_count).unwrap_or(0));
         visit_fact_refs_in_pages(
             &*backend,
@@ -1856,9 +1953,21 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         )?;
         avet_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         observe_checkpoint_typed_entries(avet_entries.len());
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.avet_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let (avet_root, next3) =
             self.build_btree_keys(avet_entries.into_iter(), &mut *backend, next2)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.avet_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let mut vaet_entries = Vec::new();
         visit_fact_refs_in_pages(
             &*backend,
@@ -1873,11 +1982,29 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         )?;
         vaet_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         observe_checkpoint_typed_entries(vaet_entries.len());
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.vaet_collect_sort_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let (vaet_root, next4) =
             self.build_btree_keys(vaet_entries.into_iter(), &mut *backend, next3)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.vaet_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
         let total_data_pages = next4.saturating_sub(base_fact_page_start);
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         backend.sync()?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.data_sync_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let integrity = write_base_integrity_catalog(
             &mut *backend,
             base_generation,
@@ -1886,6 +2013,12 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             next4,
             None,
         )?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.integrity_catalog_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let mut header = FileHeader::new();
         header.page_count = integrity.published_page_count;
         header.node_count = node_count;
@@ -1904,6 +2037,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             base_fact_page_start,
             integrity.descriptor,
         )?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.header_assembly_micros = checkpoint_elapsed_micros(phase_started);
+        });
         Ok(RecompactCandidate {
             header,
             header_page,
@@ -1926,10 +2063,24 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         backend.write_page(0, &candidate.header_page)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.publish_write_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         backend.sync()?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.publish_sync_micros = checkpoint_elapsed_micros(phase_started);
+        });
         drop(backend);
 
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         self.header_manifest_selection = manifest_selection;
         self.delta_manifest_selection = PersistedManifestSelection::NoDeltaManifest;
         self.committed_fact_pages
@@ -1941,6 +2092,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.dirty = false;
         self.wire_committed_readers(&candidate.header, Vec::new())?;
         self.storage.post_checkpoint_clear();
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.publish_finalize_micros = checkpoint_elapsed_micros(phase_started);
+        });
         Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
     }
 
@@ -2637,6 +2792,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             let candidate = self.write_recompact_candidate_from_visible_facts()?;
             return self.publish_recompact_candidate(candidate);
         }
+        #[cfg(feature = "bench-internals")]
+        reset_checkpoint_construction_diagnostics();
 
         let base_generation = self
             .base_integrity
@@ -2670,6 +2827,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
 
         // Stream committed B+tree entries BEFORE writing new pages that may overlap
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let committed_eavt: Vec<(EavtKey, FactRef)> = if curr_header.eavt_root_page != 0 {
             stream_all_entries(curr_header.eavt_root_page, &*backend, &self.page_cache)?
         } else {
@@ -2690,11 +2849,17 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         } else {
             Vec::new()
         };
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.committed_index_read_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
         // Invalidate cached pages that will be overwritten (old index pages)
         self.page_cache.invalidate_from(new_fact_start);
 
         // ── Step B: pack pending facts as new appended pages ────────────────────
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let (new_pages, new_fact_refs) = pack_facts(&pending_facts, new_fact_start)?;
         for (i, page_data) in new_pages.iter().enumerate() {
             let page_offset =
@@ -2709,57 +2874,110 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let new_total_fact_pages = old_fact_page_count
             .checked_add(new_pages_len)
             .ok_or_else(|| anyhow::anyhow!("fact page count overflow"))?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.fact_packing_micros = checkpoint_elapsed_micros(phase_started);
+            diagnostics.peak_fact_pages_in_memory = new_pages_len;
+        });
 
         // Sync fact pages to disk before building indexes on top of them.
         // Without this, a crash during index build could leave partially-flushed
         // fact pages that the old header's index roots would try to traverse.
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         backend.sync()?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.fact_sync_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
         // ── Step C: build sorted index entries for pending facts ────────────────
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let (pending_eavt, pending_aevt, pending_avet, pending_vaet) =
             build_sorted_index_entries(&pending_facts, &new_fact_refs);
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.pending_index_sort_micros = checkpoint_elapsed_micros(phase_started);
+            diagnostics.peak_typed_entries = u64::try_from(pending_facts.len()).unwrap_or(u64::MAX);
+        });
 
         // ── Step D: merge committed + pending entries, build new B+trees ─────────
         let index_start = base_fact_page_start
             .checked_add(new_total_fact_pages)
             .ok_or_else(|| anyhow::anyhow!("page count overflow computing index_start"))?;
 
-        let eavt_ser = if !committed_eavt.is_empty() {
-            btree_entries(merge_sorted_vecs(committed_eavt, pending_eavt))?
-        } else {
-            btree_entries(pending_eavt.into_iter())?
-        };
-        let (eavt_root, next1) =
-            self.build_btree(eavt_ser.into_iter(), &mut *backend, index_start)?;
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let eavt_entries: Box<dyn Iterator<Item = (EavtKey, FactRef)>> =
+            if !committed_eavt.is_empty() {
+                Box::new(merge_sorted_vecs(committed_eavt, pending_eavt))
+            } else {
+                Box::new(pending_eavt.into_iter())
+            };
+        let (eavt_root, next1) = self.build_btree_keys(eavt_entries, &mut *backend, index_start)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.eavt_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
-        let aevt_ser = if !committed_aevt.is_empty() {
-            btree_entries(merge_sorted_vecs(committed_aevt, pending_aevt))?
-        } else {
-            btree_entries(pending_aevt.into_iter())?
-        };
-        let (aevt_root, next2) = self.build_btree(aevt_ser.into_iter(), &mut *backend, next1)?;
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let aevt_entries: Box<dyn Iterator<Item = (AevtKey, FactRef)>> =
+            if !committed_aevt.is_empty() {
+                Box::new(merge_sorted_vecs(committed_aevt, pending_aevt))
+            } else {
+                Box::new(pending_aevt.into_iter())
+            };
+        let (aevt_root, next2) = self.build_btree_keys(aevt_entries, &mut *backend, next1)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.aevt_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
-        let avet_ser = if !committed_avet.is_empty() {
-            btree_entries(merge_sorted_vecs(committed_avet, pending_avet))?
-        } else {
-            btree_entries(pending_avet.into_iter())?
-        };
-        let (avet_root, next3) = self.build_btree(avet_ser.into_iter(), &mut *backend, next2)?;
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let avet_entries: Box<dyn Iterator<Item = (AvetKey, FactRef)>> =
+            if !committed_avet.is_empty() {
+                Box::new(merge_sorted_vecs(committed_avet, pending_avet))
+            } else {
+                Box::new(pending_avet.into_iter())
+            };
+        let (avet_root, next3) = self.build_btree_keys(avet_entries, &mut *backend, next2)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.avet_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
-        let vaet_ser = if !committed_vaet.is_empty() {
-            btree_entries(merge_sorted_vecs(committed_vaet, pending_vaet))?
-        } else {
-            btree_entries(pending_vaet.into_iter())?
-        };
-        let (vaet_root, next4) = self.build_btree(vaet_ser.into_iter(), &mut *backend, next3)?;
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
+        let vaet_entries: Box<dyn Iterator<Item = (VaetKey, FactRef)>> =
+            if !committed_vaet.is_empty() {
+                Box::new(merge_sorted_vecs(committed_vaet, pending_vaet))
+            } else {
+                Box::new(pending_vaet.into_iter())
+            };
+        let (vaet_root, next4) = self.build_btree_keys(vaet_entries, &mut *backend, next3)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.vaet_build_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
         // Sync index pages to disk before writing the header.
         // The header update is the atomic commit point: once it's durable,
         // recovery uses the new root pages. All data those roots reference
         // must already be on stable storage.
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         backend.sync()?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.data_sync_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
         let total_data_pages = next4.saturating_sub(base_fact_page_start);
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let integrity = write_base_integrity_catalog(
             &mut *backend,
             base_generation,
@@ -2768,8 +2986,14 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             next4,
             None,
         )?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.integrity_catalog_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
         // ── Step E: write header (last write = crash-safe boundary) ─────────────
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         let mut header = FileHeader::new(); // current format
         header.page_count = integrity.published_page_count;
         let pending_len = u64::try_from(pending_facts.len())
@@ -2795,10 +3019,28 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         )?;
         let manifest_selection =
             select_header_manifest_slot_from_page0(header.version, &header_page)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.header_assembly_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         backend.write_page(0, &header_page)?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.publish_write_micros = checkpoint_elapsed_micros(phase_started);
+        });
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         backend.sync()?;
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.publish_sync_micros = checkpoint_elapsed_micros(phase_started);
+        });
         drop(backend);
 
+        #[cfg(feature = "bench-internals")]
+        let phase_started = Instant::now();
         self.header_manifest_selection = manifest_selection;
         self.delta_manifest_selection = PersistedManifestSelection::NoDeltaManifest;
         self.committed_fact_pages
@@ -2814,6 +3056,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
         // Clear pending — all data now on disk
         self.storage.post_checkpoint_clear();
+        #[cfg(feature = "bench-internals")]
+        update_checkpoint_diagnostics(|diagnostics| {
+            diagnostics.publish_finalize_micros = checkpoint_elapsed_micros(phase_started);
+        });
 
         Ok(CheckpointOutcome::FullRebuild)
     }

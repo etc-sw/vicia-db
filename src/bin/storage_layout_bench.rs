@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use minigraf::{
-    Minigraf, OpenOptions, QueryResult, StorageLayoutDiagnostics, inspect_storage_layout,
+    CheckpointConstructionDiagnostics, Minigraf, OpenOptions, QueryResult,
+    StorageLayoutDiagnostics, inspect_storage_layout,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -110,6 +111,7 @@ struct CheckpointMeasurement {
     baseline_rss_samples_bytes: Vec<u64>,
     peak_rss_samples_bytes: Vec<u64>,
     delta_rss_samples_bytes: Vec<u64>,
+    diagnostics_samples: Vec<CheckpointConstructionDiagnostics>,
     graph_bytes: u64,
     layout: StorageLayoutDiagnostics,
 }
@@ -274,6 +276,7 @@ struct CheckpointSample {
     baseline_rss_bytes: u64,
     peak_rss_bytes: u64,
     delta_rss_bytes: u64,
+    diagnostics: CheckpointConstructionDiagnostics,
     graph_bytes: u64,
     layout: StorageLayoutDiagnostics,
 }
@@ -306,12 +309,14 @@ fn build(path: &Path, facts: u64, fill: u8) -> Result<CheckpointSample> {
     sampler
         .join()
         .map_err(|_| anyhow::anyhow!("RSS sampler panicked"))?;
+    let diagnostics = db.checkpoint_construction_diagnostics();
     drop(db);
     Ok(CheckpointSample {
         elapsed_ms,
         baseline_rss_bytes: baseline,
         peak_rss_bytes: peak.load(Ordering::SeqCst),
         delta_rss_bytes: peak.load(Ordering::SeqCst).saturating_sub(baseline),
+        diagnostics,
         graph_bytes: fs::metadata(path)?.len(),
         layout: inspect_storage_layout(path)?,
     })
@@ -323,6 +328,7 @@ fn combine_checkpoint_samples(mut samples: Vec<CheckpointSample>) -> Result<Chec
     let mut baseline_rss_samples_bytes = Vec::with_capacity(samples.len() + 1);
     let mut peak_rss_samples_bytes = Vec::with_capacity(samples.len() + 1);
     let mut delta_rss_samples_bytes = Vec::with_capacity(samples.len() + 1);
+    let mut diagnostics_samples = Vec::with_capacity(samples.len() + 1);
     for sample in samples.iter().chain(std::iter::once(&final_sample)) {
         if sample.graph_bytes != final_sample.graph_bytes {
             bail!("checkpoint samples produced different graph sizes")
@@ -331,12 +337,14 @@ fn combine_checkpoint_samples(mut samples: Vec<CheckpointSample>) -> Result<Chec
         baseline_rss_samples_bytes.push(sample.baseline_rss_bytes);
         peak_rss_samples_bytes.push(sample.peak_rss_bytes);
         delta_rss_samples_bytes.push(sample.delta_rss_bytes);
+        diagnostics_samples.push(sample.diagnostics);
     }
     Ok(CheckpointMeasurement {
         elapsed_samples_ms,
         baseline_rss_samples_bytes,
         peak_rss_samples_bytes,
         delta_rss_samples_bytes,
+        diagnostics_samples,
         graph_bytes: final_sample.graph_bytes,
         layout: final_sample.layout,
     })
