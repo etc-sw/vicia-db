@@ -3,7 +3,9 @@ use crate::graph::FactStorage;
 ///
 /// This module bridges the gap between high-level fact operations and
 /// low-level page-based storage backends.
-use crate::graph::types::{Fact, RETRACT_ALL_VALID_FROM, VALID_TIME_FOREVER, Value};
+use crate::graph::types::{
+    EntityId, Fact, RETRACT_ALL_VALID_FROM, TxId, VALID_TIME_FOREVER, Value,
+};
 use crate::storage::FACT_PAGE_FORMAT_PACKED;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::backend::file::FileBackend;
@@ -2942,9 +2944,17 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         });
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let eavt_entries =
-            merge_sorted_iters(committed_eavt.into_iter(), pending_order.eavt_entries());
-        let (eavt_root, next1) = self.build_btree_keys(eavt_entries, &mut *backend, index_start)?;
+        let (eavt_root, next1) = if committed_eavt.is_empty() {
+            self.build_btree_keys(
+                pending_order.borrowed_eavt_entries(),
+                &mut *backend,
+                index_start,
+            )?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_eavt.into_iter(), pending_order.eavt_entries());
+            self.build_btree_keys(entries, &mut *backend, index_start)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.eavt_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -2959,9 +2969,13 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         });
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let aevt_entries =
-            merge_sorted_iters(committed_aevt.into_iter(), pending_order.aevt_entries());
-        let (aevt_root, next2) = self.build_btree_keys(aevt_entries, &mut *backend, next1)?;
+        let (aevt_root, next2) = if committed_aevt.is_empty() {
+            self.build_btree_keys(pending_order.borrowed_aevt_entries(), &mut *backend, next1)?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_aevt.into_iter(), pending_order.aevt_entries());
+            self.build_btree_keys(entries, &mut *backend, next1)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.aevt_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -2976,9 +2990,13 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         });
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let avet_entries =
-            merge_sorted_iters(committed_avet.into_iter(), pending_order.avet_entries());
-        let (avet_root, next3) = self.build_btree_keys(avet_entries, &mut *backend, next2)?;
+        let (avet_root, next3) = if committed_avet.is_empty() {
+            self.build_btree_keys(pending_order.borrowed_avet_entries(), &mut *backend, next2)?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_avet.into_iter(), pending_order.avet_entries());
+            self.build_btree_keys(entries, &mut *backend, next2)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.avet_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -2993,9 +3011,13 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         });
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
-        let vaet_entries =
-            merge_sorted_iters(committed_vaet.into_iter(), pending_order.vaet_entries());
-        let (vaet_root, next4) = self.build_btree_keys(vaet_entries, &mut *backend, next3)?;
+        let (vaet_root, next4) = if committed_vaet.is_empty() {
+            self.build_btree_keys(pending_order.borrowed_vaet_entries(), &mut *backend, next3)?
+        } else {
+            let entries =
+                merge_sorted_iters(committed_vaet.into_iter(), pending_order.vaet_entries());
+            self.build_btree_keys(entries, &mut *backend, next3)?
+        };
         #[cfg(feature = "bench-internals")]
         update_checkpoint_diagnostics(|diagnostics| {
             diagnostics.vaet_build_micros = checkpoint_elapsed_micros(phase_started);
@@ -4005,6 +4027,58 @@ struct PendingIndexOrder<'a> {
     order: Vec<usize>,
 }
 
+// Initial base construction can serialize these borrowed views immediately into
+// the B-tree page frontier. Keeping the owned key types for committed/pending
+// merges avoids changing their ordering contract while removing three copies of
+// every pending attribute and canonical value from the common empty-base path.
+#[derive(Serialize)]
+struct BorrowedEavtKey<'a> {
+    entity: EntityId,
+    attribute: &'a str,
+    valid_from: i64,
+    valid_to: i64,
+    tx_count: u64,
+    value_bytes: &'a [u8],
+    tx_id: TxId,
+    asserted: bool,
+}
+
+#[derive(Serialize)]
+struct BorrowedAevtKey<'a> {
+    attribute: &'a str,
+    entity: EntityId,
+    valid_from: i64,
+    valid_to: i64,
+    tx_count: u64,
+    value_bytes: &'a [u8],
+    tx_id: TxId,
+    asserted: bool,
+}
+
+#[derive(Serialize)]
+struct BorrowedAvetKey<'a> {
+    attribute: &'a str,
+    value_bytes: &'a [u8],
+    valid_from: i64,
+    valid_to: i64,
+    entity: EntityId,
+    tx_count: u64,
+    tx_id: TxId,
+    asserted: bool,
+}
+
+#[derive(Serialize)]
+struct BorrowedVaetKey<'a> {
+    ref_target: EntityId,
+    attribute: &'a str,
+    valid_from: i64,
+    valid_to: i64,
+    source_entity: EntityId,
+    tx_count: u64,
+    tx_id: TxId,
+    asserted: bool,
+}
+
 fn required_index<T>(slice: &[T], index: usize) -> &T {
     match slice.get(index) {
         Some(value) => value,
@@ -4170,12 +4244,50 @@ impl<'a> PendingIndexOrder<'a> {
         })
     }
 
+    fn borrowed_eavt_entries(&self) -> impl Iterator<Item = (BorrowedEavtKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            (
+                BorrowedEavtKey {
+                    entity: fact.entity,
+                    attribute: &fact.attribute,
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    tx_count: fact.tx_count,
+                    value_bytes: required_index(&self.value_bytes, index).as_slice(),
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
     fn aevt_entries(&self) -> impl Iterator<Item = (AevtKey, FactRef)> + '_ {
         self.order.iter().copied().map(|index| {
             let fact = required_index(self.facts, index);
             let value_bytes = required_index(&self.value_bytes, index).clone();
             (
                 aevt_key_with_value_bytes(fact, value_bytes),
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
+    fn borrowed_aevt_entries(&self) -> impl Iterator<Item = (BorrowedAevtKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            (
+                BorrowedAevtKey {
+                    attribute: &fact.attribute,
+                    entity: fact.entity,
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    tx_count: fact.tx_count,
+                    value_bytes: required_index(&self.value_bytes, index).as_slice(),
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
                 *required_index(self.refs, index),
             )
         })
@@ -4192,6 +4304,25 @@ impl<'a> PendingIndexOrder<'a> {
         })
     }
 
+    fn borrowed_avet_entries(&self) -> impl Iterator<Item = (BorrowedAvetKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            (
+                BorrowedAvetKey {
+                    attribute: &fact.attribute,
+                    value_bytes: required_index(&self.value_bytes, index).as_slice(),
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    entity: fact.entity,
+                    tx_count: fact.tx_count,
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
+                *required_index(self.refs, index),
+            )
+        })
+    }
+
     fn vaet_entries(&self) -> impl Iterator<Item = (VaetKey, FactRef)> + '_ {
         self.order.iter().copied().map(|index| {
             let fact = required_index(self.facts, index);
@@ -4200,6 +4331,28 @@ impl<'a> PendingIndexOrder<'a> {
                 None => unreachable!("VAET order contains only Ref values"),
             };
             (key, *required_index(self.refs, index))
+        })
+    }
+
+    fn borrowed_vaet_entries(&self) -> impl Iterator<Item = (BorrowedVaetKey<'_>, FactRef)> + '_ {
+        self.order.iter().copied().map(|index| {
+            let fact = required_index(self.facts, index);
+            let Value::Ref(ref_target) = &fact.value else {
+                unreachable!("VAET order contains only Ref values")
+            };
+            (
+                BorrowedVaetKey {
+                    ref_target: *ref_target,
+                    attribute: &fact.attribute,
+                    valid_from: fact.valid_from,
+                    valid_to: fact.valid_to,
+                    source_entity: fact.entity,
+                    tx_count: fact.tx_count,
+                    tx_id: fact.tx_id,
+                    asserted: fact.asserted,
+                },
+                *required_index(self.refs, index),
+            )
         })
     }
 
@@ -4346,7 +4499,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_reference_order_builds_byte_identical_index_pages() {
+    fn borrowed_pending_keys_build_byte_identical_index_pages() {
         let facts = vec![
             Fact::with_valid_time(
                 Uuid::from_u128(2),
@@ -4431,7 +4584,7 @@ mod tests {
         let mut order = PendingIndexOrder::new(&facts, &refs);
         order.sort_eavt();
         let (_, next1) = build_btree_from_key_entries(
-            order.eavt_entries(),
+            order.borrowed_eavt_entries(),
             &mut reference_backend,
             &reference_cache,
             1,
@@ -4440,7 +4593,7 @@ mod tests {
         .unwrap();
         order.sort_aevt();
         let (_, next2) = build_btree_from_key_entries(
-            order.aevt_entries(),
+            order.borrowed_aevt_entries(),
             &mut reference_backend,
             &reference_cache,
             next1,
@@ -4449,7 +4602,7 @@ mod tests {
         .unwrap();
         order.sort_avet();
         let (_, next3) = build_btree_from_key_entries(
-            order.avet_entries(),
+            order.borrowed_avet_entries(),
             &mut reference_backend,
             &reference_cache,
             next2,
@@ -4458,7 +4611,7 @@ mod tests {
         .unwrap();
         order.sort_vaet();
         let (_, reference_end) = build_btree_from_key_entries(
-            order.vaet_entries(),
+            order.borrowed_vaet_entries(),
             &mut reference_backend,
             &reference_cache,
             next3,
