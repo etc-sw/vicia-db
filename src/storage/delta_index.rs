@@ -1,5 +1,5 @@
 use crate::storage::CommittedIndexReader;
-use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey};
+use crate::storage::index::{AevtKey, AvetKey, CurrentAevtEntryRef, EavtKey, FactRef, VaetKey};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -29,6 +29,17 @@ pub(crate) trait KeyedIndexReader: Send + Sync {
             }
         }
         Ok(true)
+    }
+
+    fn visit_current_aevt_entries(
+        &self,
+        start: &AevtKey,
+        end: Option<&AevtKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentAevtEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        self.visit_aevt_entries(start, end, &mut |key, fact_ref| {
+            visit(CurrentAevtEntryRef::from_owned(key), fact_ref)
+        })
     }
 
     fn range_scan_avet_entries(
@@ -156,6 +167,44 @@ impl CommittedIndexReader for LayeredIndexReader {
         }
         for (key, fact_ref) in delta {
             if !visit(&key, fact_ref)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn visit_current_aevt_entries(
+        &self,
+        start: &AevtKey,
+        end: Option<&AevtKey>,
+        visit: &mut dyn for<'a> FnMut(CurrentAevtEntryRef<'a>, FactRef) -> Result<bool>,
+    ) -> Result<bool> {
+        // Resident deltas remain owned and bounded by checkpoint policy. The
+        // immutable base stays borrowed from its current page/reconstruction
+        // buffer and is interleaved in the exact existing key order.
+        let delta = self.delta.read().unwrap_or_else(|error| error.into_inner());
+        let mut delta = range_delta_entries(&delta.aevt, start, end)
+            .into_iter()
+            .peekable();
+        let base_complete =
+            self.base
+                .visit_current_aevt_entries(start, end, &mut |base_entry, base_ref| {
+                    while delta.peek().is_some_and(|(delta_key, _)| {
+                        base_entry.cmp_owned_suffix(delta_key).is_gt()
+                    }) {
+                        if let Some((key, fact_ref)) = delta.next()
+                            && !visit(CurrentAevtEntryRef::from_owned(&key), fact_ref)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    visit(base_entry, base_ref)
+                })?;
+        if !base_complete {
+            return Ok(false);
+        }
+        for (key, fact_ref) in delta {
+            if !visit(CurrentAevtEntryRef::from_owned(&key), fact_ref)? {
                 return Ok(false);
             }
         }

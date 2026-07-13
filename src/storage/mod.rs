@@ -457,6 +457,25 @@ pub trait CommittedIndexReader: Send + Sync {
         anyhow::bail!("committed index reader does not expose keyed AEVT visitation")
     }
 
+    /// Visit borrowed covering fields for current-attribute reduction. The
+    /// default wraps the owned keyed path for test-reader compatibility.
+    fn visit_current_aevt_entries(
+        &self,
+        start: &crate::storage::index::AevtKey,
+        end: Option<&crate::storage::index::AevtKey>,
+        visit: &mut dyn for<'a> FnMut(
+            crate::storage::index::CurrentAevtEntryRef<'a>,
+            crate::storage::index::FactRef,
+        ) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        self.visit_aevt_entries(start, end, &mut |key, fact_ref| {
+            visit(
+                crate::storage::index::CurrentAevtEntryRef::from_owned(key),
+                fact_ref,
+            )
+        })
+    }
+
     /// Returns all committed AVET entries in `[start, end)`. `end: None` means unbounded upper.
     #[allow(dead_code)]
     fn range_scan_avet(

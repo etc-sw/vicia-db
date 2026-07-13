@@ -7,6 +7,7 @@
 
 use crate::graph::types::{Attribute, EntityId, Fact, TxId, Value};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use uuid::Uuid;
 
 /// Generate the maximum UUID value (all bits set to 1).
@@ -122,6 +123,116 @@ pub struct AevtKey {
     pub value_bytes: Vec<u8>,
     pub tx_id: TxId,
     pub asserted: bool,
+}
+
+/// Borrowed current-view projection of one on-disk AEVT key.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CurrentAevtEntryRef<'a> {
+    pub(crate) entity: EntityId,
+    pub(crate) valid_from: i64,
+    pub(crate) valid_to: i64,
+    pub(crate) tx_count: u64,
+    pub(crate) value_bytes: &'a [u8],
+    pub(crate) tx_id: TxId,
+    pub(crate) asserted: bool,
+}
+
+impl<'a> CurrentAevtEntryRef<'a> {
+    pub(crate) fn from_owned(key: &'a AevtKey) -> Self {
+        Self {
+            entity: key.entity,
+            valid_from: key.valid_from,
+            valid_to: key.valid_to,
+            tx_count: key.tx_count,
+            value_bytes: &key.value_bytes,
+            tx_id: key.tx_id,
+            asserted: key.asserted,
+        }
+    }
+
+    pub(crate) fn cmp_owned_suffix(&self, key: &AevtKey) -> Ordering {
+        (
+            self.entity,
+            self.valid_from,
+            self.valid_to,
+            self.tx_count,
+            self.value_bytes,
+            self.tx_id,
+            self.asserted,
+        )
+            .cmp(&(
+                key.entity,
+                key.valid_from,
+                key.valid_to,
+                key.tx_count,
+                key.value_bytes.as_slice(),
+                key.tx_id,
+                key.asserted,
+            ))
+    }
+
+    /// Replace the scalar/value suffix of an existing bounded resume key.
+    /// Returns whether the existing value allocation had enough capacity.
+    pub(crate) fn write_resume_key(&self, key: &mut AevtKey) -> bool {
+        let reused = key.value_bytes.capacity() >= self.value_bytes.len();
+        key.entity = self.entity;
+        key.valid_from = self.valid_from;
+        key.valid_to = self.valid_to;
+        key.tx_count = self.tx_count;
+        key.value_bytes.clear();
+        key.value_bytes.extend_from_slice(self.value_bytes);
+        key.tx_id = self.tx_id;
+        key.asserted = self.asserted;
+        reused
+    }
+}
+
+/// Private borrowed postcard wire shape for `(AevtKey, FactRef)` entries.
+#[derive(Deserialize)]
+pub(crate) struct AevtEntryWire<'a> {
+    #[serde(borrow)]
+    attribute: &'a str,
+    entity: EntityId,
+    valid_from: i64,
+    valid_to: i64,
+    tx_count: u64,
+    #[serde(borrow)]
+    value_bytes: &'a [u8],
+    tx_id: TxId,
+    asserted: bool,
+}
+
+impl<'a> AevtEntryWire<'a> {
+    pub(crate) fn decode_entry(bytes: &'a [u8]) -> anyhow::Result<(Self, FactRef)> {
+        let (entry, remaining) = postcard::take_from_bytes(bytes)?;
+        if !remaining.is_empty() {
+            anyhow::bail!("trailing bytes after projected AEVT entry")
+        }
+        Ok(entry)
+    }
+
+    pub(crate) fn project(&self) -> CurrentAevtEntryRef<'a> {
+        CurrentAevtEntryRef {
+            entity: self.entity,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
+            tx_count: self.tx_count,
+            value_bytes: self.value_bytes,
+            tx_id: self.tx_id,
+            asserted: self.asserted,
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn borrowed_lengths(&self) -> (usize, usize) {
+        (self.attribute.len(), self.value_bytes.len())
+    }
+
+    pub(crate) fn cmp_owned(&self, key: &AevtKey) -> Ordering {
+        self.attribute
+            .cmp(key.attribute.as_str())
+            .then_with(|| self.project().cmp_owned_suffix(key))
+    }
 }
 
 /// AVET: sort by (Attribute, ValueBytes, ValidFrom, ValidTo, Entity, TxCount, TxId, Asserted)
@@ -377,6 +488,86 @@ impl Indexes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn projection_key(value: Value, attribute: &str, tx: u64, asserted: bool) -> AevtKey {
+        AevtKey {
+            attribute: attribute.to_owned(),
+            entity: Uuid::from_u128(u128::MAX - u128::from(tx)),
+            valid_from: -9_000_000_000,
+            valid_to: i64::MAX,
+            tx_count: tx,
+            value_bytes: encode_value(&value),
+            tx_id: u64::MAX - tx,
+            asserted,
+        }
+    }
+
+    #[test]
+    fn borrowed_aevt_wire_decodes_existing_postcard_shape_for_all_values() {
+        let values = [
+            Value::String("borrowed".to_owned()),
+            Value::Integer(i64::MIN),
+            Value::Float(-0.0),
+            Value::Boolean(true),
+            Value::Ref(Uuid::from_u128(42)),
+            Value::Keyword(":kind/value".to_owned()),
+            Value::Null,
+        ];
+        for (index, value) in values.into_iter().enumerate() {
+            let attribute = if index == 0 {
+                "a".repeat(192)
+            } else {
+                ":projection/value".to_owned()
+            };
+            let key = projection_key(value, &attribute, index as u64 + 128, index % 2 == 0);
+            let fact_ref = FactRef {
+                page_id: u64::MAX - index as u64,
+                slot_index: u16::MAX,
+            };
+            let bytes = postcard::to_allocvec(&(&key, &fact_ref)).unwrap();
+            let (wire, decoded_ref) = AevtEntryWire::decode_entry(&bytes).unwrap();
+            let projected = wire.project();
+            assert_eq!(wire.cmp_owned(&key), Ordering::Equal);
+            assert_eq!(projected.value_bytes, key.value_bytes);
+            assert_eq!(projected.entity, key.entity);
+            assert_eq!(projected.valid_from, key.valid_from);
+            assert_eq!(projected.valid_to, key.valid_to);
+            assert_eq!(projected.tx_count, key.tx_count);
+            assert_eq!(projected.tx_id, key.tx_id);
+            assert_eq!(projected.asserted, key.asserted);
+            assert_eq!(decoded_ref, fact_ref);
+        }
+    }
+
+    #[test]
+    fn borrowed_aevt_wire_preserves_owned_order_and_rejects_corruption() {
+        let low = projection_key(Value::Integer(-1), ":a", 1, false);
+        let high = projection_key(Value::Integer(i64::MAX), ":a", u64::MAX, true);
+        let bytes = postcard::to_allocvec(&(
+            &low,
+            &FactRef {
+                page_id: 7,
+                slot_index: 3,
+            },
+        ))
+        .unwrap();
+        let (wire, _) = AevtEntryWire::decode_entry(&bytes).unwrap();
+        assert_eq!(wire.cmp_owned(&low), Ordering::Equal);
+        assert_eq!(wire.cmp_owned(&high), low.cmp(&high));
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(AevtEntryWire::decode_entry(&trailing).is_err());
+        assert!(AevtEntryWire::decode_entry(&bytes[..bytes.len() - 1]).is_err());
+
+        let mut invalid_utf8 = bytes;
+        let attribute_at = invalid_utf8
+            .windows(low.attribute.len())
+            .position(|window| window == low.attribute.as_bytes())
+            .unwrap();
+        invalid_utf8[attribute_at] = 0xff;
+        assert!(AevtEntryWire::decode_entry(&invalid_utf8).is_err());
+    }
     use crate::graph::types::{Fact, VALID_TIME_FOREVER, Value};
     use uuid::Uuid;
 

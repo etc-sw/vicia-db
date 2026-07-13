@@ -4,7 +4,7 @@
 #![allow(clippy::indexing_slicing)]
 
 use crate::graph::types::{Fact, Value};
-use crate::storage::index::{AevtKey, EavtKey, encode_value};
+use crate::storage::index::{AevtKey, CurrentAevtEntryRef, EavtKey, encode_value};
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -72,14 +72,13 @@ impl PendingFactRecord {
         }
     }
 
-    pub(crate) fn to_aevt_key(&self) -> AevtKey {
-        AevtKey {
-            attribute: self.attribute.to_string(),
+    pub(crate) fn current_aevt_entry(&self) -> CurrentAevtEntryRef<'_> {
+        CurrentAevtEntryRef {
             entity: self.entity,
             valid_from: self.valid_from,
             valid_to: self.valid_to,
             tx_count: self.tx_count,
-            value_bytes: self.value_bytes.to_vec(),
+            value_bytes: &self.value_bytes,
             tx_id: self.tx_id,
             asserted: self.asserted,
         }
@@ -207,6 +206,7 @@ impl SortedRuns {
         result
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn run_count(&self) -> usize {
         self.levels.iter().filter(|run| run.is_some()).count()
     }
@@ -340,8 +340,30 @@ impl PendingOverlay {
         )
     }
 
-    pub(crate) fn compare_aevt_key(&self, id: PendingFactId, key: &AevtKey) -> Result<Ordering> {
-        Ok(compare_aevt_bound(self.get(id)?, key))
+    pub(crate) fn compare_aevt_projection(
+        &self,
+        id: PendingFactId,
+        key: CurrentAevtEntryRef<'_>,
+    ) -> Result<Ordering> {
+        let record = self.get(id)?.current_aevt_entry();
+        Ok((
+            record.entity,
+            record.valid_from,
+            record.valid_to,
+            record.tx_count,
+            record.value_bytes,
+            record.tx_id,
+            record.asserted,
+        )
+            .cmp(&(
+                key.entity,
+                key.valid_from,
+                key.valid_to,
+                key.tx_count,
+                key.value_bytes,
+                key.tx_id,
+                key.asserted,
+            )))
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
