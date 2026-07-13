@@ -1,11 +1,10 @@
 # Vetch-Oriented High-Level Ledger API Plan
 
-Status: H0 measurement, H2 bounded transaction-pinned current reads, and H3
-interactive/maintenance capability separation completed on 2026-07-13. The
-typed commit facade remains deferred because it is not a current Vetch blocker.
-H4 remains conditional on measured projection-refresh evidence. H5 capability
-adoption, executable examples, and replacement-first compatibility guidance
-completed on 2026-07-14.
+Status: admitted scope complete on 2026-07-14. H0 measured the live caller,
+H2 delivered bounded transaction-pinned current reads, H3 separated
+interactive and maintenance authority, and H5 completed Vetch adoption and
+compatibility guidance. H1 and H4 were not admitted because the measured
+caller does not need a typed commit facade or public change feed.
 
 Related authority:
 
@@ -19,10 +18,11 @@ Related authority:
 
 ## Recommendation
 
-Add one safe, high-level ledger facade above the existing Vicia storage and
-Datalog engine. The normal API should make a receipt-sized atomic commit,
-bounded current read, and consistent read view easy. Full scans, portability,
-and recompact must remain explicit maintenance or raw operations.
+Keep the admitted high-level boundary centered on bounded current reads,
+consistent read views, and separate interactive and maintenance capabilities.
+The existing receipt-sized atomic publication remains the write boundary.
+Full scans, portability, and recompact remain explicit maintenance or raw
+operations.
 
 The facade is generic. It does not know about cards, Condense, proposals,
 verdicts, leases, or Vetch projection policy. Vetch compiles those product
@@ -490,8 +490,10 @@ Canonical clean receipts are stored at
 
 ### H1 — Typed commit facade over existing atomic publication
 
-Status: deferred. H0 found no current correctness, latency, or allocation gap
-that requires this facade before the pinned read view.
+Status: not admitted for the current Vetch caller. H0 found no correctness,
+latency, or allocation gap that requires this facade. Reopen H1 only when a
+new measured caller cannot safely or efficiently use the existing bounded
+`executeAtomic` publication boundary and compact durability receipt.
 
 - Add internal typed fact-change and commit-receipt types shared by native core
   and browser binding code where practical.
@@ -648,6 +650,13 @@ semantics remain unchanged.
 
 ### H4 — Incremental change pages, only if measured
 
+Status: rejected for the current Vetch usage path. The foreground authority
+worker uses bounded queries, transaction-pinned read views, and
+`executeAtomic`; no projection refresh or cross-runtime continuation currently
+misses its budget, and Vetch does not consume `changesSince` or
+`export_fact_log_since`. Reopen H4 only when both promotion conditions below
+are demonstrated by a real caller receipt.
+
 Promotion condition:
 
 - a real Vetch projection refresh or cross-runtime continuation misses its
@@ -711,6 +720,21 @@ semantic `forget`, REPL dispatch, eager recovery, and fixture construction keep
 the raw types blocking because no capability replacement exists. H5-B adds no
 deprecation attribute, API break, file-format change, or Vicia rename work.
 
+#### Overall closeout evidence — 2026-07-14
+
+Vetch main `87e95b5` consumes the completed capability split through a
+foreground worker protocol limited to bounded `query`, `executeAtomic`, and
+`close`, with maintenance owned by the disposable lifecycle worker. The
+checked-in browser package remains a complete clean build from Vicia
+`f664524`; later inline current-reader reducer work has not been promoted into
+that package because the independent v12 storage-layout rollout gate remains
+open.
+
+This closes the admitted high-level API program without adding the H1 typed
+commit facade or the H4 public change feed. Future measured caller evidence may
+reopen either candidate without changing the completed H2, H3, or H5
+boundaries.
+
 ## Vetch Integration Sequence
 
 Vetch Phase 0B.1 is independent and proceeds first. It owns checkpoint outcome,
@@ -733,7 +757,7 @@ caller benchmark or correctness proof demonstrates one of these gaps:
 - a required incremental tail cannot meet its budget through existing facts
   and queries.
 
-When the high-level facade lands, Vetch replaces only the adapter translation.
+If H1 is later admitted, Vetch replaces only the adapter translation.
 Application checkpoint types, pending projections, conflict policy, and
 renderer behavior do not change.
 
