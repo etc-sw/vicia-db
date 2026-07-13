@@ -7,7 +7,10 @@ use anyhow::Result;
 use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
 
-pub(crate) const MAX_SELECTIVE_LOOKUPS: usize = 4;
+/// A read view separately bounds total source work, so this cap limits sparse
+/// range fan-out rather than acting as the allocation-safety boundary. Sixteen
+/// covers embedded-ledger proof rows without admitting arbitrary query shape.
+pub(crate) const MAX_SELECTIVE_LOOKUPS: usize = 16;
 /// Exact entity sets stay bounded by caller-supplied identities rather than by
 /// attribute cardinality. This larger cap supports batched embedded-ledger
 /// reads without turning broad mixed/attribute plans into accidental scans.
@@ -283,9 +286,17 @@ mod tests {
             QueryAccessPlan::FullScan
         );
 
-        let over_limit = parse_query(
-            "(query [:find ?e :where \
-             [?e :a ?a] [?e :b ?b] [?e :c ?c] [?e :d ?d] [?e :e ?e]])",
+        let over_limit = DatalogQuery::new(
+            vec![FindSpec::Variable("?e".to_string())],
+            (0..=MAX_SELECTIVE_LOOKUPS)
+                .map(|index| {
+                    WhereClause::Pattern(Pattern::new(
+                        EdnValue::Symbol("?e".to_string()),
+                        EdnValue::Keyword(format!(":attribute/{index}")),
+                        EdnValue::Symbol(format!("?value_{index}")),
+                    ))
+                })
+                .collect(),
         );
         assert_eq!(
             QueryAccessPlan::for_query(&over_limit),
@@ -368,7 +379,7 @@ mod tests {
             bounded_clauses,
         );
 
-        let mut over_limit_clauses: Vec<WhereClause> = (1u128..=4)
+        let mut over_limit_clauses: Vec<WhereClause> = (1u128..=MAX_SELECTIVE_LOOKUPS as u128)
             .map(|value| {
                 WhereClause::Pattern(Pattern::new(
                     EdnValue::Uuid(Uuid::from_u128(value)),
