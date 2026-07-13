@@ -67,6 +67,9 @@ for (const candidate of receipt.candidates) {
   for (const component of [layout.facts, ...indexes.flatMap((index) => [index.leaf, index.internal])]) {
     assert(component.payloadBytes + component.structuralBytes + component.unusedBytes === component.pages * 4096, `${label}: page byte accounting`);
   }
+  for (const index of indexes) {
+    assert(index.rawLeafPages + index.prefixLeafPages === index.leaf.pages, `${label}: leaf codec accounting`);
+  }
 }
 
 const selected = receipt.candidates.filter((candidate) => candidate.fillPercent > 75 && candidate.gates.passed).map((candidate) => candidate.fillPercent).at(-1) ?? null;

@@ -670,9 +670,12 @@ impl BrowserV11BootstrapPlan {
 
         let header = FileHeader::from_bytes(page0)?;
         header.validate()?;
-        if header.version != crate::storage::FORMAT_VERSION {
+        if header.version < crate::storage::INTEGRITY_FORMAT_VERSION
+            || header.version > crate::storage::FORMAT_VERSION
+        {
             anyhow::bail!(
-                "Sparse browser bootstrap requires v{} format, got v{}",
+                "Sparse browser bootstrap requires a paged-ready v{}..=v{} format, got v{}",
+                crate::storage::INTEGRITY_FORMAT_VERSION,
                 crate::storage::FORMAT_VERSION,
                 header.version
             );
@@ -1089,6 +1092,7 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     committed_fact_pages: Arc<AtomicU64>,
     committed_fact_page_start: Arc<AtomicU64>,
     base_integrity: Option<Arc<BasePageIntegrityCatalog>>,
+    loaded_format_version: u32,
     write_blocked_legacy: bool,
     btree_build_options: BtreeBuildOptions,
 }
@@ -1141,6 +1145,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             committed_fact_pages,
             committed_fact_page_start,
             base_integrity: None,
+            loaded_format_version: crate::storage::FORMAT_VERSION,
             write_blocked_legacy: false,
             btree_build_options,
         };
@@ -2097,6 +2102,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.committed_fact_page_start
             .store(candidate.base_fact_page_start, Ordering::SeqCst);
         self.base_integrity = Some(candidate.base_integrity);
+        self.loaded_format_version = candidate.header.version;
         self.last_checkpointed_tx_count = candidate.checkpoint_tx_count;
         self.dirty = false;
         self.wire_committed_readers(&candidate.header, Vec::new())?;
@@ -2120,6 +2126,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             h.validate()?;
             (h, header_page)
         };
+        self.loaded_format_version = header.version;
 
         // Migrate v1 → v2 if needed
         if header.version < 2 {
@@ -2154,7 +2161,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
         self.committed_fact_page_start
             .store(base_fact_page_start, Ordering::SeqCst);
-        self.base_integrity = if header.version == crate::storage::FORMAT_VERSION {
+        self.base_integrity = if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION {
             let extension = header_extension
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("v11 database is missing its header extension"))?;
@@ -2294,7 +2301,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         // Old files (pre-fix): checksum covers only fact pages.
         // Try full checksum first; fall back to fact-only for backwards compat.
         let needs_format_upgrade =
-            header.version < crate::storage::FORMAT_VERSION && !self.write_blocked_legacy;
+            header.version < crate::storage::INTEGRITY_FORMAT_VERSION && !self.write_blocked_legacy;
         let needs_rebuild = if selected_delta_has_segments {
             if needs_format_upgrade {
                 anyhow::bail!("Delta manifest requires the current file format");
@@ -2311,8 +2318,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             true
         } else if num_fact_pages == 0 || header.eavt_root_page == 0 {
             num_fact_pages > 0 // rebuild if facts exist but no index root
-        } else if header.version == crate::storage::FORMAT_VERSION {
-            false // v11 base pages are verified lazily through the catalog.
+        } else if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION {
+            false // v11+ base pages are verified lazily through the catalog.
         } else {
             let backend = self
                 .backend
@@ -2684,7 +2691,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             Err(e) => anyhow::bail!("Failed to read header from existing file: {}", e),
         };
         let curr_header = FileHeader::from_bytes(&curr_header_page)?;
-        if curr_header.version != crate::storage::FORMAT_VERSION
+        if curr_header.version < crate::storage::INTEGRITY_FORMAT_VERSION
+            || curr_header.version > crate::storage::FORMAT_VERSION
             || curr_header.fact_page_format != FACT_PAGE_FORMAT_PACKED
             || curr_header.eavt_root_page == 0
             || curr_header.aevt_root_page == 0
@@ -3118,6 +3126,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn delta_maintenance_decision(&self) -> DeltaMaintenanceDecision {
+        if self.loaded_format_version < crate::storage::FORMAT_VERSION {
+            return DeltaMaintenanceDecision::ScheduleBackgroundRecompact;
+        }
         match &self.delta_manifest_selection {
             PersistedManifestSelection::Use { manifest, .. } => {
                 DeltaGrowthMetrics::from_manifest(manifest).decide()
@@ -3159,6 +3170,12 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
 
         match &self.delta_manifest_selection {
+            PersistedManifestSelection::NoDeltaManifest
+                if self.loaded_format_version < crate::storage::FORMAT_VERSION =>
+            {
+                let candidate = self.write_recompact_candidate_from_visible_facts()?;
+                self.publish_recompact_candidate(candidate)
+            }
             PersistedManifestSelection::NoDeltaManifest => Ok(CheckpointOutcome::Noop),
             PersistedManifestSelection::RecoveryRequired { reason } => {
                 anyhow::bail!("Cannot recompact delta manifest requiring recovery: {reason:?}");
@@ -3281,8 +3298,10 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let page0 = backend.read_page(0)?;
         let header = FileHeader::from_bytes(&page0)?;
         header.validate()?;
-        if header.version != crate::storage::FORMAT_VERSION {
-            anyhow::bail!("Paged browser export requires the current file format");
+        if header.version < crate::storage::INTEGRITY_FORMAT_VERSION
+            || header.version > crate::storage::FORMAT_VERSION
+        {
+            anyhow::bail!("Paged browser export requires a paged-ready file format");
         }
         let extension = HeaderExtension::read_from_page0(header.version, &page0)?
             .ok_or_else(|| anyhow::anyhow!("Paged browser export requires header metadata"))?;
@@ -3886,7 +3905,7 @@ fn build_header_page_with_base_integrity(
     base_fact_page_start: u64,
     base_integrity: BasePageIntegrityDescriptor,
 ) -> Result<Vec<u8>> {
-    if header.version == crate::storage::FORMAT_VERSION {
+    if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION {
         let extension = HeaderExtension::empty()
             .with_base_fact_page_start(base_fact_page_start)?
             .with_base_integrity(base_integrity)?;
@@ -4916,6 +4935,22 @@ mod tests {
         let page0 = build_header_page_with_extension(header, v10_extension).unwrap();
         bytes.get_mut(..PAGE_SIZE).unwrap().copy_from_slice(&page0);
         bytes.truncate(usize::try_from(base_end).unwrap() * PAGE_SIZE);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn downgrade_current_base_to_v11(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let (mut header, extension) = read_header_and_extension(path);
+
+        header.version = crate::storage::INTEGRITY_FORMAT_VERSION;
+        header.header_checksum = compute_header_checksum(&header);
+        let v11_extension = HeaderExtension::new(extension.primary(), extension.secondary())
+            .with_base_fact_page_start(extension.base_fact_page_start())
+            .unwrap()
+            .with_base_integrity(extension.base_integrity())
+            .unwrap();
+        let page0 = build_header_page_with_extension(header, v11_extension).unwrap();
+        bytes.get_mut(..PAGE_SIZE).unwrap().copy_from_slice(&page0);
         std::fs::write(path, bytes).unwrap();
     }
 
@@ -7040,6 +7075,76 @@ mod tests {
             fact_projection(storage.storage())?,
             "idle maintenance must preserve visible fact identity"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_v11_open_and_delta_checkpoint_defer_v12_upgrade_until_idle_maintenance() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("v11-idle-upgrade.graph");
+        let original_entity = write_single_fact_v11(&path);
+        downgrade_current_base_to_v11(&path);
+        let v11_bytes = std::fs::read(&path)?;
+
+        let mut storage = PersistentFactStorage::new(FileBackend::open(&path)?, 256)?;
+        assert_eq!(
+            std::fs::read(&path)?,
+            v11_bytes,
+            "opening v11 must not rewrite the published image"
+        );
+        assert_eq!(
+            storage.delta_maintenance_decision(),
+            DeltaMaintenanceDecision::ScheduleBackgroundRecompact
+        );
+        assert!(
+            storage
+                .storage()
+                .get_all_facts()?
+                .iter()
+                .any(|fact| fact.entity == original_entity)
+        );
+
+        let delta_entity = Uuid::new_v4();
+        storage.storage().transact(
+            vec![(
+                delta_entity,
+                ":integrity/name".to_string(),
+                Value::String("Delta B".to_string()),
+            )],
+            None,
+        )?;
+        storage.mark_dirty();
+        assert_eq!(storage.save()?, CheckpointOutcome::DeltaSegment);
+        let (delta_header, _) = read_header_and_extension(&path);
+        assert_eq!(
+            delta_header.version,
+            crate::storage::INTEGRITY_FORMAT_VERSION,
+            "foreground delta checkpoint must preserve v11"
+        );
+
+        assert_eq!(
+            storage.run_idle_delta_maintenance()?,
+            CheckpointOutcome::FullRebuildFromVisibleDelta
+        );
+        let (upgraded_header, _) = read_header_and_extension(&path);
+        assert_eq!(upgraded_header.version, crate::storage::FORMAT_VERSION);
+        let upgraded_bytes = std::fs::read(&path)?;
+        assert_eq!(
+            storage.run_idle_delta_maintenance()?,
+            CheckpointOutcome::Noop
+        );
+        assert_eq!(
+            std::fs::read(&path)?,
+            upgraded_bytes,
+            "a healthy v12 base must not be rewritten by later idle maintenance"
+        );
+
+        drop(storage);
+        let reopened = PersistentFactStorage::new(FileBackend::open(&path)?, 256)?;
+        let visible = reopened.storage().get_all_facts()?;
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().any(|fact| fact.entity == original_entity));
+        assert!(visible.iter().any(|fact| fact.entity == delta_entity));
         Ok(())
     }
 

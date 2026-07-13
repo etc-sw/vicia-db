@@ -1,4 +1,4 @@
-//! On-disk B+tree for covering index persistence (file format v6).
+//! On-disk B+tree for covering index persistence (v6 base layout, v12 prefix leaves).
 //!
 //! Each node maps to exactly one 4KB page. The `PageCache` serves all reads.
 //! `build_btree` does a bulk-build (write-all-leaves, then internal levels
@@ -56,6 +56,8 @@ fn observe_serialized_frontier(_entries: usize, _bytes: usize) {}
 pub const PAGE_TYPE_LEAF: u8 = 0x21;
 /// Internal node page type (v6).
 pub const PAGE_TYPE_INTERNAL: u8 = 0x22;
+/// Prefix-compressed leaf node page type (v12).
+pub const PAGE_TYPE_PREFIX_LEAF: u8 = 0x23;
 
 // ─── Fixed sizes ──────────────────────────────────────────────────────────────
 
@@ -65,8 +67,13 @@ const LEAF_HEADER_SIZE: usize = 12;
 const INTERNAL_HEADER_SIZE: usize = 12;
 /// Slot directory entry: offset(u16) + length(u16) = 4 bytes.
 const SLOT_SIZE: usize = 4;
+/// Full serialized entries restart at this interval so corruption and future
+/// point decoding stay bounded to a small page-local run.
+const PREFIX_RESTART_INTERVAL: usize = 16;
+/// shared-prefix length (u16) + decoded length (u16).
+const PREFIX_RECORD_HEADER_SIZE: usize = 4;
 /// Production bulk-build fill percentage. This changes packing policy only;
-/// every resulting page retains the same v11 byte format.
+/// leaf encoding remains selected independently per page.
 pub(crate) const DEFAULT_BTREE_FILL_PERCENT: u8 = 90;
 
 #[derive(Clone, Copy)]
@@ -122,6 +129,47 @@ fn read_u64_at(page: &[u8], offset: usize) -> Result<u64> {
     ))
 }
 
+fn is_leaf_page_type(page_type: u8) -> bool {
+    page_type == PAGE_TYPE_LEAF || page_type == PAGE_TYPE_PREFIX_LEAF
+}
+
+fn encode_prefix_record(previous: Option<&[u8]>, index: usize, entry: &[u8]) -> Result<Vec<u8>> {
+    let shared = if index.is_multiple_of(PREFIX_RESTART_INTERVAL) {
+        0
+    } else {
+        previous
+            .unwrap_or_default()
+            .iter()
+            .zip(entry)
+            .take_while(|(left, right)| left == right)
+            .count()
+    };
+    let shared = u16::try_from(shared).map_err(|_| anyhow!("leaf prefix exceeds u16"))?;
+    let decoded_len =
+        u16::try_from(entry.len()).map_err(|_| anyhow!("leaf entry length exceeds u16"))?;
+    let mut encoded = Vec::with_capacity(
+        PREFIX_RECORD_HEADER_SIZE + entry.len().saturating_sub(usize::from(shared)),
+    );
+    encoded.extend_from_slice(&shared.to_le_bytes());
+    encoded.extend_from_slice(&decoded_len.to_le_bytes());
+    encoded.extend_from_slice(
+        entry
+            .get(usize::from(shared)..)
+            .ok_or_else(|| anyhow!("leaf prefix exceeds entry length"))?,
+    );
+    Ok(encoded)
+}
+
+fn encode_prefix_page_entries(entries: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
+    let mut encoded = Vec::with_capacity(entries.len());
+    let mut previous: Option<&[u8]> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        encoded.push(encode_prefix_record(previous, index, entry)?);
+        previous = Some(entry);
+    }
+    Ok(encoded)
+}
+
 // ─── Low-level page writers ───────────────────────────────────────────────────
 
 /// Write a single leaf page and insert it into the cache.
@@ -136,19 +184,31 @@ fn write_leaf_page(
     entries: &[Vec<u8>],
     next_leaf: u64,
 ) -> Result<()> {
+    let compressed_entries = encode_prefix_page_entries(entries)?;
+    let raw_bytes = entries.iter().map(Vec::len).sum::<usize>();
+    let compressed_bytes = compressed_entries.iter().map(Vec::len).sum::<usize>();
+    let (page_type, stored_entries) = if compressed_bytes < raw_bytes {
+        (PAGE_TYPE_PREFIX_LEAF, compressed_entries.as_slice())
+    } else {
+        (PAGE_TYPE_LEAF, entries)
+    };
     let entry_count =
         u16::try_from(entries.len()).map_err(|_| anyhow!("too many entries: {}", entries.len()))?;
     let mut page = vec![0u8; PAGE_SIZE];
 
     // Fixed header
-    page[0] = PAGE_TYPE_LEAF;
-    page[1] = 0; // reserved
+    page[0] = page_type;
+    page[1] = if page_type == PAGE_TYPE_PREFIX_LEAF {
+        u8::try_from(PREFIX_RESTART_INTERVAL)?
+    } else {
+        0
+    };
     page[2..4].copy_from_slice(&entry_count.to_le_bytes());
     page[4..12].copy_from_slice(&next_leaf.to_le_bytes());
 
     // Slot directory starts at byte 12; data written end-to-start
     let mut write_pos = PAGE_SIZE;
-    for (i, entry) in entries.iter().enumerate() {
+    for (i, entry) in stored_entries.iter().enumerate() {
         write_pos -= entry.len();
         page[write_pos..write_pos + entry.len()].copy_from_slice(entry);
         let slot_off = LEAF_HEADER_SIZE + i * SLOT_SIZE;
@@ -323,16 +383,21 @@ fn build_btree_serialized_results(
     let mut leaf_infos: Vec<(u64, Vec<u8>)> = Vec::new();
 
     let mut cur_entries: Vec<Vec<u8>> = Vec::new();
-    let mut cur_data_bytes: usize = 0;
+    let mut cur_raw_bytes: usize = 0;
+    let mut cur_prefix_bytes: usize = 0;
     let mut cur_first_key: Option<Vec<u8>> = None;
     let mut next_page = start_page_id;
 
     for entry in sorted_entries {
         let (entry_bytes, key_bytes) = entry?;
+        let prefix_entry = encode_prefix_record(
+            cur_entries.last().map(Vec::as_slice),
+            cur_entries.len(),
+            &entry_bytes,
+        )?;
         let projected = LEAF_HEADER_SIZE
             + (cur_entries.len() + 1) * SLOT_SIZE
-            + cur_data_bytes
-            + entry_bytes.len();
+            + (cur_raw_bytes + entry_bytes.len()).min(cur_prefix_bytes + prefix_entry.len());
 
         if projected > PAGE_SIZE && cur_entries.is_empty() {
             anyhow::bail!("B-tree leaf entry does not fit in one page")
@@ -346,16 +411,23 @@ fn build_btree_serialized_results(
             leaf_infos.push((next_page, first_key));
             next_page += 1;
             cur_entries.clear();
-            cur_data_bytes = 0;
+            cur_raw_bytes = 0;
+            cur_prefix_bytes = 0;
             cur_first_key = None;
         }
 
         if cur_first_key.is_none() {
             cur_first_key = Some(key_bytes);
         }
-        cur_data_bytes += entry_bytes.len();
+        let prefix_entry = encode_prefix_record(
+            cur_entries.last().map(Vec::as_slice),
+            cur_entries.len(),
+            &entry_bytes,
+        )?;
+        cur_raw_bytes += entry_bytes.len();
+        cur_prefix_bytes += prefix_entry.len();
         cur_entries.push(entry_bytes);
-        observe_serialized_frontier(cur_entries.len(), cur_data_bytes);
+        observe_serialized_frontier(cur_entries.len(), cur_raw_bytes.min(cur_prefix_bytes));
     }
 
     // Flush the last (or only) batch
@@ -512,7 +584,7 @@ fn find_leftmost_leaf(root: u64, backend: &dyn StorageBackend, cache: &PageCache
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={page_id}"))?;
         match page_type {
-            PAGE_TYPE_LEAF => return Ok(page_id),
+            page_type if is_leaf_page_type(page_type) => return Ok(page_id),
             PAGE_TYPE_INTERNAL => {
                 let key_count = read_u16_at(&page[..], 2)? as usize;
                 if key_count == 0 {
@@ -551,7 +623,7 @@ where
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={page_id}"))?;
         match page_type {
-            PAGE_TYPE_LEAF => return Ok(page_id),
+            page_type if is_leaf_page_type(page_type) => return Ok(page_id),
             PAGE_TYPE_INTERNAL => {
                 let key_count = read_u16_at(&page[..], 2)? as usize;
                 let rightmost_child = read_u64_at(&page[..], 4)?;
@@ -599,13 +671,26 @@ fn read_leaf_entries<K>(page: &[u8]) -> Result<Vec<(K, FactRef)>>
 where
     K: for<'de> Deserialize<'de>,
 {
+    let page_type = page
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow!("empty leaf page"))?;
+    if !is_leaf_page_type(page_type) {
+        anyhow::bail!("expected leaf page, found type 0x{page_type:02x}")
+    }
+    if page_type == PAGE_TYPE_PREFIX_LEAF
+        && page.get(1).copied() != Some(u8::try_from(PREFIX_RESTART_INTERVAL)?)
+    {
+        anyhow::bail!("unsupported prefix leaf restart interval")
+    }
     let entry_count = read_u16_at(page, 2)? as usize;
     let mut entries = Vec::with_capacity(entry_count);
+    let mut previous = Vec::new();
     for i in 0..entry_count {
         let slot_off = LEAF_HEADER_SIZE + i * SLOT_SIZE;
         let offset = read_u16_at(page, slot_off)? as usize;
         let length = read_u16_at(page, slot_off + 2)? as usize;
-        let slice = page
+        let stored = page
             .get(offset..offset.saturating_add(length))
             .ok_or_else(|| {
                 anyhow!(
@@ -613,7 +698,37 @@ where
                     page.len()
                 )
             })?;
-        let (k, fr): (K, FactRef) = postcard::from_bytes(slice)?;
+        let decoded = if page_type == PAGE_TYPE_PREFIX_LEAF {
+            if stored.len() < PREFIX_RECORD_HEADER_SIZE {
+                anyhow::bail!("compressed leaf record is truncated")
+            }
+            let shared = usize::from(read_u16_at(stored, 0)?);
+            let decoded_len = usize::from(read_u16_at(stored, 2)?);
+            if i.is_multiple_of(PREFIX_RESTART_INTERVAL) && shared != 0 {
+                anyhow::bail!("compressed leaf restart record has a prefix")
+            }
+            if shared > previous.len() || shared > decoded_len {
+                anyhow::bail!("compressed leaf prefix is out of bounds")
+            }
+            let suffix = stored
+                .get(PREFIX_RECORD_HEADER_SIZE..)
+                .ok_or_else(|| anyhow!("compressed leaf record is truncated"))?;
+            if shared.saturating_add(suffix.len()) != decoded_len {
+                anyhow::bail!("compressed leaf decoded length mismatch")
+            }
+            let mut decoded = Vec::with_capacity(decoded_len);
+            decoded.extend_from_slice(
+                previous
+                    .get(..shared)
+                    .ok_or_else(|| anyhow!("compressed leaf prefix is out of bounds"))?,
+            );
+            decoded.extend_from_slice(suffix);
+            previous = decoded.clone();
+            decoded
+        } else {
+            stored.to_vec()
+        };
+        let (k, fr): (K, FactRef) = postcard::from_bytes(&decoded)?;
         entries.push((k, fr));
     }
     Ok(entries)
@@ -640,7 +755,7 @@ where
             .first()
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={leaf_id}"))?;
-        if page_type != PAGE_TYPE_LEAF {
+        if !is_leaf_page_type(page_type) {
             anyhow::bail!(
                 "stream_all_entries: expected leaf page at page_id={}",
                 leaf_id
@@ -706,7 +821,7 @@ where
             .first()
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={leaf_id}"))?;
-        if page_type != PAGE_TYPE_LEAF {
+        if !is_leaf_page_type(page_type) {
             anyhow::bail!("range_scan: expected leaf at page_id={}", leaf_id);
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
@@ -747,7 +862,7 @@ where
     let mut leaf_id = find_leaf_for_key(root_page_id, start, backend, cache)?;
     'outer: loop {
         let page = cache.get_or_load(leaf_id, backend)?;
-        if page.first().copied() != Some(PAGE_TYPE_LEAF) {
+        if !page.first().copied().is_some_and(is_leaf_page_type) {
             anyhow::bail!("range_scan: expected leaf at page_id={}", leaf_id);
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
@@ -1202,7 +1317,7 @@ mod tests {
         assert_eq!(next_free, 2, "single empty leaf = 1 page");
         // Verify it is a leaf page
         let page = cache.get_or_load(1, &backend).unwrap();
-        assert_eq!(page[0], PAGE_TYPE_LEAF);
+        assert!(is_leaf_page_type(page[0]));
         let entry_count = read_u16_at(&page[..], 2).unwrap();
         assert_eq!(entry_count, 0);
     }
@@ -1217,8 +1332,51 @@ mod tests {
         assert_eq!(root, 5);
         assert_eq!(next_free, 6);
         let page = cache.get_or_load(5, &backend).unwrap();
-        assert_eq!(page[0], PAGE_TYPE_LEAF);
+        assert!(is_leaf_page_type(page[0]));
         assert_eq!(read_u16_at(&page[..], 2).unwrap(), 1);
+    }
+
+    #[test]
+    fn prefix_leaf_roundtrips_and_rejects_corrupt_prefixes() {
+        let expected = (0u128..32)
+            .map(|n| make_eavt(n, ":shared/attribute", n as u64 + 1))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(expected.iter().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        let cache = PageCache::new(8);
+        write_leaf_page(&mut backend, &cache, 1, &serialized, 0).unwrap();
+
+        let page = backend.read_page(1).unwrap();
+        assert_eq!(page[0], PAGE_TYPE_PREFIX_LEAF);
+        assert_eq!(
+            read_leaf_entries::<EavtKey>(&page).unwrap(),
+            expected,
+            "prefix-compressed leaves must preserve exact sorted entries"
+        );
+
+        let mut corrupt_continuation = page.clone();
+        let continuation_slot = LEAF_HEADER_SIZE + SLOT_SIZE;
+        let continuation_offset =
+            usize::from(read_u16_at(&corrupt_continuation, continuation_slot).unwrap());
+        corrupt_continuation[continuation_offset..continuation_offset + 2]
+            .copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(
+            read_leaf_entries::<EavtKey>(&corrupt_continuation).is_err(),
+            "a prefix beyond the previous decoded entry must be rejected"
+        );
+
+        let mut corrupt_restart = page;
+        let restart_slot = LEAF_HEADER_SIZE + PREFIX_RESTART_INTERVAL * SLOT_SIZE;
+        let restart_offset = usize::from(read_u16_at(&corrupt_restart, restart_slot).unwrap());
+        corrupt_restart[restart_offset..restart_offset + 2].copy_from_slice(&1u16.to_le_bytes());
+        assert!(
+            read_leaf_entries::<EavtKey>(&corrupt_restart).is_err(),
+            "restart records must never depend on an earlier entry"
+        );
     }
 
     #[test]
@@ -1330,14 +1488,14 @@ mod tests {
         // Collect leaf page IDs by following the chain from the leftmost leaf
         // The root may be an internal node; find the leftmost leaf first
         let root_page = cache.get_or_load(root, &backend).unwrap();
-        let mut leaf_pid = if root_page[0] == PAGE_TYPE_LEAF {
+        let mut leaf_pid = if is_leaf_page_type(root_page[0]) {
             root
         } else {
             // leftmost leaf: follow first child of each internal node down
             let mut pid = root;
             loop {
                 let p = cache.get_or_load(pid, &backend).unwrap();
-                if p[0] == PAGE_TYPE_LEAF {
+                if is_leaf_page_type(p[0]) {
                     break pid;
                 }
                 // first child is at child_array[0] = bytes 12..20
@@ -1349,7 +1507,7 @@ mod tests {
         let mut chain: Vec<u64> = vec![leaf_pid];
         loop {
             let p = cache.get_or_load(leaf_pid, &backend).unwrap();
-            assert_eq!(p[0], PAGE_TYPE_LEAF, "page {} should be leaf", leaf_pid);
+            assert!(is_leaf_page_type(p[0]), "page {} should be leaf", leaf_pid);
             let next = read_u64_at(&p[..], 4).unwrap();
             if next == 0 {
                 break;

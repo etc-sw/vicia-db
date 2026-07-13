@@ -729,9 +729,12 @@ impl BrowserDb {
             .version;
 
         if policy == BrowserImportPolicy::RequirePagedReady {
-            if imported_version != crate::storage::FORMAT_VERSION {
+            if imported_version < crate::storage::INTEGRITY_FORMAT_VERSION
+                || imported_version > crate::storage::FORMAT_VERSION
+            {
                 return Err(JsValue::from_str(&format!(
-                    "strict paged import requires current format v{}, but recovery selected v{imported_version}",
+                    "strict paged import requires a paged-ready v{}..=v{} format, but recovery selected v{imported_version}",
+                    crate::storage::INTEGRITY_FORMAT_VERSION,
                     crate::storage::FORMAT_VERSION,
                 )));
             }
@@ -744,7 +747,8 @@ impl BrowserDb {
         }
 
         let new_paged = if open_mode.is_paged()
-            && imported_version == crate::storage::FORMAT_VERSION
+            && imported_version >= crate::storage::INTEGRITY_FORMAT_VERSION
+            && imported_version <= crate::storage::FORMAT_VERSION
         {
             configure_sparse_authority(&mut new_pfs)?;
             new_pfs.with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
@@ -1357,7 +1361,9 @@ async fn open_persistent_storage(
 
     let header = crate::storage::FileHeader::from_bytes(&page0)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    if header.version == crate::storage::FORMAT_VERSION {
+    if header.version >= crate::storage::INTEGRITY_FORMAT_VERSION
+        && header.version <= crate::storage::FORMAT_VERSION
+    {
         match open_v11_sparse_storage(idb, page0).await {
             Ok(mut pfs) => {
                 if mode == BrowserOpenMode::EagerCompatibility {

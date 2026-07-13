@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use crate::storage::btree_v6::{PAGE_TYPE_INTERNAL, PAGE_TYPE_LEAF};
+use crate::storage::btree_v6::{PAGE_TYPE_INTERNAL, PAGE_TYPE_LEAF, PAGE_TYPE_PREFIX_LEAF};
 use crate::storage::header_extension::HeaderExtension;
 use crate::storage::packed_pages::{PACKED_HEADER_SIZE, PAGE_TYPE_PACKED};
 use crate::storage::{FileHeader, PAGE_SIZE};
@@ -39,6 +39,8 @@ pub struct PrefixEstimate {
 pub struct StorageIndexLayout {
     pub root_page: u64,
     pub height: u64,
+    pub raw_leaf_pages: u64,
+    pub prefix_leaf_pages: u64,
     pub leaf: StoragePageLayout,
     pub internal: StoragePageLayout,
     pub prefix_restart_10: PrefixEstimate,
@@ -220,18 +222,25 @@ fn inspect_index_page(
     let page = read_page(file, page_id)?;
     let count = read_u16(&page, 2)? as usize;
     let height = match page.first().copied() {
-        Some(PAGE_TYPE_LEAF) => {
+        Some(PAGE_TYPE_LEAF) | Some(PAGE_TYPE_PREFIX_LEAF) => {
+            if page.first().copied() == Some(PAGE_TYPE_PREFIX_LEAF) {
+                result.prefix_leaf_pages = result.prefix_leaf_pages.saturating_add(1);
+            } else {
+                result.raw_leaf_pages = result.raw_leaf_pages.saturating_add(1);
+            }
             let entries = read_entries(&page, 12, count)?;
             let payload = entries.iter().map(Vec::len).sum();
             add_page(&mut result.leaf, count, payload, 12 + count * 4)?;
-            result.prefix_restart_10.estimated_saved_bytes = result
-                .prefix_restart_10
-                .estimated_saved_bytes
-                .saturating_add(prefix_savings(&entries, 10));
-            result.prefix_restart_16.estimated_saved_bytes = result
-                .prefix_restart_16
-                .estimated_saved_bytes
-                .saturating_add(prefix_savings(&entries, 16));
+            if page.first().copied() == Some(PAGE_TYPE_LEAF) {
+                result.prefix_restart_10.estimated_saved_bytes = result
+                    .prefix_restart_10
+                    .estimated_saved_bytes
+                    .saturating_add(prefix_savings(&entries, 10));
+                result.prefix_restart_16.estimated_saved_bytes = result
+                    .prefix_restart_16
+                    .estimated_saved_bytes
+                    .saturating_add(prefix_savings(&entries, 16));
+            }
             1
         }
         Some(PAGE_TYPE_INTERNAL) => {

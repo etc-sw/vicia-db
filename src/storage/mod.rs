@@ -67,11 +67,12 @@ pub const MAGIC_NUMBER: [u8; 4] = *b"MGRF";
 
 /// Current file format version.
 ///
-/// v11 keeps the 84-byte legacy header layout and extends page 0 with a
-/// generation-bound base-page integrity catalog descriptor alongside the
-/// double-buffered delta manifest descriptors. v10 and older files still load
-/// through the migration path.
-pub const FORMAT_VERSION: u32 = 11;
+/// v12 keeps the v11 header and integrity contract, and adds adaptive
+/// page-local prefix-compressed B+tree leaves. v11 remains directly readable;
+/// v10 and older files load through the migration path.
+pub const FORMAT_VERSION: u32 = 12;
+/// Oldest format with the generation-bound base-page integrity catalog.
+pub(crate) const INTEGRITY_FORMAT_VERSION: u32 = 11;
 
 /// fact_page_format: legacy one-per-page (v4 and earlier, or unset byte = 0x00).
 pub const FACT_PAGE_FORMAT_ONE_PER_PAGE: u8 = 0x01;
@@ -502,8 +503,8 @@ mod tests {
     }
 
     #[test]
-    fn test_format_version_is_11() {
-        assert_eq!(FORMAT_VERSION, 11);
+    fn test_format_version_is_12() {
+        assert_eq!(FORMAT_VERSION, 12);
     }
 
     #[test]
@@ -572,7 +573,7 @@ mod tests {
     fn test_new_header_has_current_version() {
         let header = FileHeader::new();
         assert_eq!(header.version, FORMAT_VERSION);
-        assert_eq!(header.version, 11);
+        assert_eq!(header.version, 12);
     }
 
     #[test]
@@ -611,7 +612,7 @@ mod tests {
         assert_eq!(b.len(), 84, "legacy header must be exactly 84 bytes");
 
         assert_eq!(&b[0..4], b"MGRF");
-        assert_eq!(&b[4..8], &11u32.to_le_bytes());
+        assert_eq!(&b[4..8], &12u32.to_le_bytes());
         assert_eq!(&b[8..16], &0x0102_0304_0506_0708_u64.to_le_bytes());
         assert_eq!(&b[16..24], &0x1112_1314_1516_1718_u64.to_le_bytes());
         assert_eq!(&b[24..32], &0x2122_2324_2526_2728_u64.to_le_bytes());
