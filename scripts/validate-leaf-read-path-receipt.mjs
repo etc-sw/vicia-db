@@ -14,4 +14,8 @@ if (!/^[0-9a-f]{64}$/.test(receipt.fixture.sha256)) fail("fixture digest missing
 for (const section of [receipt.point.diagnostics, receipt.aggregate.diagnostics]) {
   if (!section || Object.values(section).some((value) => !Number.isFinite(value) || value < 0)) fail("invalid diagnostics");
 }
+const aggregateDiagnostics = receipt.aggregate.diagnostics;
+if (aggregateDiagnostics.projectedAevtEmitted !== receipt.facts) fail("projected AEVT count mismatch");
+if (aggregateDiagnostics.projectedOwnedAevtDecodes !== 0) fail("projected path decoded owned AEVT keys");
+if (aggregateDiagnostics.fullLeafVecPeakEntries !== 0 || aggregateDiagnostics.fullLeafVecPeakStructBytes !== 0 || aggregateDiagnostics.fullLeafVecPeakDecodedPayloadBytes !== 0) fail("full-leaf materialization returned");
 console.log(`leaf read receipt OK: ${profile} (${samples} samples)`);
