@@ -1,7 +1,7 @@
 // Generate tests/fixtures/gate_e/browser.graph through the real BrowserDb
 // WASM facade. Run from a served repository checkout:
 //
-//   wasm-pack build --target web --features browser --out-dir minigraf-wasm
+//   wasm-pack build --target web --out-dir minigraf-wasm -- --features browser
 //   python3 -m http.server 8123
 //   CHROME_PATH=/path/to/chrome NODE_PATH=/path/to/node_modules \
 //     node examples/browser/generate-gate-e-fixture.cjs
