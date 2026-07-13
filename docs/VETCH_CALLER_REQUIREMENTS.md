@@ -5,6 +5,12 @@ the current Vetch epistemic-state and Braindump-to-GO plans.
 
 Date: 2026-07-12
 
+Implementation companion: `docs/VETCH_HIGH_LEVEL_LEDGER_API_PLAN.md` defines
+the measured, additive high-level commit/read facade that Vetch may adopt. This
+requirements document remains the authority for caller needs; the API plan must
+not move Vetch product semantics into Vicia or bypass its public-API measurement
+gate.
+
 ## Recommendation
 
 Vicia DB should become Vetch's durable bi-temporal ledger and the source from
