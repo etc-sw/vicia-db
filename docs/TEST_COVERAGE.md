@@ -481,14 +481,16 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 
 ### 9. FileHeader (`src/storage/mod.rs`) - ✅ Excellent (21 tests)
 
-- ✅ Current v11 legacy-header serialisation: 84 bytes with exact field offsets
-- ✅ Current v11 legacy-header roundtrip preserves the header checksum
+- ✅ Current v12 legacy-header serialisation: 84 bytes with exact field offsets
+- ✅ Current v12 legacy-header roundtrip preserves the header checksum
 - ✅ v3, v4, and v6 legacy headers decode with version-appropriate zero-filled fields; v5 is accepted by validation
 - ✅ Truncated v4 and v7 headers are rejected
 - ✅ Header validation covers magic, versions 1–11, positive page count, and root/fact-page bounds
-- ✅ v9, v10, and v11 are accepted explicitly
-- ✅ `FORMAT_VERSION == 11`
-- ✅ **Byte-layout pin**: all legacy-header fields use their exact little-endian offsets in v11
+- ✅ v9, v10, v11, and v12 are accepted explicitly
+- ✅ `FORMAT_VERSION == 12`
+- ✅ **Byte-layout pin**: all legacy-header fields use their exact little-endian offsets in v12
+- ✅ Adaptive v12 prefix leaves round-trip exactly, retain raw pages when smaller, and reject corrupt continuation/restart prefixes
+- ✅ V11 open and foreground delta checkpoint preserve v11; idle maintenance alone publishes the v12 COW base
 
 **Coverage**: ~98%
 
@@ -723,10 +725,10 @@ All Phase 8 sub-phases complete. See per-phase sections below.
 - ✅ `execute_with_extra_bindings` — extra `BindValue`s beyond declared slots are silently ignored
 - ✅ `multiple_slots_same_execute` — multiple distinct `$slot` names resolved in a single `execute()` call
 
-### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 6 tests (Wave 3 #215 + v11 migration)
+### Migration Matrix (`tests/migration_matrix_test.rs`) - ✅ 6 tests (Wave 3 #215 + current-format migration)
 
 - ✅ current format round-trip — facts written and read back correctly after save/load
-- ✅ v7 fixture migrate — committed v7 fixture opens and upgrades to current v11 format
+- ✅ v7 fixture migrate — committed v7 fixture opens and upgrades to current v12 format
 - ✅ v3 empty migrate — empty v3 database opens cleanly
 - ✅ corrupt magic — file with bad magic header returns `Err`, not panic
 - ✅ unsupported version — file with unrecognised format version returns `Err`
@@ -1031,7 +1033,7 @@ cargo test -- --nocapture
 - Prepared statements verified: entity/value/as-of/valid-at slot positions, AnyValidTime, combined temporal+entity (agentic loop pattern), plan reuse, all error paths (Phase 7.8)
 - Public API surface verified via rustdoc doctests and integration tests: `Minigraf::open`, `execute`, `prepare`, `export_fact_log`, `run_idle_maintenance`, `repl`, `WriteTransaction`, `OpenOptions` (Phase 7.9 + Vetch ledger export + Q3-A maintenance)
 - WAL fault injection verified: write-fail, flush-fail, read-fault, CRC corruption, checkpoint atomicity, concurrent write+checkpoint (Wave 3)
-- Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + v11 migration)
+- Migration matrix verified: current round-trip, v7 fixture migrate, v3 empty migrate, corrupt magic, unsupported version, WAL replay idempotent (Wave 3 + current-format migration)
 - Multi-value index regression verified: same entity+attribute batch values survive indexed public query paths, ref edge lookups, temporal replay, retraction, and checkpoint/reopen (#287)
 - Retract valid-time parity verified: scoped retractions remove only the matching valid-time window while legacy retractions still wipe every valid-time window for the same EAV triple
 - Delta checkpoint integration verified: v10 multi-segment manifest append, base/delta and segment/segment `Value::Ref` edges, later-segment retractions, deterministic multi-delta export, and corrupt-slot fallback

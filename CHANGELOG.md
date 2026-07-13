@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- File format v12 adds adaptive page-local prefix-compressed B+tree leaves with restart interval 16. Each leaf keeps the raw v11 representation unless prefix encoding is smaller; readers accept both codecs and fail closed on malformed prefix or restart records. Existing v11 graphs open byte-exact and retain cheap v11 delta checkpoints, while caller-scheduled idle maintenance performs the COW v12 publication. The clean 1M fill-90 receipt shrinks the graph from 301.363 to 269.586 MiB with improved checkpoint, point, and aggregate p50, but the Vetch rollout remains gated on an uncontended run meeting the 115% checkpoint/aggregate tail bound.
+
 ### Fixed
 
 - Initial/full checkpoints now cache canonical value bytes once and sort one reusable fact-position buffer per EAVT/AEVT/AVET/VAET index instead of retaining four complete typed-key vectors. The clean 1M storage-layout receipt reduces fill-75 median checkpoint peak RSS from 744.750 to 281.250 MiB and selects a 90% production bulk-build fill, shrinking the fixture from 352.742 to 301.363 MiB while passing checkpoint, point-read, aggregate, and RSS gates. Public API and v11 page format are unchanged.

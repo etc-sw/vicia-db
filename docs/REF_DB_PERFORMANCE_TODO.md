@@ -32,6 +32,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Bound initial checkpoint serialized-index ownership. Reusing the lazy B-tree serializer reduces fill-75 checkpoint p50 from 5,032.714 to 4,505.694 ms and median peak RSS delta from 947.625 to 744.750 MiB without changing v11 bytes; phase timing attributes remaining tail to pending index sort and EAVT/AEVT/AVET builds rather than sync.
 - [x] Bound pending index sort ownership and stabilize high-fill construction. One reusable 1M-entry fact-position buffer plus one canonical value encoding replaces four owned typed-key vectors; fill-75 median peak RSS falls from 744.750 to 281.250 MiB. The clean full receipt selects fill 90 with a 301.363 MiB image and a 5,013.869/5,717.048 ms checkpoint p50/p95.
 - [x] Measure `1M base + 1/10/100/1K pending` checkpoint latency and peak RSS. The clean `vicia.checkpoint-construction.v2` receipt records 20 interleaved fresh samples per variant; checkpoint p95 is 2.630/3.023/3.370/9.864 ms and HWM-backed recompact RSS delta stays at 177.000–177.875 MiB.
+- [ ] Roll out file format v12 adaptive prefix leaves. The implementation keeps raw leaves when compression loses, uses restart-16 prefix leaves for repeated AEVT/AVET keys, reads v11 without rewriting it, preserves v11 foreground delta checkpoints, and upgrades only through idle COW maintenance. The clean 1M fill-90 receipt reduces the image from 301.363 to 269.586 MiB (-10.54%); checkpoint, point, and aggregate p50 improve by 1.98%, 2.54%, and 3.45%, while checkpoint RSS p50 falls 0.625 MiB. Rollout remains open because checkpoint and aggregate p95/p50 were 117.68% and 117.48%, above the 115% tail gate.
 
 ## Regression gates
 
@@ -42,4 +43,4 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-- Attribute retained RSS after 1 and 20 repeated aggregates to live session/cache state versus allocator retention. Keep the current query result and 1.375 MiB retained baseline exact while closing the two remaining P2 evidence items.
+- Re-run the v12 full receipt on an uncontended host and run the real-browser WASM suite. Require checkpoint and aggregate p95 within 115% of p50 before merging the format branch or replacing Vetch's complete browser package; do not copy only the `.wasm` binary.

@@ -1546,6 +1546,26 @@ moves from 75 to 90 without changing the public API or v11 page format. Raw
 evidence is retained under
 `benchmarks/baselines/storage-layout/2026-07-13-hal7800-reference-sort-full/receipt.json`.
 
+The v12 format candidate at source `9099310` adds adaptive page-local prefix
+leaves with restart interval 16. At production fill 90, all 20,000 EAVT leaves
+and the empty VAET leaf remain raw because prefix encoding does not save bytes;
+all 16,667 AEVT and 15,325 AVET leaves use the prefix codec. The published 1M
+image falls from 301.363 to 269.586 MiB (-10.54%). Against the preceding clean
+v11 receipt, checkpoint p50 improves from 5,013.869 to 4,914.621 ms, point p50
+from 0.026979 to 0.026294 ms, aggregate p50 from 489.099 to 472.221 ms, and
+checkpoint RSS p50 by 0.625 MiB. Exact count/checksum remain
+1,000,000/499,999,500,000.
+
+This receipt validates and its mutation audit rejects altered codec accounting,
+but it does not authorize rollout: checkpoint p95 is 5,783.706 ms (117.68% of
+p50) and aggregate p95 is 554.744 ms (117.48% of p50), both above the 115%
+tail gate. The host also had two unrelated long-running CPU-bound headless
+Chrome renderers, so the next evidence must be an uncontended clean rerun rather
+than another selective retry on the same host. V11 remains directly readable;
+foreground open and delta checkpoint do not rewrite it, and only caller-scheduled
+idle COW maintenance publishes v12. Raw evidence is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-prefix-full/receipt.json`.
+
 The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
