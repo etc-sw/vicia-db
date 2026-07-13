@@ -716,19 +716,13 @@ where
             if shared.saturating_add(suffix.len()) != decoded_len {
                 anyhow::bail!("compressed leaf decoded length mismatch")
             }
-            let mut decoded = Vec::with_capacity(decoded_len);
-            decoded.extend_from_slice(
-                previous
-                    .get(..shared)
-                    .ok_or_else(|| anyhow!("compressed leaf prefix is out of bounds"))?,
-            );
-            decoded.extend_from_slice(suffix);
-            previous = decoded.clone();
-            decoded
+            previous.truncate(shared);
+            previous.extend_from_slice(suffix);
+            previous.as_slice()
         } else {
-            stored.to_vec()
+            stored
         };
-        let (k, fr): (K, FactRef) = postcard::from_bytes(&decoded)?;
+        let (k, fr): (K, FactRef) = postcard::from_bytes(decoded)?;
         entries.push((k, fr));
     }
     Ok(entries)
