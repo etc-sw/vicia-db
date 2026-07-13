@@ -133,7 +133,11 @@ fn is_leaf_page_type(page_type: u8) -> bool {
     page_type == PAGE_TYPE_LEAF || page_type == PAGE_TYPE_PREFIX_LEAF
 }
 
-fn encode_prefix_record(previous: Option<&[u8]>, index: usize, entry: &[u8]) -> Result<Vec<u8>> {
+fn prefix_record_layout(
+    previous: Option<&[u8]>,
+    index: usize,
+    entry: &[u8],
+) -> Result<(u16, u16, usize)> {
     let shared = if index.is_multiple_of(PREFIX_RESTART_INTERVAL) {
         0
     } else {
@@ -147,27 +151,10 @@ fn encode_prefix_record(previous: Option<&[u8]>, index: usize, entry: &[u8]) -> 
     let shared = u16::try_from(shared).map_err(|_| anyhow!("leaf prefix exceeds u16"))?;
     let decoded_len =
         u16::try_from(entry.len()).map_err(|_| anyhow!("leaf entry length exceeds u16"))?;
-    let mut encoded = Vec::with_capacity(
-        PREFIX_RECORD_HEADER_SIZE + entry.len().saturating_sub(usize::from(shared)),
-    );
-    encoded.extend_from_slice(&shared.to_le_bytes());
-    encoded.extend_from_slice(&decoded_len.to_le_bytes());
-    encoded.extend_from_slice(
-        entry
-            .get(usize::from(shared)..)
-            .ok_or_else(|| anyhow!("leaf prefix exceeds entry length"))?,
-    );
-    Ok(encoded)
-}
-
-fn encode_prefix_page_entries(entries: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
-    let mut encoded = Vec::with_capacity(entries.len());
-    let mut previous: Option<&[u8]> = None;
-    for (index, entry) in entries.iter().enumerate() {
-        encoded.push(encode_prefix_record(previous, index, entry)?);
-        previous = Some(entry);
-    }
-    Ok(encoded)
+    let stored_len = PREFIX_RECORD_HEADER_SIZE
+        .checked_add(entry.len().saturating_sub(usize::from(shared)))
+        .ok_or_else(|| anyhow!("compressed leaf record length overflow"))?;
+    Ok((shared, decoded_len, stored_len))
 }
 
 // ─── Low-level page writers ───────────────────────────────────────────────────
@@ -184,13 +171,20 @@ fn write_leaf_page(
     entries: &[Vec<u8>],
     next_leaf: u64,
 ) -> Result<()> {
-    let compressed_entries = encode_prefix_page_entries(entries)?;
     let raw_bytes = entries.iter().map(Vec::len).sum::<usize>();
-    let compressed_bytes = compressed_entries.iter().map(Vec::len).sum::<usize>();
-    let (page_type, stored_entries) = if compressed_bytes < raw_bytes {
-        (PAGE_TYPE_PREFIX_LEAF, compressed_entries.as_slice())
+    let mut compressed_bytes = 0usize;
+    let mut previous: Option<&[u8]> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let (_, _, stored_len) = prefix_record_layout(previous, index, entry)?;
+        compressed_bytes = compressed_bytes
+            .checked_add(stored_len)
+            .ok_or_else(|| anyhow!("compressed leaf page length overflow"))?;
+        previous = Some(entry);
+    }
+    let page_type = if compressed_bytes < raw_bytes {
+        PAGE_TYPE_PREFIX_LEAF
     } else {
-        (PAGE_TYPE_LEAF, entries)
+        PAGE_TYPE_LEAF
     };
     let entry_count =
         u16::try_from(entries.len()).map_err(|_| anyhow!("too many entries: {}", entries.len()))?;
@@ -208,14 +202,30 @@ fn write_leaf_page(
 
     // Slot directory starts at byte 12; data written end-to-start
     let mut write_pos = PAGE_SIZE;
-    for (i, entry) in stored_entries.iter().enumerate() {
-        write_pos -= entry.len();
-        page[write_pos..write_pos + entry.len()].copy_from_slice(entry);
+    let mut previous: Option<&[u8]> = None;
+    for (i, entry) in entries.iter().enumerate() {
+        let stored_len = if page_type == PAGE_TYPE_PREFIX_LEAF {
+            let (shared, decoded_len, stored_len) = prefix_record_layout(previous, i, entry)?;
+            write_pos -= stored_len;
+            page[write_pos..write_pos + 2].copy_from_slice(&shared.to_le_bytes());
+            page[write_pos + 2..write_pos + 4].copy_from_slice(&decoded_len.to_le_bytes());
+            let suffix = entry
+                .get(usize::from(shared)..)
+                .ok_or_else(|| anyhow!("leaf prefix exceeds entry length"))?;
+            page[write_pos + PREFIX_RECORD_HEADER_SIZE..write_pos + stored_len]
+                .copy_from_slice(suffix);
+            stored_len
+        } else {
+            write_pos -= entry.len();
+            page[write_pos..write_pos + entry.len()].copy_from_slice(entry);
+            entry.len()
+        };
+        previous = Some(entry);
         let slot_off = LEAF_HEADER_SIZE + i * SLOT_SIZE;
         let write_pos_u16 =
             u16::try_from(write_pos).map_err(|_| anyhow!("write_pos {write_pos} exceeds u16"))?;
-        let entry_len_u16 = u16::try_from(entry.len())
-            .map_err(|_| anyhow!("entry len {} exceeds u16", entry.len()))?;
+        let entry_len_u16 =
+            u16::try_from(stored_len).map_err(|_| anyhow!("entry len {stored_len} exceeds u16"))?;
         page[slot_off..slot_off + 2].copy_from_slice(&write_pos_u16.to_le_bytes());
         page[slot_off + 2..slot_off + 4].copy_from_slice(&entry_len_u16.to_le_bytes());
     }
@@ -390,14 +400,14 @@ fn build_btree_serialized_results(
 
     for entry in sorted_entries {
         let (entry_bytes, key_bytes) = entry?;
-        let prefix_entry = encode_prefix_record(
+        let (_, _, prefix_entry_len) = prefix_record_layout(
             cur_entries.last().map(Vec::as_slice),
             cur_entries.len(),
             &entry_bytes,
         )?;
         let projected = LEAF_HEADER_SIZE
             + (cur_entries.len() + 1) * SLOT_SIZE
-            + (cur_raw_bytes + entry_bytes.len()).min(cur_prefix_bytes + prefix_entry.len());
+            + (cur_raw_bytes + entry_bytes.len()).min(cur_prefix_bytes + prefix_entry_len);
 
         if projected > PAGE_SIZE && cur_entries.is_empty() {
             anyhow::bail!("B-tree leaf entry does not fit in one page")
@@ -419,13 +429,13 @@ fn build_btree_serialized_results(
         if cur_first_key.is_none() {
             cur_first_key = Some(key_bytes);
         }
-        let prefix_entry = encode_prefix_record(
+        let (_, _, prefix_entry_len) = prefix_record_layout(
             cur_entries.last().map(Vec::as_slice),
             cur_entries.len(),
             &entry_bytes,
         )?;
         cur_raw_bytes += entry_bytes.len();
-        cur_prefix_bytes += prefix_entry.len();
+        cur_prefix_bytes += prefix_entry_len;
         cur_entries.push(entry_bytes);
         observe_serialized_frontier(cur_entries.len(), cur_raw_bytes.min(cur_prefix_bytes));
     }
