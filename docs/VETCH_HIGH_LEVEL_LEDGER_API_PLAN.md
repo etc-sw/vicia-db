@@ -480,6 +480,10 @@ budget. Numeric H1 budgets remain unset because H1 has no measured blocker.
 The next implementation slice should define and verify the smallest pinned
 read-view boundary before adding a broader `ViciaLedger` facade.
 
+Canonical clean receipts are stored at
+`benchmarks/baselines/vetch-ledger-caller/2026-07-13-local-h0/` from source
+`f1beb28`.
+
 ### H1 — Typed commit facade over existing atomic publication
 
 Status: deferred. H0 found no current correctness, latency, or allocation gap

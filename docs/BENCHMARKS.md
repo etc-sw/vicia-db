@@ -1783,6 +1783,12 @@ unmeasured public-API work, keeps atomic expectations behind the existing
 serialized basis check, and admits transaction-pinned multi-query reads as the
 next concrete gap.
 
+Clean receipts from source `f1beb28` are preserved under
+`benchmarks/baselines/vetch-ledger-caller/2026-07-13-local-h0/`. Both native
+receipts and the real-Chrome receipt record `sourceDirty: false`; the validator
+mutation audit rejects missing samples, invalid stage values, changed wasm
+digests, missing scenarios, and duplicate typed changes.
+
 ```bash
 VICIA_BENCH_RECEIPT=target/h0-smoke.json \
   cargo bench --features bench-internals \
