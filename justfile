@@ -47,3 +47,15 @@ checkpoint-construction-smoke OUTPUT_DIR="target/checkpoint-construction/smoke":
 # Run the clean 1M/20-sample checkpoint construction acceptance matrix.
 checkpoint-construction-full OUTPUT_DIR="target/checkpoint-construction/full":
     ./scripts/run-checkpoint-construction-bench.sh full "{{OUTPUT_DIR}}"
+
+# Measure the restart-aware leaf read path with a 10K/five-sample fixture.
+leaf-read-path-smoke OUTPUT_DIR="target/leaf-read-path/smoke":
+    ./scripts/run-leaf-read-path-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Measure the restart-aware leaf read path with the canonical 1M/20-sample fixture.
+leaf-read-path-full OUTPUT_DIR="target/leaf-read-path/full":
+    ./scripts/run-leaf-read-path-bench.sh full "{{OUTPUT_DIR}}"
+
+# Compare two leaf-read receipts and enforce the candidate acceptance gates.
+leaf-read-path-compare BASELINE CANDIDATE:
+    node scripts/compare-leaf-read-path-receipts.mjs "{{BASELINE}}" "{{CANDIDATE}}"

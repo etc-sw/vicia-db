@@ -14,13 +14,81 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 #[cfg(feature = "bench-internals")]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+
+/// Repository-only counters for the page-backed leaf read path.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub struct LeafReadDiagnostics {
+    pub internal_pages_visited: u64,
+    pub leaf_pages_visited: u64,
+    pub raw_leaf_pages_visited: u64,
+    pub prefix_leaf_pages_visited: u64,
+    pub leaf_entries_available: u64,
+    pub leaf_entries_decoded: u64,
+    pub leaf_entries_emitted: u64,
+    pub leaf_entries_skipped: u64,
+    pub lower_bound_key_comparisons: u64,
+    pub prefix_restart_blocks_reconstructed: u64,
+    pub prefix_entries_reconstructed: u64,
+    pub reconstructed_key_bytes: u64,
+    pub full_leaf_vec_peak_entries: u64,
+    pub full_leaf_vec_peak_struct_bytes: u64,
+    pub full_leaf_vec_peak_decoded_payload_bytes: u64,
+    pub raw_decode_elapsed_ns: u64,
+    pub prefix_decode_elapsed_ns: u64,
+    pub early_stop_count: u64,
+    pub leaf_boundary_transitions: u64,
+}
 
 #[cfg(feature = "bench-internals")]
 thread_local! {
     static PEAK_SERIALIZED_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static PEAK_SERIALIZED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static LEAF_READ_DIAGNOSTICS: RefCell<LeafReadDiagnostics> = const {
+        RefCell::new(LeafReadDiagnostics {
+            internal_pages_visited: 0,
+            leaf_pages_visited: 0,
+            raw_leaf_pages_visited: 0,
+            prefix_leaf_pages_visited: 0,
+            leaf_entries_available: 0,
+            leaf_entries_decoded: 0,
+            leaf_entries_emitted: 0,
+            leaf_entries_skipped: 0,
+            lower_bound_key_comparisons: 0,
+            prefix_restart_blocks_reconstructed: 0,
+            prefix_entries_reconstructed: 0,
+            reconstructed_key_bytes: 0,
+            full_leaf_vec_peak_entries: 0,
+            full_leaf_vec_peak_struct_bytes: 0,
+            full_leaf_vec_peak_decoded_payload_bytes: 0,
+            raw_decode_elapsed_ns: 0,
+            prefix_decode_elapsed_ns: 0,
+            early_stop_count: 0,
+            leaf_boundary_transitions: 0,
+        })
+    };
 }
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn reset_leaf_read_diagnostics() {
+    LEAF_READ_DIAGNOSTICS.with(|slot| *slot.borrow_mut() = LeafReadDiagnostics::default());
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn leaf_read_diagnostics() -> LeafReadDiagnostics {
+    LEAF_READ_DIAGNOSTICS.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(feature = "bench-internals")]
+fn update_leaf_read_diagnostics(update: impl FnOnce(&mut LeafReadDiagnostics)) {
+    LEAF_READ_DIAGNOSTICS.with(|slot| update(&mut slot.borrow_mut()));
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn update_leaf_read_diagnostics(_update: impl FnOnce(&mut ())) {}
 
 #[cfg(feature = "bench-internals")]
 pub(crate) fn reset_build_diagnostics() {
@@ -599,6 +667,11 @@ fn find_leftmost_leaf(root: u64, backend: &dyn StorageBackend, cache: &PageCache
         match page_type {
             page_type if is_leaf_page_type(page_type) => return Ok(page_id),
             PAGE_TYPE_INTERNAL => {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.internal_pages_visited =
+                        diagnostics.internal_pages_visited.saturating_add(1);
+                });
                 let key_count = read_u16_at(&page[..], 2)? as usize;
                 if key_count == 0 {
                     page_id = read_u64_at(&page[..], 4)?;
@@ -638,6 +711,11 @@ where
         match page_type {
             page_type if is_leaf_page_type(page_type) => return Ok(page_id),
             PAGE_TYPE_INTERNAL => {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.internal_pages_visited =
+                        diagnostics.internal_pages_visited.saturating_add(1);
+                });
                 let key_count = read_u16_at(&page[..], 2)? as usize;
                 let rightmost_child = read_u64_at(&page[..], 4)?;
                 let child_arr_start = INTERNAL_HEADER_SIZE;
@@ -684,6 +762,8 @@ fn read_leaf_entries<K>(page: &[u8]) -> Result<Vec<(K, FactRef)>>
 where
     K: for<'de> Deserialize<'de>,
 {
+    #[cfg(feature = "bench-internals")]
+    let decode_started = std::time::Instant::now();
     let page_type = page
         .first()
         .copied()
@@ -697,8 +777,24 @@ where
         anyhow::bail!("unsupported prefix leaf restart interval")
     }
     let entry_count = read_u16_at(page, 2)? as usize;
+    #[cfg(feature = "bench-internals")]
+    update_leaf_read_diagnostics(|diagnostics| {
+        diagnostics.leaf_pages_visited = diagnostics.leaf_pages_visited.saturating_add(1);
+        diagnostics.leaf_entries_available = diagnostics
+            .leaf_entries_available
+            .saturating_add(u64::try_from(entry_count).unwrap_or(u64::MAX));
+        if page_type == PAGE_TYPE_PREFIX_LEAF {
+            diagnostics.prefix_leaf_pages_visited =
+                diagnostics.prefix_leaf_pages_visited.saturating_add(1);
+        } else {
+            diagnostics.raw_leaf_pages_visited =
+                diagnostics.raw_leaf_pages_visited.saturating_add(1);
+        }
+    });
     let mut entries = Vec::with_capacity(entry_count);
     let mut previous = Vec::new();
+    #[cfg(feature = "bench-internals")]
+    let mut decoded_payload_bytes = 0usize;
     for i in 0..entry_count {
         let slot_off = LEAF_HEADER_SIZE + i * SLOT_SIZE;
         let offset = read_u16_at(page, slot_off)? as usize;
@@ -731,13 +827,60 @@ where
             }
             previous.truncate(shared);
             previous.extend_from_slice(suffix);
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                if i.is_multiple_of(PREFIX_RESTART_INTERVAL) {
+                    diagnostics.prefix_restart_blocks_reconstructed = diagnostics
+                        .prefix_restart_blocks_reconstructed
+                        .saturating_add(1);
+                }
+                diagnostics.prefix_entries_reconstructed =
+                    diagnostics.prefix_entries_reconstructed.saturating_add(1);
+                diagnostics.reconstructed_key_bytes = diagnostics
+                    .reconstructed_key_bytes
+                    .saturating_add(u64::try_from(previous.len()).unwrap_or(u64::MAX));
+            });
             previous.as_slice()
         } else {
             stored
         };
         let (k, fr): (K, FactRef) = postcard::from_bytes(decoded)?;
+        #[cfg(feature = "bench-internals")]
+        {
+            decoded_payload_bytes = decoded_payload_bytes.saturating_add(decoded.len());
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_decoded =
+                    diagnostics.leaf_entries_decoded.saturating_add(1);
+            });
+        }
         entries.push((k, fr));
     }
+    #[cfg(feature = "bench-internals")]
+    update_leaf_read_diagnostics(|diagnostics| {
+        diagnostics.full_leaf_vec_peak_entries = diagnostics
+            .full_leaf_vec_peak_entries
+            .max(u64::try_from(entries.capacity()).unwrap_or(u64::MAX));
+        diagnostics.full_leaf_vec_peak_struct_bytes =
+            diagnostics.full_leaf_vec_peak_struct_bytes.max(
+                u64::try_from(
+                    entries
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(K, FactRef)>()),
+                )
+                .unwrap_or(u64::MAX),
+            );
+        diagnostics.full_leaf_vec_peak_decoded_payload_bytes = diagnostics
+            .full_leaf_vec_peak_decoded_payload_bytes
+            .max(u64::try_from(decoded_payload_bytes).unwrap_or(u64::MAX));
+        let elapsed = u64::try_from(decode_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        if page_type == PAGE_TYPE_PREFIX_LEAF {
+            diagnostics.prefix_decode_elapsed_ns =
+                diagnostics.prefix_decode_elapsed_ns.saturating_add(elapsed);
+        } else {
+            diagnostics.raw_decode_elapsed_ns =
+                diagnostics.raw_decode_elapsed_ns.saturating_add(elapsed);
+        }
+    });
     Ok(entries)
 }
 
@@ -774,6 +917,11 @@ where
         if next_leaf == 0 {
             break;
         }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_boundary_transitions =
+                diagnostics.leaf_boundary_transitions.saturating_add(1);
+        });
         leaf_id = next_leaf;
     }
 
@@ -835,7 +983,17 @@ where
         let entries: Vec<(K, FactRef)> = read_leaf_entries(&page[..])?;
 
         for (k, fr) in entries {
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
             if k < *start {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.leaf_entries_skipped =
+                        diagnostics.leaf_entries_skipped.saturating_add(1);
+                });
                 continue;
             }
             if let Some(e) = end
@@ -844,11 +1002,21 @@ where
                 break 'outer;
             }
             result.push((k, fr));
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_emitted =
+                    diagnostics.leaf_entries_emitted.saturating_add(1);
+            });
         }
 
         if next_leaf == 0 {
             break;
         }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_boundary_transitions =
+                diagnostics.leaf_boundary_transitions.saturating_add(1);
+        });
         leaf_id = next_leaf;
     }
 
@@ -874,19 +1042,43 @@ where
         }
         let next_leaf = read_u64_at(&page[..], 4)?;
         for (key, fact_ref) in read_leaf_entries::<K>(&page[..])? {
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.lower_bound_key_comparisons =
+                    diagnostics.lower_bound_key_comparisons.saturating_add(1);
+            });
             if key < *start {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.leaf_entries_skipped =
+                        diagnostics.leaf_entries_skipped.saturating_add(1);
+                });
                 continue;
             }
             if end.is_some_and(|end| key >= *end) {
                 break 'outer;
             }
             if !visit(&key, fact_ref)? {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.early_stop_count = diagnostics.early_stop_count.saturating_add(1);
+                });
                 return Ok(false);
             }
+            #[cfg(feature = "bench-internals")]
+            update_leaf_read_diagnostics(|diagnostics| {
+                diagnostics.leaf_entries_emitted =
+                    diagnostics.leaf_entries_emitted.saturating_add(1);
+            });
         }
         if next_leaf == 0 {
             break;
         }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            diagnostics.leaf_boundary_transitions =
+                diagnostics.leaf_boundary_transitions.saturating_add(1);
+        });
         leaf_id = next_leaf;
     }
     Ok(true)

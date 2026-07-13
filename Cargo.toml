@@ -107,6 +107,11 @@ name = "checkpoint-construction-bench"
 path = "src/bin/checkpoint_construction_bench.rs"
 required-features = ["bench-internals"]
 
+[[bin]]
+name = "leaf-read-path-bench"
+path = "src/bin/leaf_read_path_bench.rs"
+required-features = ["bench-internals"]
+
 [features]
 default = []
 wasm = []
