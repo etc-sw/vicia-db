@@ -101,10 +101,85 @@ struct CurrentValueState {
     assertions: std::collections::HashMap<(i64, i64), (u64, CursorFactRef)>,
 }
 
+impl CurrentValueState {
+    fn clear(&mut self) {
+        self.max_unscoped_retract_tx = 0;
+        self.max_scoped_retract_tx.clear();
+        self.assertions.clear();
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CursorFactRef {
     Pending(PendingFactId),
     Committed(FactRef),
+}
+
+#[derive(Default)]
+struct CurrentAttributeValues {
+    inline_value_bytes: Vec<u8>,
+    inline_state: CurrentValueState,
+    inline_active: bool,
+    overflow: std::collections::HashMap<Vec<u8>, CurrentValueState>,
+}
+
+impl CurrentAttributeValues {
+    #[cfg(any(test, feature = "bench-internals"))]
+    fn len(&self) -> usize {
+        usize::from(self.inline_active).saturating_add(self.overflow.len())
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&[u8], &CurrentValueState)> {
+        self.inline_active
+            .then_some((self.inline_value_bytes.as_slice(), &self.inline_state))
+            .into_iter()
+            .chain(
+                self.overflow
+                    .iter()
+                    .map(|(encoded, state)| (encoded.as_slice(), state)),
+            )
+    }
+
+    fn clear(&mut self) {
+        self.inline_value_bytes.clear();
+        self.inline_state.clear();
+        self.inline_active = false;
+        self.overflow.clear();
+    }
+
+    fn reduce(&mut self, key: CurrentAevtEntryRef<'_>, fact_ref: CursorFactRef) -> bool {
+        if !self.overflow.is_empty() {
+            return reduce_current_entry(&mut self.overflow, key, fact_ref);
+        }
+        if !self.inline_active {
+            self.inline_value_bytes.extend_from_slice(key.value_bytes);
+            self.inline_active = true;
+            return reduce_current_state(
+                &mut self.inline_state,
+                key.valid_from,
+                key.valid_to,
+                key.tx_count,
+                key.asserted,
+                fact_ref,
+            );
+        }
+        if self.inline_value_bytes == key.value_bytes {
+            return reduce_current_state(
+                &mut self.inline_state,
+                key.valid_from,
+                key.valid_to,
+                key.tx_count,
+                key.asserted,
+                fact_ref,
+            );
+        }
+
+        let first_value = std::mem::take(&mut self.inline_value_bytes);
+        let first_state = std::mem::take(&mut self.inline_state);
+        self.inline_active = false;
+        self.overflow.insert(first_value, first_state);
+        reduce_current_entry(&mut self.overflow, key, fact_ref)
+    }
 }
 
 /// Repository-only counters for one selected-attribute current-view cursor.
@@ -159,7 +234,7 @@ pub(crate) struct CurrentAttributeCursor {
     pending: Vec<PendingFactId>,
     pending_position: usize,
     current_entity: Option<EntityId>,
-    values: std::collections::HashMap<Vec<u8>, CurrentValueState>,
+    values: CurrentAttributeValues,
     as_of: Option<AsOf>,
     valid_time: CurrentValidTime,
     committed_fact_reader: Option<Arc<dyn crate::storage::CommittedFactReader>>,
@@ -1614,7 +1689,7 @@ impl FactStorage {
                 .phase_diagnostics_enabled
                 .then(std::time::Instant::now);
             let mut output = Vec::new();
-            for (encoded, state) in &cursor.values {
+            for (encoded, state) in cursor.values.iter() {
                 for ((valid_from, valid_to), (assert_tx, fact_ref)) in &state.assertions {
                     let scoped_retract = state
                         .max_scoped_retract_tx
@@ -1699,7 +1774,7 @@ impl FactStorage {
             let reducer_started = cursor
                 .phase_diagnostics_enabled
                 .then(std::time::Instant::now);
-            let added_window = reduce_current_entry(&mut cursor.values, key, fact_ref);
+            let added_window = cursor.values.reduce(key, fact_ref);
             #[cfg(any(test, feature = "bench-internals"))]
             {
                 if let Some(started) = reducer_started {
