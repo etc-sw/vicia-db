@@ -4025,6 +4025,8 @@ struct PendingIndexOrder<'a> {
     refs: &'a [FactRef],
     value_bytes: Vec<Vec<u8>>,
     order: Vec<usize>,
+    uniform_attribute: bool,
+    eavt_ordered: bool,
 }
 
 // Initial base construction can serialize these borrowed views immediately into
@@ -4089,17 +4091,23 @@ fn required_index<T>(slice: &[T], index: usize) -> &T {
 impl<'a> PendingIndexOrder<'a> {
     fn new(facts: &'a [Fact], refs: &'a [FactRef]) -> Self {
         debug_assert_eq!(facts.len(), refs.len());
+        let uniform_attribute = facts.first().map_or(true, |first| {
+            facts.iter().all(|fact| fact.attribute == first.attribute)
+        });
         Self {
             facts,
             refs,
             value_bytes: facts.iter().map(|fact| encode_value(&fact.value)).collect(),
             order: Vec::with_capacity(facts.len()),
+            uniform_attribute,
+            eavt_ordered: false,
         }
     }
 
     fn reset_all(&mut self) {
         self.order.clear();
         self.order.extend(0..self.facts.len());
+        self.eavt_ordered = false;
     }
 
     fn sort_eavt(&mut self) {
@@ -4130,9 +4138,15 @@ impl<'a> PendingIndexOrder<'a> {
                     right_fact.asserted,
                 ))
         });
+        self.eavt_ordered = true;
     }
 
     fn sort_aevt(&mut self) {
+        // With one attribute EAVT and AEVT have the same remaining key order,
+        // so the immediately preceding EAVT sort is already the exact answer.
+        if self.uniform_attribute && self.eavt_ordered {
+            return;
+        }
         self.reset_all();
         let facts = self.facts;
         let values = &self.value_bytes;
@@ -4496,6 +4510,40 @@ mod tests {
         assert_eq!(order.avet_entries().collect::<Vec<_>>(), eager.2);
         order.sort_vaet();
         assert_eq!(order.vaet_entries().collect::<Vec<_>>(), eager.3);
+    }
+
+    #[test]
+    fn uniform_attribute_reuses_exact_eavt_order_for_aevt() {
+        let facts: Vec<Fact> = [7u128, 2, 9, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, entity)| {
+                Fact::with_valid_time(
+                    Uuid::from_u128(entity),
+                    ":layout/value".to_string(),
+                    Value::Integer(index as i64),
+                    100 + index as u64,
+                    10 + index as u64,
+                    index as i64,
+                    200 + index as i64,
+                )
+            })
+            .collect();
+        let refs: Vec<FactRef> = (0..facts.len())
+            .map(|index| FactRef {
+                page_id: 20 + index as u64,
+                slot_index: 0,
+            })
+            .collect();
+        let eager = build_sorted_index_entries(&facts, &refs);
+        let mut order = PendingIndexOrder::new(&facts, &refs);
+
+        order.sort_eavt();
+        let eavt_positions = order.order.clone();
+        order.sort_aevt();
+
+        assert_eq!(order.order, eavt_positions);
+        assert_eq!(order.aevt_entries().collect::<Vec<_>>(), eager.1);
     }
 
     #[test]
