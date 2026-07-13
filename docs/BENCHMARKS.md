@@ -1604,6 +1604,16 @@ receipt-owned gates plus real-browser WASM execution. Evidence is retained
 under
 `benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-lazy-separator-full/receipt.json`.
 
+After the unrelated QA process exited, source `65eaaad` repeated the complete
+matrix without concurrent build or QA work. Fill 90 again passes checkpoint at
+3,775.192/4,256.684 ms p50/p95 (112.75%), aggregate at
+458.594/513.579 ms (111.99%), size, and RSS. Point read is the sole failing
+gate: 0.0268/0.0571 ms p50/p95, an absolute 30-microsecond tail gap. No
+candidate is selected, so the remaining evidence task is a more stable repeated
+point-read contract rather than another lucky full retry. The final uncontended
+receipt is retained under
+`benchmarks/baselines/storage-layout/2026-07-13-hal7800-v12-final-uncontended-full/receipt.json`.
+
 The original `vicia.storage-layout.v1` study walks the published v11 image page by page and
 attributes exact payload, structural, and unused bytes to fact pages and each
 EAVT/AEVT/AVET/VAET leaf/internal tree. It also reports conservative key-prefix
