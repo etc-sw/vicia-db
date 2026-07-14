@@ -53,21 +53,34 @@ struct OverlayEntry {
 #[derive(Debug, Default)]
 struct TemporalColumnBuilder {
     bytes: Vec<u8>,
-    previous: u64,
+    predictors: [u64; 8],
+    next_predictor: usize,
 }
 
 impl TemporalColumnBuilder {
     fn push(&mut self, value: i64) {
         let bits = u64::from_ne_bytes(value.to_ne_bytes());
-        encode_varint(bits ^ self.previous, &mut self.bytes);
-        self.previous = bits;
+        let (predictor, delta) = self
+            .predictors
+            .iter()
+            .enumerate()
+            .map(|(index, previous)| (index, bits ^ previous))
+            .min_by_key(|(index, delta)| (varint_len(*delta), *index))
+            .unwrap_or((0, bits));
+        self.bytes.push(u8::try_from(predictor).unwrap_or_default());
+        encode_varint(delta, &mut self.bytes);
+        if let Some(slot) = self.predictors.get_mut(self.next_predictor) {
+            *slot = bits;
+        }
+        self.next_predictor = self.next_predictor.saturating_add(1) % self.predictors.len();
     }
 }
 
 struct TemporalColumnDecoder<'a> {
     bytes: &'a [u8],
     position: usize,
-    previous: u64,
+    predictors: [u64; 8],
+    next_predictor: usize,
     rows: usize,
 }
 
@@ -76,15 +89,30 @@ impl<'a> TemporalColumnDecoder<'a> {
         Self {
             bytes,
             position: 0,
-            previous: 0,
+            predictors: [0; 8],
+            next_predictor: 0,
             rows: 0,
         }
     }
 
     fn next(&mut self) -> Result<i64> {
+        let predictor = usize::from(
+            *self
+                .bytes
+                .get(self.position)
+                .ok_or_else(|| anyhow!("truncated current projection temporal predictor"))?,
+        );
+        self.position = self.position.saturating_add(1);
+        let previous = *self
+            .predictors
+            .get(predictor)
+            .ok_or_else(|| anyhow!("invalid current projection temporal predictor"))?;
         let delta = decode_varint(self.bytes, &mut self.position)?;
-        let bits = self.previous ^ delta;
-        self.previous = bits;
+        let bits = previous ^ delta;
+        if let Some(slot) = self.predictors.get_mut(self.next_predictor) {
+            *slot = bits;
+        }
+        self.next_predictor = self.next_predictor.saturating_add(1) % self.predictors.len();
         self.rows = self.rows.saturating_add(1);
         Ok(i64::from_ne_bytes(bits.to_ne_bytes()))
     }
@@ -506,6 +534,15 @@ fn encode_varint(mut value: u64, output: &mut Vec<u8>) {
     output.push(value.to_le_bytes()[0]);
 }
 
+fn varint_len(mut value: u64) -> u8 {
+    let mut bytes = 1_u8;
+    while value >= 0x80 {
+        value >>= 7;
+        bytes = bytes.saturating_add(1);
+    }
+    bytes
+}
+
 fn decode_varint(bytes: &[u8], position: &mut usize) -> Result<u64> {
     let mut value = 0_u64;
     for index in 0..10_u32 {
@@ -633,6 +670,8 @@ mod tests {
             )
             .is_err()
         );
+        assert!(TemporalColumnDecoder::new(&[8, 0]).next().is_err());
+        assert!(TemporalColumnDecoder::new(&[0]).next().is_err());
     }
 
     #[test]
