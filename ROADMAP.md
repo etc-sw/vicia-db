@@ -1727,4 +1727,4 @@ See [GitHub Issues](https://github.com/project-minigraf/minigraf/issues) for spe
 
 ---
 
-**Last Updated**: July 2026 — A10 bounded selective relationship-read contract complete; 1358 native tests and 75 browser-WASM tests; #185 remains deferred to 2.0
+**Last Updated**: July 2026 — P2 repeated-aggregate retained-memory gate complete; 1358 native tests and 75 browser-WASM tests; #185 remains deferred to 2.0

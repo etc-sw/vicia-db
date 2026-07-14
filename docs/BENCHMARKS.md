@@ -1503,6 +1503,41 @@ just pending-isolation-smoke
 just pending-isolation-full
 ```
 
+## Repeated Aggregate Retention (2026-07-14)
+
+`vicia.aggregate-retention.v1` separates repeated-query retained memory from
+peak RSS and open/replay ownership. It builds one exact 1M Integer fixture,
+runs one and twenty current aggregates in five pairs of fresh child processes,
+and alternates endpoint order. Every child records RSS after each query,
+`VmHWM`, smaps ownership, a live glibc `malloc_trim(0)`, database drop plus a
+second trim, transaction cursor, file bytes, WAL presence, and current-cursor
+diagnostics. The trim calls are benchmark-only and do not enter the library.
+
+The clean HAL7800 receipt at source `dbb946d` uses format v12, fill 90, and a
+276.938 MiB fixture. All ten endpoints return exact count/checksum
+`1,000,000 / 499999500000`, preserve the transaction cursor and graph bytes,
+and create no WAL. Post-trim retained RSS has the same 1.125 MiB median after
+one and twenty aggregates, so median growth is zero against the 2 MiB gate.
+Every twenty-run child also has zero first-five-to-last-five median RSS growth.
+Live database RSS after twenty aggregates ranges from 1.078 to 1.227 MiB,
+well below the 16 MiB absolute gate. Pre-trim and post-trim retained deltas are
+the same 1.125 MiB in every twenty-run child, so this workload exposes neither
+repeated allocator retention nor a live-state leak.
+
+The validator recomputes result, cursor, transaction, file, WAL, RSS,
+breakdown, trend, and median gates from raw samples. Its mutation audit rejects
+shape, correctness, ordering, durability, arithmetic, diagnostics, trend, and
+population-wide retention changes. P2 retained memory is closed; no allocator,
+cache, public API, or v12 rollout change is admitted from this receipt.
+
+Canonical evidence:
+`benchmarks/baselines/aggregate-retention/2026-07-14-hal7800-full/receipt.json`.
+
+```bash
+just aggregate-retention-smoke
+just aggregate-retention-full
+```
+
 ### v11 storage layout and B-tree fill isolation
 
 `vicia.storage-layout.v2` supersedes the v1 selection contract. It uses

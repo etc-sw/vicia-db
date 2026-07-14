@@ -6,7 +6,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 - [x] Attribute allocation sources: the dominant costs were the attribute-sized `Vec<Fact>` snapshot and row bindings before the sink.
 - [x] Add cursor counters for selected pending entries/bytes, committed/pending visits, exact fact resolutions, emitted rows, peak entity values/windows, and yield/resume count.
-- [x] Reduce 1M Integer aggregate RSS delta from 381 MiB to 128 MiB, then 64 MiB. Current production-path 20-run delta: 1.375 MiB.
+- [x] Reduce 1M Integer aggregate RSS delta from 381 MiB to 128 MiB, then 64 MiB. Current clean 20-run retained delta: 1.125 MiB.
 - [x] Verify unrelated pending attributes do not increase selected-attribute memory. The clean `vicia.pending-isolation.v3` full receipt keeps selected pending entries/bytes and pending visits at zero through 1M unrelated WAL facts; query RSS delta stays within 0.5 MiB of zero-pending.
 
 ## P1 — Aggregate latency
@@ -18,9 +18,9 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## P2 — Retained memory
 
-- [ ] Compare retained RSS after 1 and 20 repeated aggregates.
-- [ ] Distinguish live session/cache state from allocator retention or leaks.
-- [x] Reduce retained heap from 79 MiB to 32 MiB, then 16 MiB. Current retained RSS delta: 1.375 MiB.
+- [x] Compare retained RSS after 1 and 20 repeated aggregates. The clean five-pair `vicia.aggregate-retention.v1` receipt records the same 1.125 MiB post-trim median at both endpoints, zero median growth, and no positive first-five/last-five RSS trend.
+- [x] Distinguish live session/cache state from allocator retention or leaks. Fresh children record open, per-query, pre-trim, live-trim, and post-drop RSS plus smaps ownership. Twenty runs retain 1.078–1.227 MiB of live database state, `malloc_trim(0)` exposes no additional repeated-query growth, and drop/trim leaves no work-proportional residue.
+- [x] Reduce retained heap from 79 MiB to 32 MiB, then 16 MiB. Current retained RSS delta: 1.125 MiB.
 
 ## P3 — Storage and maintenance
 
