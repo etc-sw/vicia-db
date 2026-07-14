@@ -1,0 +1,3164 @@
+{
+  "schema": "vicia.storage-layout-variance.v1",
+  "source": {
+    "path": "benchmarks/baselines/storage-layout/2026-07-14-hal7800-v12-fill-frontier-full/receipt.json",
+    "sha256": "a2b567ba4131d35404cbe25d985591b80021f93525b4b2b888331b9be43b3d07",
+    "schema": "vicia.storage-layout.v3",
+    "sourceCommit": "ca6475af1a913995c37b40e21c3806d649bf5de4",
+    "trackedClean": true,
+    "profile": "full",
+    "facts": 1000000,
+    "repetitions": 20
+  },
+  "policy": {
+    "highFillPercents": [
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      95,
+      100
+    ],
+    "commonOwnerMinimumFills": 3,
+    "fixedPositionMinimumShare": 0.5,
+    "pointRegressionLimit": 1.2,
+    "phaseGroups": {
+      "construction": [
+        "factPackingMicros",
+        "committedIndexReadMicros",
+        "pendingIndexSortMicros",
+        "eavtCollectSortMicros",
+        "eavtBuildMicros",
+        "aevtCollectSortMicros",
+        "aevtBuildMicros",
+        "avetCollectSortMicros",
+        "avetBuildMicros",
+        "vaetCollectSortMicros",
+        "vaetBuildMicros"
+      ],
+      "sync": [
+        "factSyncMicros",
+        "dataSyncMicros",
+        "publishSyncMicros"
+      ],
+      "integrity": [
+        "integrityCatalogMicros"
+      ],
+      "publication": [
+        "headerAssemblyMicros",
+        "publishWriteMicros",
+        "publishFinalizeMicros"
+      ]
+    }
+  },
+  "candidates": [
+    {
+      "fillPercent": 75,
+      "graphBytes": 329318400,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3418.5395,
+          "p95": 3811.099683,
+          "max": 3847.214783,
+          "mad": 114.9262490000001
+        },
+        "p95": {
+          "sampleIndex": 12,
+          "sampleNumber": 13,
+          "orderPosition": 6,
+          "elapsedMs": 3811.099683,
+          "elapsedDeltaFromP50Ms": 392.56018300000005,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2544767,
+              "medianMicros": 2612685,
+              "deltaMicros": -67918,
+              "positiveDeltaMicros": 807
+            },
+            "sync": {
+              "sampleMicros": 742007,
+              "medianMicros": 169352,
+              "deltaMicros": 572655,
+              "positiveDeltaMicros": 572664
+            },
+            "integrity": {
+              "sampleMicros": 345537,
+              "medianMicros": 352932,
+              "deltaMicros": -7395,
+              "positiveDeltaMicros": 0
+            },
+            "publication": {
+              "sampleMicros": 30000,
+              "medianMicros": 28666,
+              "deltaMicros": 1334,
+              "positiveDeltaMicros": 1337
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 233733,
+              "sampleMicros": 229560,
+              "deltaMicros": -4173,
+              "positiveDeltaMicros": 0
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50780,
+              "sampleMicros": 50601,
+              "deltaMicros": -179,
+              "positiveDeltaMicros": 0
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 479040,
+              "sampleMicros": 455068,
+              "deltaMicros": -23972,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 731606,
+              "sampleMicros": 719255,
+              "deltaMicros": -12351,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 714515,
+              "sampleMicros": 700183,
+              "deltaMicros": -14332,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11947,
+              "sampleMicros": 11947,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 387448,
+              "sampleMicros": 373730,
+              "deltaMicros": -13718,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3598,
+              "sampleMicros": 4401,
+              "deltaMicros": 803,
+              "positiveDeltaMicros": 803
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 22,
+              "deltaMicros": 4,
+              "positiveDeltaMicros": 4
+            },
+            "factSyncMicros": {
+              "medianMicros": 39381,
+              "sampleMicros": 482214,
+              "deltaMicros": 442833,
+              "positiveDeltaMicros": 442833
+            },
+            "dataSyncMicros": {
+              "medianMicros": 128859,
+              "sampleMicros": 258690,
+              "deltaMicros": 129831,
+              "positiveDeltaMicros": 129831
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1112,
+              "sampleMicros": 1103,
+              "deltaMicros": -9,
+              "positiveDeltaMicros": 0
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 352932,
+              "sampleMicros": 345537,
+              "deltaMicros": -7395,
+              "positiveDeltaMicros": 0
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 5,
+              "deltaMicros": -3,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28653,
+              "sampleMicros": 29990,
+              "deltaMicros": 1337,
+              "positiveDeltaMicros": 1337
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 16,
+          "sampleNumber": 17,
+          "orderPosition": 2,
+          "elapsedMs": 3847.214783,
+          "elapsedDeltaFromP50Ms": 428.67528300000004,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2586654,
+              "medianMicros": 2612685,
+              "deltaMicros": -26031,
+              "positiveDeltaMicros": 16070
+            },
+            "sync": {
+              "sampleMicros": 730231,
+              "medianMicros": 169352,
+              "deltaMicros": 560879,
+              "positiveDeltaMicros": 571720
+            },
+            "integrity": {
+              "sampleMicros": 354979,
+              "medianMicros": 352932,
+              "deltaMicros": 2047,
+              "positiveDeltaMicros": 2047
+            },
+            "publication": {
+              "sampleMicros": 28230,
+              "medianMicros": 28666,
+              "deltaMicros": -436,
+              "positiveDeltaMicros": 0
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 233733,
+              "sampleMicros": 227061,
+              "deltaMicros": -6672,
+              "positiveDeltaMicros": 0
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50780,
+              "sampleMicros": 53183,
+              "deltaMicros": 2403,
+              "positiveDeltaMicros": 2403
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 479040,
+              "sampleMicros": 492706,
+              "deltaMicros": 13666,
+              "positiveDeltaMicros": 13666
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 731606,
+              "sampleMicros": 712553,
+              "deltaMicros": -19053,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 714515,
+              "sampleMicros": 700042,
+              "deltaMicros": -14473,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11947,
+              "sampleMicros": 11874,
+              "deltaMicros": -73,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 387448,
+              "sampleMicros": 385618,
+              "deltaMicros": -1830,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3598,
+              "sampleMicros": 3598,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 19,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "factSyncMicros": {
+              "medianMicros": 39381,
+              "sampleMicros": 611101,
+              "deltaMicros": 571720,
+              "positiveDeltaMicros": 571720
+            },
+            "dataSyncMicros": {
+              "medianMicros": 128859,
+              "sampleMicros": 118076,
+              "deltaMicros": -10783,
+              "positiveDeltaMicros": 0
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1112,
+              "sampleMicros": 1054,
+              "deltaMicros": -58,
+              "positiveDeltaMicros": 0
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 352932,
+              "sampleMicros": 354979,
+              "deltaMicros": 2047,
+              "positiveDeltaMicros": 2047
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 8,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28653,
+              "sampleMicros": 28217,
+              "deltaMicros": -436,
+              "positiveDeltaMicros": 0
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011605,
+          "p95": 0.017737,
+          "max": 0.037845,
+          "mad": 0.00036900000000000127
+        },
+        "p50RatioToFill75": 1,
+        "p95RatioToFill75": 1,
+        "p95": {
+          "sampleIndex": 17,
+          "sampleNumber": 18,
+          "orderPosition": 1,
+          "elapsedMs": 0.017737
+        },
+        "max": {
+          "sampleIndex": 11,
+          "sampleNumber": 12,
+          "orderPosition": 7,
+          "elapsedMs": 0.037845
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 292.603836,
+          "p95": 323.26358300000004,
+          "max": 336.568501,
+          "mad": 6.187694000000022
+        },
+        "tailRatio": 1.10478245063062,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": false,
+        "checkpoint": true,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    },
+    {
+      "fillPercent": 85,
+      "graphBytes": 296554496,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3258.695193,
+          "p95": 3699.187654,
+          "max": 4285.077268,
+          "mad": 84.01339999999982
+        },
+        "p95": {
+          "sampleIndex": 7,
+          "sampleNumber": 8,
+          "orderPosition": 3,
+          "elapsedMs": 3699.187654,
+          "elapsedDeltaFromP50Ms": 440.4924609999998,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2525774,
+              "medianMicros": 2563522,
+              "deltaMicros": -37748,
+              "positiveDeltaMicros": 586
+            },
+            "sync": {
+              "sampleMicros": 688206,
+              "medianMicros": 168274,
+              "deltaMicros": 519932,
+              "positiveDeltaMicros": 519957
+            },
+            "integrity": {
+              "sampleMicros": 312887,
+              "medianMicros": 314504,
+              "deltaMicros": -1617,
+              "positiveDeltaMicros": 0
+            },
+            "publication": {
+              "sampleMicros": 28207,
+              "medianMicros": 28275,
+              "deltaMicros": -68,
+              "positiveDeltaMicros": 2
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 231281,
+              "sampleMicros": 228898,
+              "deltaMicros": -2383,
+              "positiveDeltaMicros": 0
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50516,
+              "sampleMicros": 49550,
+              "deltaMicros": -966,
+              "positiveDeltaMicros": 0
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 470350,
+              "sampleMicros": 451670,
+              "deltaMicros": -18680,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 713705,
+              "sampleMicros": 702573,
+              "deltaMicros": -11132,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 705275,
+              "sampleMicros": 700114,
+              "deltaMicros": -5161,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11753,
+              "sampleMicros": 11741,
+              "deltaMicros": -12,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 377128,
+              "sampleMicros": 377128,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3497,
+              "sampleMicros": 4083,
+              "deltaMicros": 586,
+              "positiveDeltaMicros": 586
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 17,
+              "sampleMicros": 17,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "factSyncMicros": {
+              "medianMicros": 45014,
+              "sampleMicros": 46601,
+              "deltaMicros": 1587,
+              "positiveDeltaMicros": 1587
+            },
+            "dataSyncMicros": {
+              "medianMicros": 122142,
+              "sampleMicros": 640512,
+              "deltaMicros": 518370,
+              "positiveDeltaMicros": 518370
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1118,
+              "sampleMicros": 1093,
+              "deltaMicros": -25,
+              "positiveDeltaMicros": 0
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 314504,
+              "sampleMicros": 312887,
+              "deltaMicros": -1617,
+              "positiveDeltaMicros": 0
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 9,
+              "sampleMicros": 10,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28261,
+              "sampleMicros": 28191,
+              "deltaMicros": -70,
+              "positiveDeltaMicros": 0
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 4,
+          "sampleNumber": 5,
+          "orderPosition": 6,
+          "elapsedMs": 4285.077268,
+          "elapsedDeltaFromP50Ms": 1026.382075,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2642293,
+              "medianMicros": 2563522,
+              "deltaMicros": 78771,
+              "positiveDeltaMicros": 78910
+            },
+            "sync": {
+              "sampleMicros": 1155489,
+              "medianMicros": 168274,
+              "deltaMicros": 987215,
+              "positiveDeltaMicros": 987215
+            },
+            "integrity": {
+              "sampleMicros": 312988,
+              "medianMicros": 314504,
+              "deltaMicros": -1516,
+              "positiveDeltaMicros": 0
+            },
+            "publication": {
+              "sampleMicros": 27660,
+              "medianMicros": 28275,
+              "deltaMicros": -615,
+              "positiveDeltaMicros": 0
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 231281,
+              "sampleMicros": 239663,
+              "deltaMicros": 8382,
+              "positiveDeltaMicros": 8382
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50516,
+              "sampleMicros": 52015,
+              "deltaMicros": 1499,
+              "positiveDeltaMicros": 1499
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 470350,
+              "sampleMicros": 470350,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 713705,
+              "sampleMicros": 749462,
+              "deltaMicros": 35757,
+              "positiveDeltaMicros": 35757
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 705275,
+              "sampleMicros": 732538,
+              "deltaMicros": 27263,
+              "positiveDeltaMicros": 27263
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11753,
+              "sampleMicros": 12628,
+              "deltaMicros": 875,
+              "positiveDeltaMicros": 875
+            },
+            "avetBuildMicros": {
+              "medianMicros": 377128,
+              "sampleMicros": 382260,
+              "deltaMicros": 5132,
+              "positiveDeltaMicros": 5132
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3497,
+              "sampleMicros": 3358,
+              "deltaMicros": -139,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 17,
+              "sampleMicros": 19,
+              "deltaMicros": 2,
+              "positiveDeltaMicros": 2
+            },
+            "factSyncMicros": {
+              "medianMicros": 45014,
+              "sampleMicros": 654432,
+              "deltaMicros": 609418,
+              "positiveDeltaMicros": 609418
+            },
+            "dataSyncMicros": {
+              "medianMicros": 122142,
+              "sampleMicros": 499906,
+              "deltaMicros": 377764,
+              "positiveDeltaMicros": 377764
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1118,
+              "sampleMicros": 1151,
+              "deltaMicros": 33,
+              "positiveDeltaMicros": 33
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 314504,
+              "sampleMicros": 312988,
+              "deltaMicros": -1516,
+              "positiveDeltaMicros": 0
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 9,
+              "sampleMicros": 9,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28261,
+              "sampleMicros": 27646,
+              "deltaMicros": -615,
+              "positiveDeltaMicros": 0
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011704,
+          "p95": 0.015483,
+          "max": 0.017133,
+          "mad": 0.00022799999999999904
+        },
+        "p50RatioToFill75": 1.0085308056872038,
+        "p95RatioToFill75": 0.8729210125725885,
+        "p95": {
+          "sampleIndex": 16,
+          "sampleNumber": 17,
+          "orderPosition": 3,
+          "elapsedMs": 0.015483
+        },
+        "max": {
+          "sampleIndex": 6,
+          "sampleNumber": 7,
+          "orderPosition": 4,
+          "elapsedMs": 0.017133
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 282.83439799999996,
+          "p95": 294.20796,
+          "max": 308.648764,
+          "mad": 4.118551999999966
+        },
+        "tailRatio": 1.0402127961818848,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": false,
+        "checkpoint": true,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    },
+    {
+      "fillPercent": 86,
+      "graphBytes": 292208640,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3271.435395,
+          "p95": 4095.441501,
+          "max": 4454.426836,
+          "mad": 36.68300099999988
+        },
+        "p95": {
+          "sampleIndex": 6,
+          "sampleNumber": 7,
+          "orderPosition": 5,
+          "elapsedMs": 4095.441501,
+          "elapsedDeltaFromP50Ms": 824.0061059999998,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2650727,
+              "medianMicros": 2603380,
+              "deltaMicros": 47347,
+              "positiveDeltaMicros": 56725
+            },
+            "sync": {
+              "sampleMicros": 963792,
+              "medianMicros": 162363,
+              "deltaMicros": 801429,
+              "positiveDeltaMicros": 801429
+            },
+            "integrity": {
+              "sampleMicros": 307100,
+              "medianMicros": 312026,
+              "deltaMicros": -4926,
+              "positiveDeltaMicros": 0
+            },
+            "publication": {
+              "sampleMicros": 27968,
+              "medianMicros": 29275,
+              "deltaMicros": -1307,
+              "positiveDeltaMicros": 0
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 232589,
+              "sampleMicros": 234508,
+              "deltaMicros": 1919,
+              "positiveDeltaMicros": 1919
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50418,
+              "sampleMicros": 49455,
+              "deltaMicros": -963,
+              "positiveDeltaMicros": 0
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 491592,
+              "sampleMicros": 533717,
+              "deltaMicros": 42125,
+              "positiveDeltaMicros": 42125
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 715751,
+              "sampleMicros": 728410,
+              "deltaMicros": 12659,
+              "positiveDeltaMicros": 12659
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 722205,
+              "sampleMicros": 719626,
+              "deltaMicros": -2579,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11884,
+              "sampleMicros": 11289,
+              "deltaMicros": -595,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 375512,
+              "sampleMicros": 370496,
+              "deltaMicros": -5016,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3411,
+              "sampleMicros": 3186,
+              "deltaMicros": -225,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 40,
+              "deltaMicros": 22,
+              "positiveDeltaMicros": 22
+            },
+            "factSyncMicros": {
+              "medianMicros": 42935,
+              "sampleMicros": 315614,
+              "deltaMicros": 272679,
+              "positiveDeltaMicros": 272679
+            },
+            "dataSyncMicros": {
+              "medianMicros": 118283,
+              "sampleMicros": 646995,
+              "deltaMicros": 528712,
+              "positiveDeltaMicros": 528712
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1145,
+              "sampleMicros": 1183,
+              "deltaMicros": 38,
+              "positiveDeltaMicros": 38
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 312026,
+              "sampleMicros": 307100,
+              "deltaMicros": -4926,
+              "positiveDeltaMicros": 0
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 8,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29262,
+              "sampleMicros": 27955,
+              "deltaMicros": -1307,
+              "positiveDeltaMicros": 0
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 0,
+          "sampleNumber": 1,
+          "orderPosition": 2,
+          "elapsedMs": 4454.426836,
+          "elapsedDeltaFromP50Ms": 1182.9914409999997,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2687100,
+              "medianMicros": 2603380,
+              "deltaMicros": 83720,
+              "positiveDeltaMicros": 98954
+            },
+            "sync": {
+              "sampleMicros": 1247656,
+              "medianMicros": 162363,
+              "deltaMicros": 1085293,
+              "positiveDeltaMicros": 1095192
+            },
+            "integrity": {
+              "sampleMicros": 308307,
+              "medianMicros": 312026,
+              "deltaMicros": -3719,
+              "positiveDeltaMicros": 0
+            },
+            "publication": {
+              "sampleMicros": 26868,
+              "medianMicros": 29275,
+              "deltaMicros": -2407,
+              "positiveDeltaMicros": 1
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 232589,
+              "sampleMicros": 285073,
+              "deltaMicros": 52484,
+              "positiveDeltaMicros": 52484
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50418,
+              "sampleMicros": 69334,
+              "deltaMicros": 18916,
+              "positiveDeltaMicros": 18916
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 491592,
+              "sampleMicros": 477397,
+              "deltaMicros": -14195,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 715751,
+              "sampleMicros": 740031,
+              "deltaMicros": 24280,
+              "positiveDeltaMicros": 24280
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 722205,
+              "sampleMicros": 725475,
+              "deltaMicros": 3270,
+              "positiveDeltaMicros": 3270
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11884,
+              "sampleMicros": 11884,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 375512,
+              "sampleMicros": 375021,
+              "deltaMicros": -491,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3411,
+              "sampleMicros": 2863,
+              "deltaMicros": -548,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 22,
+              "deltaMicros": 4,
+              "positiveDeltaMicros": 4
+            },
+            "factSyncMicros": {
+              "medianMicros": 42935,
+              "sampleMicros": 33097,
+              "deltaMicros": -9838,
+              "positiveDeltaMicros": 0
+            },
+            "dataSyncMicros": {
+              "medianMicros": 118283,
+              "sampleMicros": 1213475,
+              "deltaMicros": 1095192,
+              "positiveDeltaMicros": 1095192
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1145,
+              "sampleMicros": 1084,
+              "deltaMicros": -61,
+              "positiveDeltaMicros": 0
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 312026,
+              "sampleMicros": 308307,
+              "deltaMicros": -3719,
+              "positiveDeltaMicros": 0
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 9,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29262,
+              "sampleMicros": 26854,
+              "deltaMicros": -2408,
+              "positiveDeltaMicros": 0
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011749,
+          "p95": 0.016398000000000003,
+          "max": 0.037870999999999995,
+          "mad": 0.0005230000000000009
+        },
+        "p50RatioToFill75": 1.0124084446359327,
+        "p95RatioToFill75": 0.9245080904324295,
+        "p95": {
+          "sampleIndex": 1,
+          "sampleNumber": 2,
+          "orderPosition": 1,
+          "elapsedMs": 0.016398000000000003
+        },
+        "max": {
+          "sampleIndex": 16,
+          "sampleNumber": 17,
+          "orderPosition": 4,
+          "elapsedMs": 0.037870999999999995
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 283.547276,
+          "p95": 307.066854,
+          "max": 311.601029,
+          "mad": 3.967694999999992
+        },
+        "tailRatio": 1.082947642212581,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": true,
+        "checkpoint": false,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    },
+    {
+      "fillPercent": 87,
+      "graphBytes": 290025472,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3274.760553,
+          "p95": 3496.123481,
+          "max": 4141.66306,
+          "mad": 81.37351799999988
+        },
+        "p95": {
+          "sampleIndex": 17,
+          "sampleNumber": 18,
+          "orderPosition": 4,
+          "elapsedMs": 3496.123481,
+          "elapsedDeltaFromP50Ms": 221.362928,
+          "dominantGroup": "construction",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2771734,
+              "medianMicros": 2606555,
+              "deltaMicros": 165179,
+              "positiveDeltaMicros": 165179
+            },
+            "sync": {
+              "sampleMicros": 178642,
+              "medianMicros": 147147,
+              "deltaMicros": 31495,
+              "positiveDeltaMicros": 31504
+            },
+            "integrity": {
+              "sampleMicros": 353829,
+              "medianMicros": 313596,
+              "deltaMicros": 40233,
+              "positiveDeltaMicros": 40233
+            },
+            "publication": {
+              "sampleMicros": 32335,
+              "medianMicros": 29772,
+              "deltaMicros": 2563,
+              "positiveDeltaMicros": 2563
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 235957,
+              "sampleMicros": 248070,
+              "deltaMicros": 12113,
+              "positiveDeltaMicros": 12113
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50910,
+              "sampleMicros": 53016,
+              "deltaMicros": 2106,
+              "positiveDeltaMicros": 2106
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 490884,
+              "sampleMicros": 517248,
+              "deltaMicros": 26364,
+              "positiveDeltaMicros": 26364
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 721379,
+              "sampleMicros": 754337,
+              "deltaMicros": 32958,
+              "positiveDeltaMicros": 32958
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 716931,
+              "sampleMicros": 770811,
+              "deltaMicros": 53880,
+              "positiveDeltaMicros": 53880
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11871,
+              "sampleMicros": 13053,
+              "deltaMicros": 1182,
+              "positiveDeltaMicros": 1182
+            },
+            "avetBuildMicros": {
+              "medianMicros": 375148,
+              "sampleMicros": 410523,
+              "deltaMicros": 35375,
+              "positiveDeltaMicros": 35375
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3457,
+              "sampleMicros": 4655,
+              "deltaMicros": 1198,
+              "positiveDeltaMicros": 1198
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 21,
+              "deltaMicros": 3,
+              "positiveDeltaMicros": 3
+            },
+            "factSyncMicros": {
+              "medianMicros": 39946,
+              "sampleMicros": 52130,
+              "deltaMicros": 12184,
+              "positiveDeltaMicros": 12184
+            },
+            "dataSyncMicros": {
+              "medianMicros": 106064,
+              "sampleMicros": 125384,
+              "deltaMicros": 19320,
+              "positiveDeltaMicros": 19320
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1137,
+              "sampleMicros": 1128,
+              "deltaMicros": -9,
+              "positiveDeltaMicros": 0
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 313596,
+              "sampleMicros": 353829,
+              "deltaMicros": 40233,
+              "positiveDeltaMicros": 40233
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 9,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29759,
+              "sampleMicros": 32321,
+              "deltaMicros": 2562,
+              "positiveDeltaMicros": 2562
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 12,
+          "sampleNumber": 13,
+          "orderPosition": 0,
+          "elapsedMs": 4141.66306,
+          "elapsedDeltaFromP50Ms": 866.9025069999998,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2573005,
+              "medianMicros": 2606555,
+              "deltaMicros": -33550,
+              "positiveDeltaMicros": 5966
+            },
+            "sync": {
+              "sampleMicros": 1075419,
+              "medianMicros": 147147,
+              "deltaMicros": 928272,
+              "positiveDeltaMicros": 928272
+            },
+            "integrity": {
+              "sampleMicros": 310502,
+              "medianMicros": 313596,
+              "deltaMicros": -3094,
+              "positiveDeltaMicros": 0
+            },
+            "publication": {
+              "sampleMicros": 29831,
+              "medianMicros": 29772,
+              "deltaMicros": 59,
+              "positiveDeltaMicros": 59
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 235957,
+              "sampleMicros": 237295,
+              "deltaMicros": 1338,
+              "positiveDeltaMicros": 1338
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50910,
+              "sampleMicros": 50910,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 490884,
+              "sampleMicros": 467921,
+              "deltaMicros": -22963,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 721379,
+              "sampleMicros": 717329,
+              "deltaMicros": -4050,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 716931,
+              "sampleMicros": 721540,
+              "deltaMicros": 4609,
+              "positiveDeltaMicros": 4609
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11871,
+              "sampleMicros": 11890,
+              "deltaMicros": 19,
+              "positiveDeltaMicros": 19
+            },
+            "avetBuildMicros": {
+              "medianMicros": 375148,
+              "sampleMicros": 362646,
+              "deltaMicros": -12502,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3457,
+              "sampleMicros": 3457,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 17,
+              "deltaMicros": -1,
+              "positiveDeltaMicros": 0
+            },
+            "factSyncMicros": {
+              "medianMicros": 39946,
+              "sampleMicros": 603362,
+              "deltaMicros": 563416,
+              "positiveDeltaMicros": 563416
+            },
+            "dataSyncMicros": {
+              "medianMicros": 106064,
+              "sampleMicros": 470900,
+              "deltaMicros": 364836,
+              "positiveDeltaMicros": 364836
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1137,
+              "sampleMicros": 1157,
+              "deltaMicros": 20,
+              "positiveDeltaMicros": 20
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 313596,
+              "sampleMicros": 310502,
+              "deltaMicros": -3094,
+              "positiveDeltaMicros": 0
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 9,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29759,
+              "sampleMicros": 29816,
+              "deltaMicros": 57,
+              "positiveDeltaMicros": 57
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011515,
+          "p95": 0.014202,
+          "max": 0.027898999999999997,
+          "mad": 0.00023399999999999983
+        },
+        "p50RatioToFill75": 0.9922447221025419,
+        "p95RatioToFill75": 0.8006991035688109,
+        "p95": {
+          "sampleIndex": 15,
+          "sampleNumber": 16,
+          "orderPosition": 6,
+          "elapsedMs": 0.014202
+        },
+        "max": {
+          "sampleIndex": 18,
+          "sampleNumber": 19,
+          "orderPosition": 3,
+          "elapsedMs": 0.027898999999999997
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 283.743417,
+          "p95": 304.362381,
+          "max": 310.122967,
+          "mad": 6.759012000000041
+        },
+        "tailRatio": 1.0726676383121163,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": true,
+        "checkpoint": true,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": true
+      }
+    },
+    {
+      "fillPercent": 88,
+      "graphBytes": 288018432,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3277.457945,
+          "p95": 4557.386557,
+          "max": 4692.347933999999,
+          "mad": 86.74417300000005
+        },
+        "p95": {
+          "sampleIndex": 1,
+          "sampleNumber": 2,
+          "orderPosition": 3,
+          "elapsedMs": 4557.386557,
+          "elapsedDeltaFromP50Ms": 1279.9286119999997,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2720152,
+              "medianMicros": 2618195,
+              "deltaMicros": 101957,
+              "positiveDeltaMicros": 117963
+            },
+            "sync": {
+              "sampleMicros": 1318770,
+              "medianMicros": 143068,
+              "deltaMicros": 1175702,
+              "positiveDeltaMicros": 1175702
+            },
+            "integrity": {
+              "sampleMicros": 311189,
+              "medianMicros": 305663,
+              "deltaMicros": 5526,
+              "positiveDeltaMicros": 5526
+            },
+            "publication": {
+              "sampleMicros": 27532,
+              "medianMicros": 28622,
+              "deltaMicros": -1090,
+              "positiveDeltaMicros": 0
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 232821,
+              "sampleMicros": 295731,
+              "deltaMicros": 62910,
+              "positiveDeltaMicros": 62910
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 51612,
+              "sampleMicros": 70545,
+              "deltaMicros": 18933,
+              "positiveDeltaMicros": 18933
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 494496,
+              "sampleMicros": 479534,
+              "deltaMicros": -14962,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 730166,
+              "sampleMicros": 746627,
+              "deltaMicros": 16461,
+              "positiveDeltaMicros": 16461
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 720371,
+              "sampleMicros": 740026,
+              "deltaMicros": 19655,
+              "positiveDeltaMicros": 19655
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11758,
+              "sampleMicros": 11445,
+              "deltaMicros": -313,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 373650,
+              "sampleMicros": 373190,
+              "deltaMicros": -460,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3306,
+              "sampleMicros": 3035,
+              "deltaMicros": -271,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 15,
+              "sampleMicros": 19,
+              "deltaMicros": 4,
+              "positiveDeltaMicros": 4
+            },
+            "factSyncMicros": {
+              "medianMicros": 38545,
+              "sampleMicros": 875052,
+              "deltaMicros": 836507,
+              "positiveDeltaMicros": 836507
+            },
+            "dataSyncMicros": {
+              "medianMicros": 103396,
+              "sampleMicros": 442567,
+              "deltaMicros": 339171,
+              "positiveDeltaMicros": 339171
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1127,
+              "sampleMicros": 1151,
+              "deltaMicros": 24,
+              "positiveDeltaMicros": 24
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 305663,
+              "sampleMicros": 311189,
+              "deltaMicros": 5526,
+              "positiveDeltaMicros": 5526
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 9,
+              "sampleMicros": 9,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28608,
+              "sampleMicros": 27518,
+              "deltaMicros": -1090,
+              "positiveDeltaMicros": 0
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 17,
+          "sampleNumber": 18,
+          "orderPosition": 5,
+          "elapsedMs": 4692.347933999999,
+          "elapsedDeltaFromP50Ms": 1414.8899889999993,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2561920,
+              "medianMicros": 2618195,
+              "deltaMicros": -56275,
+              "positiveDeltaMicros": 5485
+            },
+            "sync": {
+              "sampleMicros": 1632811,
+              "medianMicros": 143068,
+              "deltaMicros": 1489743,
+              "positiveDeltaMicros": 1495793
+            },
+            "integrity": {
+              "sampleMicros": 313840,
+              "medianMicros": 305663,
+              "deltaMicros": 8177,
+              "positiveDeltaMicros": 8177
+            },
+            "publication": {
+              "sampleMicros": 30815,
+              "medianMicros": 28622,
+              "deltaMicros": 2193,
+              "positiveDeltaMicros": 2194
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 232821,
+              "sampleMicros": 236699,
+              "deltaMicros": 3878,
+              "positiveDeltaMicros": 3878
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 51612,
+              "sampleMicros": 52438,
+              "deltaMicros": 826,
+              "positiveDeltaMicros": 826
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 494496,
+              "sampleMicros": 487615,
+              "deltaMicros": -6881,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 730166,
+              "sampleMicros": 691852,
+              "deltaMicros": -38314,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 720371,
+              "sampleMicros": 706828,
+              "deltaMicros": -13543,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11758,
+              "sampleMicros": 11692,
+              "deltaMicros": -66,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 373650,
+              "sampleMicros": 370694,
+              "deltaMicros": -2956,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3306,
+              "sampleMicros": 4087,
+              "deltaMicros": 781,
+              "positiveDeltaMicros": 781
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 15,
+              "sampleMicros": 15,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "factSyncMicros": {
+              "medianMicros": 38545,
+              "sampleMicros": 32495,
+              "deltaMicros": -6050,
+              "positiveDeltaMicros": 0
+            },
+            "dataSyncMicros": {
+              "medianMicros": 103396,
+              "sampleMicros": 1595687,
+              "deltaMicros": 1492291,
+              "positiveDeltaMicros": 1492291
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1127,
+              "sampleMicros": 4629,
+              "deltaMicros": 3502,
+              "positiveDeltaMicros": 3502
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 305663,
+              "sampleMicros": 313840,
+              "deltaMicros": 8177,
+              "positiveDeltaMicros": 8177
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 9,
+              "sampleMicros": 8,
+              "deltaMicros": -1,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28608,
+              "sampleMicros": 30801,
+              "deltaMicros": 2193,
+              "positiveDeltaMicros": 2193
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011461,
+          "p95": 0.013959,
+          "max": 0.014847,
+          "mad": 0.00028800000000000006
+        },
+        "p50RatioToFill75": 0.9875915553640672,
+        "p95RatioToFill75": 0.7869989287929188,
+        "p95": {
+          "sampleIndex": 0,
+          "sampleNumber": 1,
+          "orderPosition": 4,
+          "elapsedMs": 0.013959
+        },
+        "max": {
+          "sampleIndex": 1,
+          "sampleNumber": 2,
+          "orderPosition": 3,
+          "elapsedMs": 0.014847
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 280.69043300000004,
+          "p95": 294.40249,
+          "max": 311.314476,
+          "mad": 2.99083399999995
+        },
+        "tailRatio": 1.0488511733493957,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": true,
+        "checkpoint": false,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    },
+    {
+      "fillPercent": 89,
+      "graphBytes": 285790208,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3271.3215720000003,
+          "p95": 3873.48064,
+          "max": 4183.941706,
+          "mad": 138.17338999999993
+        },
+        "p95": {
+          "sampleIndex": 13,
+          "sampleNumber": 14,
+          "orderPosition": 1,
+          "elapsedMs": 3873.48064,
+          "elapsedDeltaFromP50Ms": 602.1590679999999,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2636439,
+              "medianMicros": 2586973,
+              "deltaMicros": 49466,
+              "positiveDeltaMicros": 61934
+            },
+            "sync": {
+              "sampleMicros": 739067,
+              "medianMicros": 152636,
+              "deltaMicros": 586431,
+              "positiveDeltaMicros": 593146
+            },
+            "integrity": {
+              "sampleMicros": 316560,
+              "medianMicros": 308827,
+              "deltaMicros": 7733,
+              "positiveDeltaMicros": 7733
+            },
+            "publication": {
+              "sampleMicros": 29554,
+              "medianMicros": 29310,
+              "deltaMicros": 244,
+              "positiveDeltaMicros": 244
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 231793,
+              "sampleMicros": 263168,
+              "deltaMicros": 31375,
+              "positiveDeltaMicros": 31375
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50060,
+              "sampleMicros": 55971,
+              "deltaMicros": 5911,
+              "positiveDeltaMicros": 5911
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 477660,
+              "sampleMicros": 476118,
+              "deltaMicros": -1542,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 724717,
+              "sampleMicros": 748170,
+              "deltaMicros": 23453,
+              "positiveDeltaMicros": 23453
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 716210,
+              "sampleMicros": 705284,
+              "deltaMicros": -10926,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11828,
+              "sampleMicros": 11914,
+              "deltaMicros": 86,
+              "positiveDeltaMicros": 86
+            },
+            "avetBuildMicros": {
+              "medianMicros": 370952,
+              "sampleMicros": 371953,
+              "deltaMicros": 1001,
+              "positiveDeltaMicros": 1001
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3738,
+              "sampleMicros": 3844,
+              "deltaMicros": 106,
+              "positiveDeltaMicros": 106
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 15,
+              "sampleMicros": 17,
+              "deltaMicros": 2,
+              "positiveDeltaMicros": 2
+            },
+            "factSyncMicros": {
+              "medianMicros": 43592,
+              "sampleMicros": 36877,
+              "deltaMicros": -6715,
+              "positiveDeltaMicros": 0
+            },
+            "dataSyncMicros": {
+              "medianMicros": 107910,
+              "sampleMicros": 701007,
+              "deltaMicros": 593097,
+              "positiveDeltaMicros": 593097
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1134,
+              "sampleMicros": 1183,
+              "deltaMicros": 49,
+              "positiveDeltaMicros": 49
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 308827,
+              "sampleMicros": 316560,
+              "deltaMicros": 7733,
+              "positiveDeltaMicros": 7733
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 8,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29297,
+              "sampleMicros": 29541,
+              "deltaMicros": 244,
+              "positiveDeltaMicros": 244
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 4,
+          "sampleNumber": 5,
+          "orderPosition": 1,
+          "elapsedMs": 4183.941706,
+          "elapsedDeltaFromP50Ms": 912.6201339999993,
+          "dominantGroup": "construction",
+          "groups": {
+            "construction": {
+              "sampleMicros": 3517550,
+              "medianMicros": 2586973,
+              "deltaMicros": 930577,
+              "positiveDeltaMicros": 930939
+            },
+            "sync": {
+              "sampleMicros": 121004,
+              "medianMicros": 152636,
+              "deltaMicros": -31632,
+              "positiveDeltaMicros": 90
+            },
+            "integrity": {
+              "sampleMicros": 328193,
+              "medianMicros": 308827,
+              "deltaMicros": 19366,
+              "positiveDeltaMicros": 19366
+            },
+            "publication": {
+              "sampleMicros": 32887,
+              "medianMicros": 29310,
+              "deltaMicros": 3577,
+              "positiveDeltaMicros": 3577
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 231793,
+              "sampleMicros": 329990,
+              "deltaMicros": 98197,
+              "positiveDeltaMicros": 98197
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50060,
+              "sampleMicros": 67489,
+              "deltaMicros": 17429,
+              "positiveDeltaMicros": 17429
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 477660,
+              "sampleMicros": 913073,
+              "deltaMicros": 435413,
+              "positiveDeltaMicros": 435413
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 724717,
+              "sampleMicros": 1055529,
+              "deltaMicros": 330812,
+              "positiveDeltaMicros": 330812
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 716210,
+              "sampleMicros": 760299,
+              "deltaMicros": 44089,
+              "positiveDeltaMicros": 44089
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11828,
+              "sampleMicros": 11718,
+              "deltaMicros": -110,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 370952,
+              "sampleMicros": 375946,
+              "deltaMicros": 4994,
+              "positiveDeltaMicros": 4994
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3738,
+              "sampleMicros": 3486,
+              "deltaMicros": -252,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 15,
+              "sampleMicros": 20,
+              "deltaMicros": 5,
+              "positiveDeltaMicros": 5
+            },
+            "factSyncMicros": {
+              "medianMicros": 43592,
+              "sampleMicros": 25333,
+              "deltaMicros": -18259,
+              "positiveDeltaMicros": 0
+            },
+            "dataSyncMicros": {
+              "medianMicros": 107910,
+              "sampleMicros": 94447,
+              "deltaMicros": -13463,
+              "positiveDeltaMicros": 0
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1134,
+              "sampleMicros": 1224,
+              "deltaMicros": 90,
+              "positiveDeltaMicros": 90
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 308827,
+              "sampleMicros": 328193,
+              "deltaMicros": 19366,
+              "positiveDeltaMicros": 19366
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 10,
+              "deltaMicros": 2,
+              "positiveDeltaMicros": 2
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29297,
+              "sampleMicros": 32871,
+              "deltaMicros": 3574,
+              "positiveDeltaMicros": 3574
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011596,
+          "p95": 0.014761,
+          "max": 0.018178,
+          "mad": 0.0005230000000000009
+        },
+        "p50RatioToFill75": 0.9992244722102541,
+        "p95RatioToFill75": 0.8322151434853696,
+        "p95": {
+          "sampleIndex": 6,
+          "sampleNumber": 7,
+          "orderPosition": 8,
+          "elapsedMs": 0.014761
+        },
+        "max": {
+          "sampleIndex": 16,
+          "sampleNumber": 17,
+          "orderPosition": 7,
+          "elapsedMs": 0.018178
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 282.66258700000003,
+          "p95": 299.324808,
+          "max": 318.064991,
+          "mad": 4.9410120000000575
+        },
+        "tailRatio": 1.0589473873314545,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": true,
+        "checkpoint": false,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    },
+    {
+      "fillPercent": 90,
+      "graphBytes": 282681344,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3303.834827,
+          "p95": 4129.518058000001,
+          "max": 4393.2952270000005,
+          "mad": 106.60318599999982
+        },
+        "p95": {
+          "sampleIndex": 17,
+          "sampleNumber": 18,
+          "orderPosition": 7,
+          "elapsedMs": 4129.518058000001,
+          "elapsedDeltaFromP50Ms": 825.6832310000004,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2722915,
+              "medianMicros": 2588676,
+              "deltaMicros": 134239,
+              "positiveDeltaMicros": 134241
+            },
+            "sync": {
+              "sampleMicros": 892695,
+              "medianMicros": 162619,
+              "deltaMicros": 730076,
+              "positiveDeltaMicros": 752262
+            },
+            "integrity": {
+              "sampleMicros": 320341,
+              "medianMicros": 303561,
+              "deltaMicros": 16780,
+              "positiveDeltaMicros": 16780
+            },
+            "publication": {
+              "sampleMicros": 33377,
+              "medianMicros": 29443,
+              "deltaMicros": 3934,
+              "positiveDeltaMicros": 3934
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 234239,
+              "sampleMicros": 255040,
+              "deltaMicros": 20801,
+              "positiveDeltaMicros": 20801
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50868,
+              "sampleMicros": 54231,
+              "deltaMicros": 3363,
+              "positiveDeltaMicros": 3363
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 482727,
+              "sampleMicros": 489363,
+              "deltaMicros": 6636,
+              "positiveDeltaMicros": 6636
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 709696,
+              "sampleMicros": 741277,
+              "deltaMicros": 31581,
+              "positiveDeltaMicros": 31581
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 723979,
+              "sampleMicros": 767930,
+              "deltaMicros": 43951,
+              "positiveDeltaMicros": 43951
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11902,
+              "sampleMicros": 12933,
+              "deltaMicros": 1031,
+              "positiveDeltaMicros": 1031
+            },
+            "avetBuildMicros": {
+              "medianMicros": 371241,
+              "sampleMicros": 398119,
+              "deltaMicros": 26878,
+              "positiveDeltaMicros": 26878
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 4007,
+              "sampleMicros": 4007,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 17,
+              "sampleMicros": 15,
+              "deltaMicros": -2,
+              "positiveDeltaMicros": 0
+            },
+            "factSyncMicros": {
+              "medianMicros": 45684,
+              "sampleMicros": 23498,
+              "deltaMicros": -22186,
+              "positiveDeltaMicros": 0
+            },
+            "dataSyncMicros": {
+              "medianMicros": 115797,
+              "sampleMicros": 868026,
+              "deltaMicros": 752229,
+              "positiveDeltaMicros": 752229
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1138,
+              "sampleMicros": 1171,
+              "deltaMicros": 33,
+              "positiveDeltaMicros": 33
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 303561,
+              "sampleMicros": 320341,
+              "deltaMicros": 16780,
+              "positiveDeltaMicros": 16780
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 11,
+              "deltaMicros": 3,
+              "positiveDeltaMicros": 3
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29430,
+              "sampleMicros": 33360,
+              "deltaMicros": 3930,
+              "positiveDeltaMicros": 3930
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 13,
+          "sampleNumber": 14,
+          "orderPosition": 2,
+          "elapsedMs": 4393.2952270000005,
+          "elapsedDeltaFromP50Ms": 1089.4604000000004,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2617016,
+              "medianMicros": 2588676,
+              "deltaMicros": 28340,
+              "positiveDeltaMicros": 41259
+            },
+            "sync": {
+              "sampleMicros": 1281534,
+              "medianMicros": 162619,
+              "deltaMicros": 1118915,
+              "positiveDeltaMicros": 1118915
+            },
+            "integrity": {
+              "sampleMicros": 314062,
+              "medianMicros": 303561,
+              "deltaMicros": 10501,
+              "positiveDeltaMicros": 10501
+            },
+            "publication": {
+              "sampleMicros": 30116,
+              "medianMicros": 29443,
+              "deltaMicros": 673,
+              "positiveDeltaMicros": 674
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 234239,
+              "sampleMicros": 237594,
+              "deltaMicros": 3355,
+              "positiveDeltaMicros": 3355
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50868,
+              "sampleMicros": 51410,
+              "deltaMicros": 542,
+              "positiveDeltaMicros": 542
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 482727,
+              "sampleMicros": 505829,
+              "deltaMicros": 23102,
+              "positiveDeltaMicros": 23102
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 709696,
+              "sampleMicros": 709696,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 723979,
+              "sampleMicros": 737768,
+              "deltaMicros": 13789,
+              "positiveDeltaMicros": 13789
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11902,
+              "sampleMicros": 12347,
+              "deltaMicros": 445,
+              "positiveDeltaMicros": 445
+            },
+            "avetBuildMicros": {
+              "medianMicros": 371241,
+              "sampleMicros": 359063,
+              "deltaMicros": -12178,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 4007,
+              "sampleMicros": 3266,
+              "deltaMicros": -741,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 17,
+              "sampleMicros": 43,
+              "deltaMicros": 26,
+              "positiveDeltaMicros": 26
+            },
+            "factSyncMicros": {
+              "medianMicros": 45684,
+              "sampleMicros": 233902,
+              "deltaMicros": 188218,
+              "positiveDeltaMicros": 188218
+            },
+            "dataSyncMicros": {
+              "medianMicros": 115797,
+              "sampleMicros": 1046308,
+              "deltaMicros": 930511,
+              "positiveDeltaMicros": 930511
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1138,
+              "sampleMicros": 1324,
+              "deltaMicros": 186,
+              "positiveDeltaMicros": 186
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 303561,
+              "sampleMicros": 314062,
+              "deltaMicros": 10501,
+              "positiveDeltaMicros": 10501
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 7,
+              "deltaMicros": -1,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29430,
+              "sampleMicros": 30104,
+              "deltaMicros": 674,
+              "positiveDeltaMicros": 674
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011434,
+          "p95": 0.014364,
+          "max": 0.017241,
+          "mad": 0.00033399999999999923
+        },
+        "p50RatioToFill75": 0.9852649719948298,
+        "p95RatioToFill75": 0.8098325534194057,
+        "p95": {
+          "sampleIndex": 4,
+          "sampleNumber": 5,
+          "orderPosition": 2,
+          "elapsedMs": 0.014364
+        },
+        "max": {
+          "sampleIndex": 2,
+          "sampleNumber": 3,
+          "orderPosition": 4,
+          "elapsedMs": 0.017241
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 283.95089099999996,
+          "p95": 303.589736,
+          "max": 305.742801,
+          "mad": 6.31186699999995
+        },
+        "tailRatio": 1.0691628222430902,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": true,
+        "checkpoint": false,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    },
+    {
+      "fillPercent": 95,
+      "graphBytes": 270737408,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3245.754795,
+          "p95": 4347.636346,
+          "max": 5764.176375,
+          "mad": 101.75574099999994
+        },
+        "p95": {
+          "sampleIndex": 1,
+          "sampleNumber": 2,
+          "orderPosition": 6,
+          "elapsedMs": 4347.636346,
+          "elapsedDeltaFromP50Ms": 1101.8815510000004,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2631129,
+              "medianMicros": 2549085,
+              "deltaMicros": 82044,
+              "positiveDeltaMicros": 108198
+            },
+            "sync": {
+              "sampleMicros": 1236874,
+              "medianMicros": 159974,
+              "deltaMicros": 1076900,
+              "positiveDeltaMicros": 1087535
+            },
+            "integrity": {
+              "sampleMicros": 283606,
+              "medianMicros": 290307,
+              "deltaMicros": -6701,
+              "positiveDeltaMicros": 0
+            },
+            "publication": {
+              "sampleMicros": 27904,
+              "medianMicros": 29005,
+              "deltaMicros": -1101,
+              "positiveDeltaMicros": 1
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 235460,
+              "sampleMicros": 281890,
+              "deltaMicros": 46430,
+              "positiveDeltaMicros": 46430
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 51756,
+              "sampleMicros": 67849,
+              "deltaMicros": 16093,
+              "positiveDeltaMicros": 16093
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 484479,
+              "sampleMicros": 507332,
+              "deltaMicros": 22853,
+              "positiveDeltaMicros": 22853
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 702235,
+              "sampleMicros": 725057,
+              "deltaMicros": 22822,
+              "positiveDeltaMicros": 22822
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 698393,
+              "sampleMicros": 678835,
+              "deltaMicros": -19558,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11826,
+              "sampleMicros": 11545,
+              "deltaMicros": -281,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 361195,
+              "sampleMicros": 355885,
+              "deltaMicros": -5310,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3723,
+              "sampleMicros": 2720,
+              "deltaMicros": -1003,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 16,
+              "deltaMicros": -2,
+              "positiveDeltaMicros": 0
+            },
+            "factSyncMicros": {
+              "medianMicros": 49427,
+              "sampleMicros": 38837,
+              "deltaMicros": -10590,
+              "positiveDeltaMicros": 0
+            },
+            "dataSyncMicros": {
+              "medianMicros": 109414,
+              "sampleMicros": 1196949,
+              "deltaMicros": 1087535,
+              "positiveDeltaMicros": 1087535
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1133,
+              "sampleMicros": 1088,
+              "deltaMicros": -45,
+              "positiveDeltaMicros": 0
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 290307,
+              "sampleMicros": 283606,
+              "deltaMicros": -6701,
+              "positiveDeltaMicros": 0
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 8,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28992,
+              "sampleMicros": 27890,
+              "deltaMicros": -1102,
+              "positiveDeltaMicros": 0
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 13,
+          "sampleNumber": 14,
+          "orderPosition": 3,
+          "elapsedMs": 5764.176375,
+          "elapsedDeltaFromP50Ms": 2518.42158,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2436223,
+              "medianMicros": 2549085,
+              "deltaMicros": -112862,
+              "positiveDeltaMicros": 202
+            },
+            "sync": {
+              "sampleMicros": 2852177,
+              "medianMicros": 159974,
+              "deltaMicros": 2692203,
+              "positiveDeltaMicros": 2692282
+            },
+            "integrity": {
+              "sampleMicros": 299340,
+              "medianMicros": 290307,
+              "deltaMicros": 9033,
+              "positiveDeltaMicros": 9033
+            },
+            "publication": {
+              "sampleMicros": 29080,
+              "medianMicros": 29005,
+              "deltaMicros": 75,
+              "positiveDeltaMicros": 75
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 235460,
+              "sampleMicros": 226810,
+              "deltaMicros": -8650,
+              "positiveDeltaMicros": 0
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 51756,
+              "sampleMicros": 50120,
+              "deltaMicros": -1636,
+              "positiveDeltaMicros": 0
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 484479,
+              "sampleMicros": 448697,
+              "deltaMicros": -35782,
+              "positiveDeltaMicros": 0
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 702235,
+              "sampleMicros": 655756,
+              "deltaMicros": -46479,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 698393,
+              "sampleMicros": 678816,
+              "deltaMicros": -19577,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11826,
+              "sampleMicros": 12028,
+              "deltaMicros": 202,
+              "positiveDeltaMicros": 202
+            },
+            "avetBuildMicros": {
+              "medianMicros": 361195,
+              "sampleMicros": 361195,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3723,
+              "sampleMicros": 2787,
+              "deltaMicros": -936,
+              "positiveDeltaMicros": 0
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 18,
+              "sampleMicros": 14,
+              "deltaMicros": -4,
+              "positiveDeltaMicros": 0
+            },
+            "factSyncMicros": {
+              "medianMicros": 49427,
+              "sampleMicros": 488148,
+              "deltaMicros": 438721,
+              "positiveDeltaMicros": 438721
+            },
+            "dataSyncMicros": {
+              "medianMicros": 109414,
+              "sampleMicros": 2362975,
+              "deltaMicros": 2253561,
+              "positiveDeltaMicros": 2253561
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1133,
+              "sampleMicros": 1054,
+              "deltaMicros": -79,
+              "positiveDeltaMicros": 0
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 290307,
+              "sampleMicros": 299340,
+              "deltaMicros": 9033,
+              "positiveDeltaMicros": 9033
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 5,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishWriteMicros": {
+              "medianMicros": 8,
+              "sampleMicros": 8,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 28992,
+              "sampleMicros": 29067,
+              "deltaMicros": 75,
+              "positiveDeltaMicros": 75
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011055,
+          "p95": 0.013615,
+          "max": 0.014081,
+          "mad": 0.00024400000000000116
+        },
+        "p50RatioToFill75": 0.95260663507109,
+        "p95RatioToFill75": 0.7676044426904212,
+        "p95": {
+          "sampleIndex": 6,
+          "sampleNumber": 7,
+          "orderPosition": 1,
+          "elapsedMs": 0.013615
+        },
+        "max": {
+          "sampleIndex": 1,
+          "sampleNumber": 2,
+          "orderPosition": 6,
+          "elapsedMs": 0.014081
+        },
+        "failureShape": "passes-relative-gate"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 277.04774799999996,
+          "p95": 294.221183,
+          "max": 313.010429,
+          "mad": 3.660580999999979
+        },
+        "tailRatio": 1.061987275204273,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": true,
+        "checkpoint": false,
+        "point": true,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    },
+    {
+      "fillPercent": 100,
+      "graphBytes": 260124672,
+      "checkpoint": {
+        "statsMs": {
+          "p50": 3196.428483,
+          "p95": 3781.967567,
+          "max": 4091.539622,
+          "mad": 106.35441500000024
+        },
+        "p95": {
+          "sampleIndex": 11,
+          "sampleNumber": 12,
+          "orderPosition": 6,
+          "elapsedMs": 3781.967567,
+          "elapsedDeltaFromP50Ms": 585.539084,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2793134,
+              "medianMicros": 2488629,
+              "deltaMicros": 304505,
+              "positiveDeltaMicros": 345298
+            },
+            "sync": {
+              "sampleMicros": 527265,
+              "medianMicros": 140326,
+              "deltaMicros": 386939,
+              "positiveDeltaMicros": 400177
+            },
+            "integrity": {
+              "sampleMicros": 281920,
+              "medianMicros": 281346,
+              "deltaMicros": 574,
+              "positiveDeltaMicros": 574
+            },
+            "publication": {
+              "sampleMicros": 30675,
+              "medianMicros": 29246,
+              "deltaMicros": 1429,
+              "positiveDeltaMicros": 1429
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 232050,
+              "sampleMicros": 225803,
+              "deltaMicros": -6247,
+              "positiveDeltaMicros": 0
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50638,
+              "sampleMicros": 55688,
+              "deltaMicros": 5050,
+              "positiveDeltaMicros": 5050
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 480284,
+              "sampleMicros": 800940,
+              "deltaMicros": 320656,
+              "positiveDeltaMicros": 320656
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 681345,
+              "sampleMicros": 700768,
+              "deltaMicros": 19423,
+              "positiveDeltaMicros": 19423
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 681475,
+              "sampleMicros": 671387,
+              "deltaMicros": -10088,
+              "positiveDeltaMicros": 0
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11658,
+              "sampleMicros": 11568,
+              "deltaMicros": -90,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 347478,
+              "sampleMicros": 323110,
+              "deltaMicros": -24368,
+              "positiveDeltaMicros": 0
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3685,
+              "sampleMicros": 3854,
+              "deltaMicros": 169,
+              "positiveDeltaMicros": 169
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 16,
+              "sampleMicros": 16,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "factSyncMicros": {
+              "medianMicros": 49268,
+              "sampleMicros": 449291,
+              "deltaMicros": 400023,
+              "positiveDeltaMicros": 400023
+            },
+            "dataSyncMicros": {
+              "medianMicros": 89940,
+              "sampleMicros": 76702,
+              "deltaMicros": -13238,
+              "positiveDeltaMicros": 0
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1118,
+              "sampleMicros": 1272,
+              "deltaMicros": 154,
+              "positiveDeltaMicros": 154
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 281346,
+              "sampleMicros": 281920,
+              "deltaMicros": 574,
+              "positiveDeltaMicros": 574
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 9,
+              "sampleMicros": 10,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29232,
+              "sampleMicros": 30659,
+              "deltaMicros": 1427,
+              "positiveDeltaMicros": 1427
+            }
+          }
+        },
+        "max": {
+          "sampleIndex": 19,
+          "sampleNumber": 20,
+          "orderPosition": 7,
+          "elapsedMs": 4091.539622,
+          "elapsedDeltaFromP50Ms": 895.1111389999996,
+          "dominantGroup": "sync",
+          "groups": {
+            "construction": {
+              "sampleMicros": 2551751,
+              "medianMicros": 2488629,
+              "deltaMicros": 63122,
+              "positiveDeltaMicros": 65431
+            },
+            "sync": {
+              "sampleMicros": 1073003,
+              "medianMicros": 140326,
+              "deltaMicros": 932677,
+              "positiveDeltaMicros": 932677
+            },
+            "integrity": {
+              "sampleMicros": 289922,
+              "medianMicros": 281346,
+              "deltaMicros": 8576,
+              "positiveDeltaMicros": 8576
+            },
+            "publication": {
+              "sampleMicros": 29113,
+              "medianMicros": 29246,
+              "deltaMicros": -133,
+              "positiveDeltaMicros": 2
+            }
+          },
+          "phases": {
+            "factPackingMicros": {
+              "medianMicros": 232050,
+              "sampleMicros": 230790,
+              "deltaMicros": -1260,
+              "positiveDeltaMicros": 0
+            },
+            "committedIndexReadMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "pendingIndexSortMicros": {
+              "medianMicros": 50638,
+              "sampleMicros": 52997,
+              "deltaMicros": 2359,
+              "positiveDeltaMicros": 2359
+            },
+            "eavtCollectSortMicros": {
+              "medianMicros": 480284,
+              "sampleMicros": 513266,
+              "deltaMicros": 32982,
+              "positiveDeltaMicros": 32982
+            },
+            "eavtBuildMicros": {
+              "medianMicros": 681345,
+              "sampleMicros": 680402,
+              "deltaMicros": -943,
+              "positiveDeltaMicros": 0
+            },
+            "aevtCollectSortMicros": {
+              "medianMicros": 0,
+              "sampleMicros": 0,
+              "deltaMicros": 0,
+              "positiveDeltaMicros": 0
+            },
+            "aevtBuildMicros": {
+              "medianMicros": 681475,
+              "sampleMicros": 699270,
+              "deltaMicros": 17795,
+              "positiveDeltaMicros": 17795
+            },
+            "avetCollectSortMicros": {
+              "medianMicros": 11658,
+              "sampleMicros": 11552,
+              "deltaMicros": -106,
+              "positiveDeltaMicros": 0
+            },
+            "avetBuildMicros": {
+              "medianMicros": 347478,
+              "sampleMicros": 359703,
+              "deltaMicros": 12225,
+              "positiveDeltaMicros": 12225
+            },
+            "vaetCollectSortMicros": {
+              "medianMicros": 3685,
+              "sampleMicros": 3752,
+              "deltaMicros": 67,
+              "positiveDeltaMicros": 67
+            },
+            "vaetBuildMicros": {
+              "medianMicros": 16,
+              "sampleMicros": 19,
+              "deltaMicros": 3,
+              "positiveDeltaMicros": 3
+            },
+            "factSyncMicros": {
+              "medianMicros": 49268,
+              "sampleMicros": 500454,
+              "deltaMicros": 451186,
+              "positiveDeltaMicros": 451186
+            },
+            "dataSyncMicros": {
+              "medianMicros": 89940,
+              "sampleMicros": 571330,
+              "deltaMicros": 481390,
+              "positiveDeltaMicros": 481390
+            },
+            "publishSyncMicros": {
+              "medianMicros": 1118,
+              "sampleMicros": 1219,
+              "deltaMicros": 101,
+              "positiveDeltaMicros": 101
+            },
+            "integrityCatalogMicros": {
+              "medianMicros": 281346,
+              "sampleMicros": 289922,
+              "deltaMicros": 8576,
+              "positiveDeltaMicros": 8576
+            },
+            "headerAssemblyMicros": {
+              "medianMicros": 5,
+              "sampleMicros": 6,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishWriteMicros": {
+              "medianMicros": 9,
+              "sampleMicros": 10,
+              "deltaMicros": 1,
+              "positiveDeltaMicros": 1
+            },
+            "publishFinalizeMicros": {
+              "medianMicros": 29232,
+              "sampleMicros": 29097,
+              "deltaMicros": -135,
+              "positiveDeltaMicros": 0
+            }
+          }
+        }
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011515,
+          "p95": 0.037439,
+          "max": 0.043219,
+          "mad": 0.0003609999999999985
+        },
+        "p50RatioToFill75": 0.9922447221025419,
+        "p95RatioToFill75": 2.1107853639285112,
+        "p95": {
+          "sampleIndex": 11,
+          "sampleNumber": 12,
+          "orderPosition": 6,
+          "elapsedMs": 0.037439
+        },
+        "max": {
+          "sampleIndex": 19,
+          "sampleNumber": 20,
+          "orderPosition": 7,
+          "elapsedMs": 0.043219
+        },
+        "failureShape": "tail-only"
+      },
+      "aggregate": {
+        "statsMs": {
+          "p50": 278.722324,
+          "p95": 297.34776400000004,
+          "max": 301.45765800000004,
+          "mad": 5.278601999999978
+        },
+        "tailRatio": 1.0668243567027664,
+        "gatePassed": true
+      },
+      "gates": {
+        "size": true,
+        "checkpoint": false,
+        "point": false,
+        "aggregate": true,
+        "rss": true,
+        "passed": false
+      }
+    }
+  ],
+  "verdict": {
+    "checkpoint": {
+      "ownerCounts": {
+        "construction": 0,
+        "sync": 6,
+        "integrity": 0,
+        "publication": 0
+      },
+      "commonOwner": "sync",
+      "commonOwnerFillCount": 6,
+      "positionCounts": {
+        "0": 1,
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "5": 2,
+        "6": 3,
+        "7": 2
+      },
+      "fixedPositionBias": false,
+      "classification": "host-io-variance",
+      "implementationAdmitted": false
+    },
+    "point": {
+      "systematicFills": [],
+      "tailOnlyFills": [
+        100
+      ],
+      "classification": "tail-only-or-passing",
+      "nextSlice": null
+    },
+    "rollout": {
+      "sourceSelectedFillPercent": 87,
+      "productionFillPercent": 87,
+      "authorized": true
+    }
+  }
+}

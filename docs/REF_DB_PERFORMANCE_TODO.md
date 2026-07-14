@@ -40,6 +40,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Attribute point-path density cost. The clean `vicia.point-path-density.v1` full receipt keeps tree height, raw leaf codec, leaf comparisons/decodes, and cached fact resolution effectively fixed across fills. Internal separator comparisons grow from 35 at fill 75 to 61/67/75 at fill 85/90/100; internal descent median grows from 5.004 microseconds to 8.548/9.198/10.387 microseconds and correlates with point p50 at 0.991. This admits only an internal separator binary-search repair.
 - [x] Binary-search internal separators. The repair preserves the first-separator-greater-than-key child rule and reduces full-receipt comparisons from 35/61/67/47/75 to 16/16/14/14/15 at fill 75/85/90/95/100. Point p50 becomes 0.00787/0.00776/0.00752/0.00739/0.00760 ms and candidate p95 is at most 0.01039 ms; all high fills pass the 20% relative gate with unchanged v12 bytes and exact result diagnostics.
 - [x] Rerun the complete v12 acceptance matrix from the binary-search source. Every fill passes point, aggregate, and RSS gates. Fill 85 passes checkpoint but misses the size gate; size-valid fills 90/95/100 fail only the checkpoint-tail gate. The mutation-audited variance report attributes the common tail to sync without fixed-position bias and admits no implementation. `selectedFillPercent` remains `null`, production remains at fill 75, and the Vetch browser package remains unchanged.
+- [x] Measure the exact fill frontier instead of rerunning the coarse matrix. The clean `vicia.storage-layout.v3` full receipt adds fill 86/87/88/89 under the same 20-run rotated contract and selects fill 87. Its 276.590 MiB image is 11.93% smaller than fill 75; checkpoint p50/p95 is 3,274.761/3,496.123 ms, point p95 is 0.01420 ms, aggregate p50/p95 is 283.743/304.362 ms, and query RSS p95 is 0.125 MiB. Receipt and variance mutation audits pass; this measurement leaves the current source default at fill 90 and does not replace the Vetch package.
 
 ## Regression gates
 
@@ -51,20 +52,17 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-### Status: v12 rollout remains blocked; no production slice is admitted
+### Status: fill 87 is selected; production promotion is the next slice
 
-- The point-path and current-aggregate work are closed. The only gate blocking
-  the size-valid fills in the latest clean full matrix is checkpoint tail.
-- The measured tail is sync-owned host-I/O variance without fixed-position
-  bias. Do not weaken durability sync, alter receipt-owned gates, rerun until
-  green, or add another checkpoint construction repair from this evidence.
-- The v5 SQLite comparison improves the reference measurement contract but does
-  not change the v12 checkpoint-tail classification or admit production code.
-- Keep `selectedFillPercent = null`, production fill 75, and the current Vetch
-  browser package. There is no Vicia-to-Vetch package propagation from this
-  slice.
-- Reopen rollout only when a controlled host-I/O acceptance condition or new
-  production-owned checkpoint bottleneck provides evidence that changes this
-  classification. Any future passing candidate still requires canonical
-  validation, mutation audit, full Rust/fmt/Clippy/WASM gates, and real Chrome
-  before complete-package replacement.
+- Promote the B-tree bulk-build default from the current fill 90 to the
+  receipt-selected fill 87. This changes packing policy only; v12 bytes remain
+  readable by the existing raw/prefix readers and require no migration.
+- Run the full Rust suite, fmt, Clippy, WASM browser build, canonical receipt
+  validation/mutation audits, and the real-Chrome suite after the production
+  constant changes.
+- Replace the complete Vetch browser package only after those gates pass. Sync
+  JavaScript glue, typings, manifest, `.wasm`, and provenance together; do not
+  replace the `.wasm` alone.
+- Keep durability sync and the receipt-owned gates unchanged. The frontier
+  receipt admits fill 87; it does not admit checkpoint construction work for
+  the sync-owned tails of the other candidates.

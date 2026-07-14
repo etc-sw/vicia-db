@@ -1914,6 +1914,22 @@ not admitted by this evidence. The canonical receipt and variance report are
 preserved under
 `benchmarks/baselines/storage-layout/2026-07-14-hal7800-binary-search-full/`.
 
+The clean frontier run at source `ca6475a` advances new receipts to
+`vicia.storage-layout.v3` and adds fill 86/87/88/89 without weakening the exact
+historical v2 candidate contract. Twenty rotated fresh-child checkpoint and
+query samples select fill 87 as the only candidate that passes every gate. Its
+276.590 MiB image is 11.93% smaller than fill 75; checkpoint p50/p95 is
+3,274.761/3,496.123 ms, point p50/p95 is 0.01152/0.01420 ms, aggregate p50/p95
+is 283.743/304.362 ms, and query RSS p95 is 0.125 MiB. Exact count/checksum,
+owned-decode, and full-leaf structural invariants remain green. The
+mutation-audited variance report classifies the non-selected checkpoint tails
+as sync-owned host-I/O variance without fixed-position bias.
+
+This receipt admits a separate production-promotion slice; it does not itself
+change the current source default from fill 90 or replace the Vetch browser
+package. Canonical evidence is preserved under
+`benchmarks/baselines/storage-layout/2026-07-14-hal7800-v12-fill-frontier-full/`.
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full
