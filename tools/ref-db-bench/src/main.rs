@@ -5,6 +5,7 @@ use grafeo::{GrafeoDB, Value as GrafeoValue};
 use minigraf::{OpenOptions, QueryResult};
 use redb::{Database as RedbDatabase, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use sqlite::State as SqliteState;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ enum Engine {
     Fjall,
     Turso,
     Cozo,
+    Sqlite,
 }
 
 impl Engine {
@@ -34,6 +36,7 @@ impl Engine {
             "fjall" => Ok(Self::Fjall),
             "turso" => Ok(Self::Turso),
             "cozo" => Ok(Self::Cozo),
+            "sqlite" => Ok(Self::Sqlite),
             _ => bail!("unknown engine: {value}"),
         }
     }
@@ -46,6 +49,7 @@ impl Engine {
             Self::Fjall => "fjall",
             Self::Turso => "turso",
             Self::Cozo => "cozo",
+            Self::Sqlite => "sqlite",
         }
     }
 
@@ -57,6 +61,7 @@ impl Engine {
             Self::Fjall => "LSM KV storage floor",
             Self::Turso => "embedded SQL peer",
             Self::Cozo => "embedded Datalog peer",
+            Self::Sqlite => "embedded SQL reference",
         }
     }
 
@@ -66,8 +71,77 @@ impl Engine {
             Self::Grafeo => "engineAggregate",
             Self::Turso => "engineAggregate",
             Self::Cozo => "engineAggregate",
+            Self::Sqlite => "engineAggregate",
             Self::Redb => "ownedResultScan",
             Self::Fjall => "ownedResultScan",
+        }
+    }
+
+    fn adapter_schema(self) -> &'static str {
+        match self {
+            Self::Vicia => {
+                "EAV ledger fact: entity + attribute + integer value + bi-temporal identity"
+            }
+            Self::Grafeo => "Fact node: integer entity property + integer value property",
+            Self::Redb | Self::Fjall => "integer key -> integer value",
+            Self::Turso | Self::Sqlite => {
+                "facts(entity INTEGER PRIMARY KEY, value INTEGER NOT NULL)"
+            }
+            Self::Cozo => "facts {entity: Int => value: Int}",
+        }
+    }
+
+    fn semantic_scope(self) -> &'static str {
+        match self {
+            Self::Vicia => "native bi-temporal current projection",
+            Self::Redb | Self::Fjall => "owned KV scan storage floor",
+            _ => "common current entity/value projection",
+        }
+    }
+
+    fn durability(self) -> BTreeMap<String, String> {
+        let pairs: &[(&str, &str)] = match self {
+            Self::Vicia => &[
+                ("batch", "1000 facts per ledger transaction"),
+                ("barrier", "checkpoint then close"),
+            ],
+            Self::Redb => &[
+                ("batch", "1000 entries per write transaction"),
+                ("barrier", "transaction commit then close"),
+            ],
+            Self::Fjall => &[
+                ("batch", "1000 entries per database batch"),
+                ("barrier", "batch commit then close"),
+            ],
+            Self::Grafeo => &[
+                ("batch", "engine-native node writes"),
+                ("barrier", "database close"),
+            ],
+            Self::Turso => &[
+                ("batch", "1000 rows per SQL transaction"),
+                ("barrier", "COMMIT then close"),
+            ],
+            Self::Cozo => &[
+                ("batch", "1000 rows per :put"),
+                ("barrier", "mutable script completion then close"),
+            ],
+            Self::Sqlite => &[
+                ("batch", "1000 rows per SQL transaction"),
+                ("barrier", "COMMIT then close"),
+                ("journalMode", "delete"),
+                ("synchronous", "full"),
+            ],
+        };
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    fn runtime_version(self) -> Option<String> {
+        match self {
+            Self::Sqlite => Some(format!("sqlite {} (crate 0.36.0)", sqlite::version())),
+            _ => None,
         }
     }
 }
@@ -80,18 +154,37 @@ struct Receipt {
     role: &'static str,
     execution_boundary: &'static str,
     facts: u64,
-    build_ms: f64,
-    point_read_samples_ms: Vec<f64>,
-    aggregate_samples_ms: Vec<f64>,
-    count: u64,
-    checksum: i128,
-    memory: MemoryMeasurement,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+    order_position: usize,
+    adapter_schema: &'static str,
+    semantic_scope: &'static str,
+    durability: BTreeMap<String, String>,
+    runtime_version: Option<String>,
+    build: BuildMeasurement,
+    query: QueryMeasurement,
+    reopen_verified: bool,
     storage_bytes: u64,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MemoryMeasurement {
+struct BuildMeasurement {
+    elapsed_ms: f64,
+    baseline_rss_bytes: u64,
+    peak_rss_bytes: u64,
+    process_delta: ProcessCounters,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryMeasurement {
+    open_ms: f64,
+    first_read_ms: f64,
+    point_hot: PointMeasurement,
+    point_distributed: PointMeasurement,
+    point_miss: PointMeasurement,
     aggregate_samples_ms: Vec<f64>,
     count: u64,
     checksum: i128,
@@ -102,6 +195,34 @@ struct MemoryMeasurement {
     baseline_breakdown: MemoryBreakdown,
     retained_breakdown: MemoryBreakdown,
     retained_delta_breakdown: MemoryBreakdown,
+    process_delta: ProcessCounters,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PointMeasurement {
+    operations_per_sample: usize,
+    samples_ms_per_operation: Vec<f64>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessCounters {
+    read_bytes: u64,
+    write_bytes: u64,
+    minor_faults: u64,
+    major_faults: u64,
+}
+
+impl ProcessCounters {
+    fn saturating_sub(self, baseline: Self) -> Self {
+        Self {
+            read_bytes: self.read_bytes.saturating_sub(baseline.read_bytes),
+            write_bytes: self.write_bytes.saturating_sub(baseline.write_bytes),
+            minor_faults: self.minor_faults.saturating_sub(baseline.minor_faults),
+            major_faults: self.major_faults.saturating_sub(baseline.major_faults),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -135,23 +256,29 @@ impl MemoryBreakdown {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() == 5 && args[1] == "measure" {
+    if args.len() == 7 && args[1] == "measure" {
         let measurement = measure_fresh(
             Engine::parse(&args[2])?,
             Path::new(&args[3]),
             args[4].parse()?,
+            args[5].parse()?,
+            args[6].parse()?,
         )
         .await?;
         println!("{}", serde_json::to_string(&measurement)?);
         return Ok(());
     }
-    if args.len() != 6 || args[1] != "run" {
-        bail!("usage: vicia-ref-db-bench run <engine> <data-dir> <facts> <repetitions>");
+    if args.len() != 8 || args[1] != "run" {
+        bail!(
+            "usage: vicia-ref-db-bench run <engine> <data-dir> <facts> <repetitions> <trial> <seed>"
+        );
     }
     let engine = Engine::parse(&args[2])?;
     let dir = PathBuf::from(&args[3]);
     let facts = args[4].parse::<u64>()?;
     let repetitions = args[5].parse::<usize>()?;
+    let trial = args[6].parse::<usize>()?;
+    let seed = args[7].parse::<u64>()?;
     if facts == 0 || repetitions == 0 {
         bail!("facts and repetitions must be positive");
     }
@@ -161,12 +288,13 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&dir)?;
 
     let receipt = match engine {
-        Engine::Vicia => run_vicia(engine, &dir, facts, repetitions)?,
-        Engine::Grafeo => run_grafeo(engine, &dir, facts, repetitions)?,
-        Engine::Redb => run_redb(engine, &dir, facts, repetitions)?,
-        Engine::Fjall => run_fjall(engine, &dir, facts, repetitions)?,
-        Engine::Turso => run_turso(engine, &dir, facts, repetitions).await?,
-        Engine::Cozo => run_cozo(engine, &dir, facts, repetitions)?,
+        Engine::Vicia => run_vicia(engine, &dir, facts, repetitions, trial, seed)?,
+        Engine::Grafeo => run_grafeo(engine, &dir, facts, repetitions, trial, seed)?,
+        Engine::Redb => run_redb(engine, &dir, facts, repetitions, trial, seed)?,
+        Engine::Fjall => run_fjall(engine, &dir, facts, repetitions, trial, seed)?,
+        Engine::Turso => run_turso(engine, &dir, facts, repetitions, trial, seed).await?,
+        Engine::Cozo => run_cozo(engine, &dir, facts, repetitions, trial, seed)?,
+        Engine::Sqlite => run_sqlite(engine, &dir, facts, repetitions, trial, seed)?,
     };
     println!("{}", serde_json::to_string(&receipt)?);
     Ok(())
@@ -176,48 +304,53 @@ fn receipt(
     engine: Engine,
     dir: &Path,
     facts: u64,
-    build_ms: f64,
-    point_read_samples_ms: Vec<f64>,
-    samples: Vec<f64>,
-    count: u64,
-    checksum: i128,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+    build: BuildMeasurement,
 ) -> Result<Receipt> {
     let expected = i128::from(facts) * i128::from(facts - 1) / 2;
-    if count != facts || checksum != expected {
-        bail!(
-            "{} correctness mismatch: count {count}/{facts}, checksum {checksum}/{expected}",
-            engine.id()
-        );
-    }
-    let memory = measure_in_child(engine, dir, samples.len())?;
-    if memory.count != facts || memory.checksum != expected {
-        bail!(
-            "{} fresh memory measurement correctness mismatch",
-            engine.id()
-        );
+    let query = measure_in_child(engine, dir, facts, repetitions, seed)?;
+    if query.count != facts || query.checksum != expected {
+        bail!("{} fresh reopen correctness mismatch", engine.id());
     }
     Ok(Receipt {
-        schema: "vicia.ref-db-bench.v4",
+        schema: "vicia.ref-db-bench.v5",
         engine: engine.id(),
         role: engine.role(),
         execution_boundary: engine.boundary(),
         facts,
-        build_ms,
-        point_read_samples_ms,
-        aggregate_samples_ms: samples,
-        count,
-        checksum,
-        memory,
+        repetitions,
+        trial,
+        seed,
+        order_position: std::env::var("REF_DB_BENCH_ORDER_POSITION")
+            .context("missing REF_DB_BENCH_ORDER_POSITION")?
+            .parse()?,
+        adapter_schema: engine.adapter_schema(),
+        semantic_scope: engine.semantic_scope(),
+        durability: engine.durability(),
+        runtime_version: engine.runtime_version(),
+        build,
+        query,
+        reopen_verified: true,
         storage_bytes: directory_bytes(dir)?,
     })
 }
 
-fn measure_in_child(engine: Engine, dir: &Path, repetitions: usize) -> Result<MemoryMeasurement> {
+fn measure_in_child(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    seed: u64,
+) -> Result<QueryMeasurement> {
     let output = Command::new(std::env::current_exe()?)
         .arg("measure")
         .arg(engine.id())
         .arg(dir)
+        .arg(facts.to_string())
         .arg(repetitions.to_string())
+        .arg(seed.to_string())
         .output()
         .with_context(|| format!("launch fresh {} memory measurement", engine.id()))?;
     if !output.status.success() {
@@ -227,12 +360,19 @@ fn measure_in_child(engine: Engine, dir: &Path, repetitions: usize) -> Result<Me
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    serde_json::from_slice(&output.stdout).context("decode fresh memory measurement")
+    serde_json::from_slice(&output.stdout).context("decode fresh query measurement")
 }
 
-fn run_vicia(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Result<Receipt> {
+fn run_vicia(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+) -> Result<Receipt> {
     let path = dir.join("vicia.graph");
-    let started = Instant::now();
+    let build_start = start_build();
     let db = OpenOptions::new().path(&path).open()?;
     for start in (0..facts).step_by(BATCH as usize) {
         let mut command = String::from("(transact [");
@@ -243,47 +383,26 @@ fn run_vicia(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
         db.execute(&command)?;
     }
     db.checkpoint()?;
-    let build_ms = elapsed(started);
-    let point_query = format!(
-        "(query [:find ?v :where [:cmp/e{} :cmp/value ?v]])",
-        facts / 2
-    );
-    let point_read_samples_ms = measure_point(repetitions, || {
-        validate_vicia_point(db.execute(&point_query)?, facts / 2)
-    })?;
-    let mut samples = Vec::with_capacity(repetitions);
-    let mut final_pair = (0, 0);
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        final_pair = vicia_aggregate(&db)?;
-        samples.push(elapsed(started));
-    }
     drop(db);
     receipt(
         engine,
         dir,
         facts,
-        build_ms,
-        point_read_samples_ms,
-        samples,
-        final_pair.0,
-        final_pair.1,
+        repetitions,
+        trial,
+        seed,
+        finish_build(build_start),
     )
 }
 
-fn validate_vicia_point(result: QueryResult, expected: u64) -> Result<()> {
+fn vicia_point(result: QueryResult) -> Result<Option<i64>> {
     let QueryResult::QueryResults { results, .. } = result else {
         bail!("Vicia point query returned a non-query result");
     };
-    let value = results
+    Ok(results
         .first()
         .and_then(|row| row.first())
-        .and_then(|value| value.as_integer())
-        .context("Vicia point query returned no integer")?;
-    if value != i64::try_from(expected)? {
-        bail!("Vicia point query mismatch");
-    }
-    Ok(())
+        .and_then(|value| value.as_integer()))
 }
 
 fn vicia_aggregate(db: &minigraf::Minigraf) -> Result<(u64, i128)> {
@@ -303,8 +422,15 @@ fn vicia_aggregate(db: &minigraf::Minigraf) -> Result<(u64, i128)> {
     Ok((u64::try_from(count)?, i128::from(sum)))
 }
 
-fn run_redb(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Result<Receipt> {
-    let started = Instant::now();
+fn run_redb(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+) -> Result<Receipt> {
+    let build_start = start_build();
     let db = RedbDatabase::create(dir.join("redb.db"))?;
     for start in (0..facts).step_by(BATCH as usize) {
         let tx = db.begin_write()?;
@@ -316,42 +442,15 @@ fn run_redb(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
         }
         tx.commit()?;
     }
-    let build_ms = elapsed(started);
-    let point_read_samples_ms = measure_point(repetitions, || {
-        let tx = db.begin_read()?;
-        let table = tx.open_table(REDB_FACTS)?;
-        let value = table.get(facts / 2)?.context("redb point missing")?.value();
-        if value != i64::try_from(facts / 2)? {
-            bail!("redb point mismatch");
-        }
-        Ok(())
-    })?;
-    let mut samples = Vec::with_capacity(repetitions);
-    let mut final_pair = (0, 0);
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let tx = db.begin_read()?;
-        let table = tx.open_table(REDB_FACTS)?;
-        let mut count = 0_u64;
-        let mut sum = 0_i128;
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            count += 1;
-            sum += i128::from(value.value());
-        }
-        final_pair = (count, sum);
-        samples.push(elapsed(started));
-    }
     drop(db);
     receipt(
         engine,
         dir,
         facts,
-        build_ms,
-        point_read_samples_ms,
-        samples,
-        final_pair.0,
-        final_pair.1,
+        repetitions,
+        trial,
+        seed,
+        finish_build(build_start),
     )
 }
 
@@ -359,8 +458,15 @@ fn key_bytes(value: u64) -> [u8; 8] {
     value.to_be_bytes()
 }
 
-fn run_fjall(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Result<Receipt> {
-    let started = Instant::now();
+fn run_fjall(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+) -> Result<Receipt> {
+    let build_start = start_build();
     let db = FjallDatabase::builder(dir.join("fjall")).open()?;
     let items = db.keyspace("facts", KeyspaceCreateOptions::default)?;
     for start in (0..facts).step_by(BATCH as usize) {
@@ -370,97 +476,43 @@ fn run_fjall(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resu
         }
         batch.commit()?;
     }
-    let build_ms = elapsed(started);
-    let point_read_samples_ms = measure_point(repetitions, || {
-        let value = items
-            .get(key_bytes(facts / 2))?
-            .context("fjall point missing")?;
-        if value.as_ref() != key_bytes(facts / 2) {
-            bail!("fjall point mismatch");
-        }
-        Ok(())
-    })?;
-    let mut samples = Vec::with_capacity(repetitions);
-    let mut final_pair = (0, 0);
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let mut count = 0_u64;
-        let mut sum = 0_i128;
-        for entry in items.iter() {
-            let value = entry.value()?;
-            let bytes: [u8; 8] = value.as_ref().try_into()?;
-            count += 1;
-            sum += i128::from(u64::from_be_bytes(bytes));
-        }
-        final_pair = (count, sum);
-        samples.push(elapsed(started));
-    }
     drop(items);
     drop(db);
     receipt(
         engine,
         dir,
         facts,
-        build_ms,
-        point_read_samples_ms,
-        samples,
-        final_pair.0,
-        final_pair.1,
+        repetitions,
+        trial,
+        seed,
+        finish_build(build_start),
     )
 }
 
-fn run_grafeo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Result<Receipt> {
-    let started = Instant::now();
+fn run_grafeo(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+) -> Result<Receipt> {
+    let build_start = start_build();
     let db = GrafeoDB::open(dir.join("grafeo"))?;
     for entity in 0..facts {
         let node = db.create_node(&["Fact"]);
         db.set_node_property(node, "entity", GrafeoValue::from(i64::try_from(entity)?));
         db.set_node_property(node, "value", GrafeoValue::from(i64::try_from(entity)?));
     }
-    let build_ms = elapsed(started);
-    let session = db.session();
-    let query = format!(
-        "MATCH (n:Fact) WHERE n.entity = {} RETURN n.value",
-        facts / 2
-    );
-    let point_read_samples_ms = measure_point(repetitions, || {
-        let value: i64 = session.execute(&query)?.scalar()?;
-        if value != i64::try_from(facts / 2)? {
-            bail!("Grafeo point mismatch");
-        }
-        Ok(())
-    })?;
-    let mut samples = Vec::with_capacity(repetitions);
-    let mut final_pair = (0, 0);
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let result = session.execute("MATCH (n:Fact) RETURN COUNT(n), SUM(n.value)")?;
-        let row = result
-            .rows()
-            .first()
-            .context("Grafeo aggregate returned no row")?;
-        let count = row
-            .first()
-            .and_then(|v| v.as_int64())
-            .context("missing Grafeo count")?;
-        let sum = row
-            .get(1)
-            .and_then(|v| v.as_int64())
-            .context("missing Grafeo sum")?;
-        final_pair = (u64::try_from(count)?, i128::from(sum));
-        samples.push(elapsed(started));
-    }
-    drop(session);
     db.close()?;
     receipt(
         engine,
         dir,
         facts,
-        build_ms,
-        point_read_samples_ms,
-        samples,
-        final_pair.0,
-        final_pair.1,
+        repetitions,
+        trial,
+        seed,
+        finish_build(build_start),
     )
 }
 
@@ -469,8 +521,15 @@ fn cozo_open(path: &Path) -> Result<DbInstance> {
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-fn run_cozo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Result<Receipt> {
-    let started = Instant::now();
+fn run_cozo(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+) -> Result<Receipt> {
+    let build_start = start_build();
     let db = cozo_open(&dir.join("cozo.db"))?;
     db.run_script(
         ":create facts {entity: Int => value: Int}",
@@ -490,61 +549,15 @@ fn run_cozo(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Resul
         db.run_script(&script, BTreeMap::new(), ScriptMutability::Mutable)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     }
-    let build_ms = elapsed(started);
-    let point_read_samples_ms = measure_point(repetitions, || {
-        let point = db
-            .run_script(
-                "?[value] := *facts{entity: $id, value}",
-                BTreeMap::from([(
-                    "id".to_string(),
-                    DataValue::Num(Num::Int((facts / 2) as i64)),
-                )]),
-                ScriptMutability::Immutable,
-            )
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let value = point
-            .rows
-            .first()
-            .and_then(|r| r.first())
-            .and_then(data_i64)
-            .context("Cozo point missing")?;
-        if value != i64::try_from(facts / 2)? {
-            bail!("Cozo point mismatch");
-        }
-        Ok(())
-    })?;
-    let mut samples = Vec::with_capacity(repetitions);
-    let mut final_pair = (0, 0);
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let result = db
-            .run_script(
-                "?[count(value), sum(value)] := *facts{value}",
-                BTreeMap::new(),
-                ScriptMutability::Immutable,
-            )
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let row = result.rows.first().context("Cozo aggregate missing")?;
-        final_pair = (
-            u64::try_from(
-                row.first()
-                    .and_then(data_i64)
-                    .context("Cozo count missing")?,
-            )?,
-            i128::from(row.get(1).and_then(data_i64).context("Cozo sum missing")?),
-        );
-        samples.push(elapsed(started));
-    }
     drop(db);
     receipt(
         engine,
         dir,
         facts,
-        build_ms,
-        point_read_samples_ms,
-        samples,
-        final_pair.0,
-        final_pair.1,
+        repetitions,
+        trial,
+        seed,
+        finish_build(build_start),
     )
 }
 
@@ -563,9 +576,16 @@ fn data_i64(value: &DataValue) -> Option<i64> {
     }
 }
 
-async fn run_turso(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -> Result<Receipt> {
+async fn run_turso(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+) -> Result<Receipt> {
     let path = dir.join("turso.db");
-    let started = Instant::now();
+    let build_start = start_build();
     let db = TursoBuilder::new_local(&path.to_string_lossy())
         .build()
         .await?;
@@ -586,196 +606,343 @@ async fn run_turso(engine: Engine, dir: &Path, facts: u64, repetitions: usize) -
         }
         conn.execute("COMMIT", ()).await?;
     }
-    let build_ms = elapsed(started);
-    let mut point_read_samples_ms = Vec::with_capacity(repetitions);
-    for sample in 0..=repetitions {
-        let started = Instant::now();
-        let mut rows = conn
-            .query(
-                "SELECT value FROM facts WHERE entity = ?1",
-                [i64::try_from(facts / 2)?],
-            )
-            .await?;
-        let row = rows.next().await?.context("Turso point missing")?;
-        let value = row.get::<i64>(0)?;
-        if value != i64::try_from(facts / 2)? {
-            bail!("Turso point mismatch");
-        }
-        if sample > 0 {
-            point_read_samples_ms.push(elapsed(started));
-        }
-    }
-    let mut samples = Vec::with_capacity(repetitions);
-    let mut final_pair = (0, 0);
-    for _ in 0..repetitions {
-        let started = Instant::now();
-        let mut rows = conn
-            .query("SELECT COUNT(*), COALESCE(SUM(value), 0) FROM facts", ())
-            .await?;
-        let row = rows.next().await?.context("Turso aggregate missing")?;
-        final_pair = (
-            u64::try_from(row.get::<i64>(0)?)?,
-            i128::from(row.get::<i64>(1)?),
-        );
-        samples.push(elapsed(started));
-    }
     drop(conn);
     drop(db);
     receipt(
         engine,
         dir,
         facts,
-        build_ms,
-        point_read_samples_ms,
-        samples,
-        final_pair.0,
-        final_pair.1,
+        repetitions,
+        trial,
+        seed,
+        finish_build(build_start),
+    )
+}
+
+fn run_sqlite(
+    engine: Engine,
+    dir: &Path,
+    facts: u64,
+    repetitions: usize,
+    trial: usize,
+    seed: u64,
+) -> Result<Receipt> {
+    let build_start = start_build();
+    let connection = sqlite::open(dir.join("sqlite.db"))?;
+    connection.execute(
+        "PRAGMA journal_mode=DELETE;
+         PRAGMA synchronous=FULL;
+         CREATE TABLE facts(entity INTEGER PRIMARY KEY, value INTEGER NOT NULL);",
+    )?;
+    for start in (0..facts).step_by(BATCH as usize) {
+        connection.execute("BEGIN IMMEDIATE")?;
+        {
+            let mut statement =
+                connection.prepare("INSERT INTO facts(entity, value) VALUES (?1, ?2)")?;
+            for value in start..(start + BATCH).min(facts) {
+                let value = i64::try_from(value)?;
+                statement.bind((1, value))?;
+                statement.bind((2, value))?;
+                while statement.next()? != SqliteState::Done {}
+                statement.reset()?;
+            }
+        }
+        connection.execute("COMMIT")?;
+    }
+    drop(connection);
+    receipt(
+        engine,
+        dir,
+        facts,
+        repetitions,
+        trial,
+        seed,
+        finish_build(build_start),
     )
 }
 
 async fn measure_fresh(
     engine: Engine,
     dir: &Path,
+    facts: u64,
     repetitions: usize,
-) -> Result<MemoryMeasurement> {
+    seed: u64,
+) -> Result<QueryMeasurement> {
     match engine {
         Engine::Vicia => {
+            let started = Instant::now();
             let db = OpenOptions::new().path(dir.join("vicia.graph")).open()?;
-            measure_loaded(dir, repetitions, || vicia_aggregate(&db))
+            let open_ms = elapsed(started);
+            measure_loaded(
+                dir,
+                open_ms,
+                facts,
+                repetitions,
+                seed,
+                |key| {
+                    vicia_point(db.execute(&format!(
+                        "(query [:find ?v :where [:cmp/e{key} :cmp/value ?v]])"
+                    ))?)
+                },
+                || vicia_aggregate(&db),
+            )
         }
         Engine::Grafeo => {
+            let started = Instant::now();
             let db = GrafeoDB::open(dir.join("grafeo"))?;
             let session = db.session();
-            measure_loaded(dir, repetitions, || {
-                let result = session.execute("MATCH (n:Fact) RETURN COUNT(n), SUM(n.value)")?;
-                let row = result
-                    .rows()
-                    .first()
-                    .context("Grafeo aggregate returned no row")?;
-                let count = row
-                    .first()
-                    .and_then(|v| v.as_int64())
-                    .context("missing Grafeo count")?;
-                let sum = row
-                    .get(1)
-                    .and_then(|v| v.as_int64())
-                    .context("missing Grafeo sum")?;
-                Ok((u64::try_from(count)?, i128::from(sum)))
-            })
+            let open_ms = elapsed(started);
+            measure_loaded(
+                dir,
+                open_ms,
+                facts,
+                repetitions,
+                seed,
+                |key| {
+                    let result = session.execute(&format!(
+                        "MATCH (n:Fact) WHERE n.entity = {key} RETURN n.value"
+                    ))?;
+                    Ok(result
+                        .rows()
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|value| value.as_int64()))
+                },
+                || {
+                    let result = session.execute("MATCH (n:Fact) RETURN COUNT(n), SUM(n.value)")?;
+                    let row = result
+                        .rows()
+                        .first()
+                        .context("Grafeo aggregate returned no row")?;
+                    let count = row
+                        .first()
+                        .and_then(|v| v.as_int64())
+                        .context("missing Grafeo count")?;
+                    let sum = row
+                        .get(1)
+                        .and_then(|v| v.as_int64())
+                        .context("missing Grafeo sum")?;
+                    Ok((u64::try_from(count)?, i128::from(sum)))
+                },
+            )
         }
         Engine::Redb => {
+            let started = Instant::now();
             let db = RedbDatabase::open(dir.join("redb.db"))?;
-            measure_loaded(dir, repetitions, || {
-                let tx = db.begin_read()?;
-                let table = tx.open_table(REDB_FACTS)?;
-                let mut count = 0_u64;
-                let mut checksum = 0_i128;
-                for entry in table.iter()? {
-                    let (_, value) = entry?;
-                    count += 1;
-                    checksum += i128::from(value.value());
-                }
-                Ok((count, checksum))
-            })
+            let open_ms = elapsed(started);
+            measure_loaded(
+                dir,
+                open_ms,
+                facts,
+                repetitions,
+                seed,
+                |key| {
+                    let tx = db.begin_read()?;
+                    let table = tx.open_table(REDB_FACTS)?;
+                    Ok(table.get(key)?.map(|value| value.value()))
+                },
+                || {
+                    let tx = db.begin_read()?;
+                    let table = tx.open_table(REDB_FACTS)?;
+                    let mut count = 0_u64;
+                    let mut checksum = 0_i128;
+                    for entry in table.iter()? {
+                        let (_, value) = entry?;
+                        count += 1;
+                        checksum += i128::from(value.value());
+                    }
+                    Ok((count, checksum))
+                },
+            )
         }
         Engine::Fjall => {
+            let started = Instant::now();
             let db = FjallDatabase::builder(dir.join("fjall")).open()?;
             let items = db.keyspace("facts", KeyspaceCreateOptions::default)?;
-            measure_loaded(dir, repetitions, || {
-                let mut count = 0_u64;
-                let mut checksum = 0_i128;
-                for entry in items.iter() {
-                    let value = entry.value()?;
-                    let bytes: [u8; 8] = value.as_ref().try_into()?;
-                    count += 1;
-                    checksum += i128::from(u64::from_be_bytes(bytes));
-                }
-                Ok((count, checksum))
-            })
+            let open_ms = elapsed(started);
+            measure_loaded(
+                dir,
+                open_ms,
+                facts,
+                repetitions,
+                seed,
+                |key| {
+                    items
+                        .get(key_bytes(key))?
+                        .map(|value| {
+                            let bytes: [u8; 8] = value.as_ref().try_into()?;
+                            Ok(i64::try_from(u64::from_be_bytes(bytes))?)
+                        })
+                        .transpose()
+                },
+                || {
+                    let mut count = 0_u64;
+                    let mut checksum = 0_i128;
+                    for entry in items.iter() {
+                        let value = entry.value()?;
+                        let bytes: [u8; 8] = value.as_ref().try_into()?;
+                        count += 1;
+                        checksum += i128::from(u64::from_be_bytes(bytes));
+                    }
+                    Ok((count, checksum))
+                },
+            )
         }
         Engine::Turso => {
+            let started = Instant::now();
             let path = dir.join("turso.db");
             let db = TursoBuilder::new_local(&path.to_string_lossy())
                 .build()
                 .await?;
             let conn = db.connect()?;
-            let baseline = current_rss_bytes().context("read Turso baseline RSS")?;
-            let baseline_breakdown = memory_breakdown(dir)?;
-            let mut samples = Vec::with_capacity(repetitions);
-            let mut pair = (0_u64, 0_i128);
-            for _ in 0..repetitions {
-                let started = Instant::now();
-                let mut rows = conn
-                    .query("SELECT COUNT(*), COALESCE(SUM(value), 0) FROM facts", ())
-                    .await?;
-                let row = rows.next().await?.context("Turso aggregate missing")?;
-                pair = (
-                    u64::try_from(row.get::<i64>(0)?)?,
-                    i128::from(row.get::<i64>(1)?),
-                );
-                samples.push(elapsed(started));
-            }
-            finish_memory_measurement_with_baseline(
-                dir,
-                baseline,
-                baseline_breakdown,
-                samples,
-                pair,
-            )
+            let open_ms = elapsed(started);
+            measure_turso_loaded(dir, open_ms, &conn, facts, repetitions, seed).await
         }
         Engine::Cozo => {
+            let started = Instant::now();
             let db = cozo_open(&dir.join("cozo.db"))?;
-            measure_loaded(dir, repetitions, || {
-                let result = db
-                    .run_script(
-                        "?[count(value), sum(value)] := *facts{value}",
-                        BTreeMap::new(),
-                        ScriptMutability::Immutable,
-                    )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                let row = result.rows.first().context("Cozo aggregate missing")?;
-                Ok((
-                    u64::try_from(
-                        row.first()
-                            .and_then(data_i64)
-                            .context("Cozo count missing")?,
-                    )?,
-                    i128::from(row.get(1).and_then(data_i64).context("Cozo sum missing")?),
-                ))
-            })
+            let open_ms = elapsed(started);
+            measure_loaded(
+                dir,
+                open_ms,
+                facts,
+                repetitions,
+                seed,
+                |key| {
+                    let point = db
+                        .run_script(
+                            "?[value] := *facts{entity: $id, value}",
+                            BTreeMap::from([(
+                                "id".to_string(),
+                                DataValue::Num(Num::Int(i64::try_from(key)?)),
+                            )]),
+                            ScriptMutability::Immutable,
+                        )
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    Ok(point
+                        .rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(data_i64))
+                },
+                || cozo_aggregate(&db),
+            )
+        }
+        Engine::Sqlite => {
+            let started = Instant::now();
+            let db = sqlite::open(dir.join("sqlite.db"))?;
+            db.execute("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
+            let open_ms = elapsed(started);
+            measure_loaded(
+                dir,
+                open_ms,
+                facts,
+                repetitions,
+                seed,
+                |key| {
+                    let mut statement = db.prepare("SELECT value FROM facts WHERE entity = ?1")?;
+                    statement.bind((1, i64::try_from(key)?))?;
+                    match statement.next()? {
+                        SqliteState::Row => Ok(Some(statement.read::<i64, _>(0)?)),
+                        SqliteState::Done => Ok(None),
+                    }
+                },
+                || {
+                    let mut statement =
+                        db.prepare("SELECT COUNT(*), COALESCE(SUM(value), 0) FROM facts")?;
+                    if statement.next()? != SqliteState::Row {
+                        bail!("SQLite aggregate missing");
+                    }
+                    let count = statement.read::<i64, _>(0)?;
+                    let sum = statement.read::<i64, _>(1)?;
+                    Ok((u64::try_from(count)?, i128::from(sum)))
+                },
+            )
         }
     }
 }
 
 fn measure_loaded(
     dir: &Path,
+    open_ms: f64,
+    facts: u64,
     repetitions: usize,
-    mut workload: impl FnMut() -> Result<(u64, i128)>,
-) -> Result<MemoryMeasurement> {
+    seed: u64,
+    mut point: impl FnMut(u64) -> Result<Option<i64>>,
+    mut aggregate: impl FnMut() -> Result<(u64, i128)>,
+) -> Result<QueryMeasurement> {
     let baseline = current_rss_bytes().context("read open baseline RSS")?;
     let baseline_breakdown = memory_breakdown(dir)?;
-    let mut samples = Vec::with_capacity(repetitions);
-    let mut pair = (0_u64, 0_i128);
+    let counters = process_counters().unwrap_or_default();
+
+    let first_started = Instant::now();
+    validate_point(facts / 2, facts, point(facts / 2)?)?;
+    let first_read_ms = elapsed(first_started);
+
+    let expected = expected_pair(facts);
+    validate_pair(aggregate()?, expected, "aggregate warm-up")?;
+    let mut aggregate_samples_ms = Vec::with_capacity(repetitions);
+    let mut pair = expected;
     for _ in 0..repetitions {
         let started = Instant::now();
-        pair = workload()?;
-        samples.push(elapsed(started));
+        pair = aggregate()?;
+        aggregate_samples_ms.push(elapsed(started));
+        validate_pair(pair, expected, "aggregate sample")?;
     }
-    finish_memory_measurement_with_baseline(dir, baseline, baseline_breakdown, samples, pair)
+    let aggregate_retained = current_rss_bytes().context("read aggregate retained RSS")?;
+    let aggregate_peak = peak_rss_bytes().context("read aggregate peak RSS")?;
+    let aggregate_retained_breakdown = memory_breakdown(dir)?;
+    let aggregate_process_delta = process_counters()
+        .unwrap_or_default()
+        .saturating_sub(counters);
+
+    let hot = vec![facts / 2];
+    let distributed = distributed_keys(facts, seed, 256);
+    let misses = miss_keys(facts, 256);
+    let point_hot = measure_point_workload(facts, repetitions, &hot, &mut point)?;
+    let point_distributed = measure_point_workload(facts, repetitions, &distributed, &mut point)?;
+    let point_miss = measure_point_workload(facts, repetitions, &misses, &mut point)?;
+
+    Ok(finish_query_measurement(
+        open_ms,
+        first_read_ms,
+        point_hot,
+        point_distributed,
+        point_miss,
+        baseline,
+        baseline_breakdown,
+        aggregate_retained,
+        aggregate_peak,
+        aggregate_retained_breakdown,
+        aggregate_process_delta,
+        aggregate_samples_ms,
+        pair,
+    ))
 }
 
-fn finish_memory_measurement_with_baseline(
-    dir: &Path,
+#[allow(clippy::too_many_arguments)]
+fn finish_query_measurement(
+    open_ms: f64,
+    first_read_ms: f64,
+    point_hot: PointMeasurement,
+    point_distributed: PointMeasurement,
+    point_miss: PointMeasurement,
     baseline: u64,
     baseline_breakdown: MemoryBreakdown,
-    samples: Vec<f64>,
+    retained: u64,
+    peak: u64,
+    retained_breakdown: MemoryBreakdown,
+    process_delta: ProcessCounters,
+    aggregate_samples_ms: Vec<f64>,
     pair: (u64, i128),
-) -> Result<MemoryMeasurement> {
-    let retained = current_rss_bytes().context("read retained RSS")?;
-    let peak = peak_rss_bytes().context("read peak RSS")?;
-    let retained_breakdown = memory_breakdown(dir)?;
-    Ok(MemoryMeasurement {
-        aggregate_samples_ms: samples,
+) -> QueryMeasurement {
+    QueryMeasurement {
+        open_ms,
+        first_read_ms,
+        point_hot,
+        point_distributed,
+        point_miss,
+        aggregate_samples_ms,
         count: pair.0,
         checksum: pair.1,
         open_baseline_rss_bytes: baseline,
@@ -785,18 +952,241 @@ fn finish_memory_measurement_with_baseline(
         baseline_breakdown,
         retained_breakdown,
         retained_delta_breakdown: retained_breakdown.saturating_sub(baseline_breakdown),
+        process_delta,
+    }
+}
+
+fn measure_point_workload(
+    facts: u64,
+    repetitions: usize,
+    keys: &[u64],
+    query: &mut impl FnMut(u64) -> Result<Option<i64>>,
+) -> Result<PointMeasurement> {
+    const TARGET_MS: f64 = 20.0;
+    const MAX_OPERATIONS: usize = 16_384;
+    let mut operations = 1_usize;
+    loop {
+        let started = Instant::now();
+        for operation in 0..operations {
+            let key = keys[operation % keys.len()];
+            validate_point(key, facts, query(key)?)?;
+        }
+        if elapsed(started) >= TARGET_MS || operations == MAX_OPERATIONS {
+            break;
+        }
+        operations = (operations * 2).min(MAX_OPERATIONS);
+    }
+
+    let mut samples_ms_per_operation = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        for operation in 0..operations {
+            let key = keys[operation % keys.len()];
+            validate_point(key, facts, query(key)?)?;
+        }
+        samples_ms_per_operation.push(elapsed(started) / operations as f64);
+    }
+    Ok(PointMeasurement {
+        operations_per_sample: operations,
+        samples_ms_per_operation,
     })
 }
 
-fn measure_point(repetitions: usize, mut query: impl FnMut() -> Result<()>) -> Result<Vec<f64>> {
-    query()?;
-    let mut samples = Vec::with_capacity(repetitions);
+fn cozo_aggregate(db: &DbInstance) -> Result<(u64, i128)> {
+    let result = db
+        .run_script(
+            "?[count(value), sum(value)] := *facts{value}",
+            BTreeMap::new(),
+            ScriptMutability::Immutable,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let row = result.rows.first().context("Cozo aggregate missing")?;
+    Ok((
+        u64::try_from(
+            row.first()
+                .and_then(data_i64)
+                .context("Cozo count missing")?,
+        )?,
+        i128::from(row.get(1).and_then(data_i64).context("Cozo sum missing")?),
+    ))
+}
+
+async fn measure_turso_loaded(
+    dir: &Path,
+    open_ms: f64,
+    connection: &turso::Connection,
+    facts: u64,
+    repetitions: usize,
+    seed: u64,
+) -> Result<QueryMeasurement> {
+    let baseline = current_rss_bytes().context("read Turso open baseline RSS")?;
+    let baseline_breakdown = memory_breakdown(dir)?;
+    let counters = process_counters().unwrap_or_default();
+
+    let first_started = Instant::now();
+    validate_point(facts / 2, facts, turso_point(connection, facts / 2).await?)?;
+    let first_read_ms = elapsed(first_started);
+
+    let expected = expected_pair(facts);
+    validate_pair(
+        turso_aggregate(connection).await?,
+        expected,
+        "Turso aggregate warm-up",
+    )?;
+    let mut aggregate_samples_ms = Vec::with_capacity(repetitions);
+    let mut pair = expected;
     for _ in 0..repetitions {
         let started = Instant::now();
-        query()?;
-        samples.push(elapsed(started));
+        pair = turso_aggregate(connection).await?;
+        aggregate_samples_ms.push(elapsed(started));
+        validate_pair(pair, expected, "Turso aggregate sample")?;
     }
-    Ok(samples)
+    let aggregate_retained = current_rss_bytes().context("read Turso aggregate retained RSS")?;
+    let aggregate_peak = peak_rss_bytes().context("read Turso aggregate peak RSS")?;
+    let aggregate_retained_breakdown = memory_breakdown(dir)?;
+    let aggregate_process_delta = process_counters()
+        .unwrap_or_default()
+        .saturating_sub(counters);
+
+    let point_hot = measure_turso_point(connection, facts, repetitions, &[facts / 2]).await?;
+    let distributed = distributed_keys(facts, seed, 256);
+    let point_distributed =
+        measure_turso_point(connection, facts, repetitions, &distributed).await?;
+    let misses = miss_keys(facts, 256);
+    let point_miss = measure_turso_point(connection, facts, repetitions, &misses).await?;
+
+    Ok(finish_query_measurement(
+        open_ms,
+        first_read_ms,
+        point_hot,
+        point_distributed,
+        point_miss,
+        baseline,
+        baseline_breakdown,
+        aggregate_retained,
+        aggregate_peak,
+        aggregate_retained_breakdown,
+        aggregate_process_delta,
+        aggregate_samples_ms,
+        pair,
+    ))
+}
+
+async fn measure_turso_point(
+    connection: &turso::Connection,
+    facts: u64,
+    repetitions: usize,
+    keys: &[u64],
+) -> Result<PointMeasurement> {
+    const TARGET_MS: f64 = 20.0;
+    const MAX_OPERATIONS: usize = 16_384;
+    let mut operations = 1_usize;
+    loop {
+        let started = Instant::now();
+        for operation in 0..operations {
+            let key = keys[operation % keys.len()];
+            validate_point(key, facts, turso_point(connection, key).await?)?;
+        }
+        if elapsed(started) >= TARGET_MS || operations == MAX_OPERATIONS {
+            break;
+        }
+        operations = (operations * 2).min(MAX_OPERATIONS);
+    }
+
+    let mut samples_ms_per_operation = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        for operation in 0..operations {
+            let key = keys[operation % keys.len()];
+            validate_point(key, facts, turso_point(connection, key).await?)?;
+        }
+        samples_ms_per_operation.push(elapsed(started) / operations as f64);
+    }
+    Ok(PointMeasurement {
+        operations_per_sample: operations,
+        samples_ms_per_operation,
+    })
+}
+
+async fn turso_point(connection: &turso::Connection, key: u64) -> Result<Option<i64>> {
+    let mut rows = connection
+        .query(
+            "SELECT value FROM facts WHERE entity = ?1",
+            [i64::try_from(key)?],
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await?
+        .map(|row| row.get::<i64>(0))
+        .transpose()?)
+}
+
+async fn turso_aggregate(connection: &turso::Connection) -> Result<(u64, i128)> {
+    let mut rows = connection
+        .query("SELECT COUNT(*), COALESCE(SUM(value), 0) FROM facts", ())
+        .await?;
+    let row = rows.next().await?.context("Turso aggregate missing")?;
+    Ok((
+        u64::try_from(row.get::<i64>(0)?)?,
+        i128::from(row.get::<i64>(1)?),
+    ))
+}
+
+fn distributed_keys(facts: u64, seed: u64, count: usize) -> Vec<u64> {
+    let mut state = seed.max(1);
+    (0..count)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % facts
+        })
+        .collect()
+}
+
+fn miss_keys(facts: u64, count: usize) -> Vec<u64> {
+    (0..count)
+        .map(|offset| facts.saturating_add(1 + offset as u64))
+        .collect()
+}
+
+fn validate_point(key: u64, facts: u64, actual: Option<i64>) -> Result<()> {
+    let expected = (key < facts).then(|| i64::try_from(key)).transpose()?;
+    if actual != expected {
+        bail!("point correctness mismatch for key {key}");
+    }
+    Ok(())
+}
+
+fn expected_pair(facts: u64) -> (u64, i128) {
+    (facts, i128::from(facts) * i128::from(facts - 1) / 2)
+}
+
+fn validate_pair(actual: (u64, i128), expected: (u64, i128), workload: &str) -> Result<()> {
+    if actual != expected {
+        bail!("{workload} correctness mismatch");
+    }
+    Ok(())
+}
+
+fn start_build() -> (Instant, u64, ProcessCounters) {
+    (
+        Instant::now(),
+        current_rss_bytes().unwrap_or_default(),
+        process_counters().unwrap_or_default(),
+    )
+}
+
+fn finish_build(start: (Instant, u64, ProcessCounters)) -> BuildMeasurement {
+    BuildMeasurement {
+        elapsed_ms: elapsed(start.0),
+        baseline_rss_bytes: start.1,
+        peak_rss_bytes: peak_rss_bytes().unwrap_or_default(),
+        process_delta: process_counters()
+            .unwrap_or_default()
+            .saturating_sub(start.2),
+    }
 }
 
 fn elapsed(started: Instant) -> f64 {
@@ -821,6 +1211,34 @@ fn current_rss_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?
         .checked_mul(1024)
+}
+
+fn process_counters() -> Option<ProcessCounters> {
+    let io = fs::read_to_string("/proc/self/io").ok()?;
+    let read_bytes = proc_named_value(&io, "read_bytes:")?;
+    let write_bytes = proc_named_value(&io, "write_bytes:")?;
+
+    let stat = fs::read_to_string("/proc/self/stat").ok()?;
+    let fields: Vec<&str> = stat
+        .get(stat.rfind(')')? + 2..)?
+        .split_whitespace()
+        .collect();
+    Some(ProcessCounters {
+        read_bytes,
+        write_bytes,
+        minor_faults: fields.get(7)?.parse().ok()?,
+        major_faults: fields.get(9)?.parse().ok()?,
+    })
+}
+
+fn proc_named_value(contents: &str, name: &str) -> Option<u64> {
+    contents
+        .lines()
+        .find(|line| line.starts_with(name))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 fn memory_breakdown(database_dir: &Path) -> Result<MemoryBreakdown> {
@@ -889,4 +1307,47 @@ fn directory_bytes(path: &Path) -> Result<u64> {
         };
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distributed_point_keys_are_seeded_and_in_range() {
+        let first = distributed_keys(10_000, 42, 256);
+        let second = distributed_keys(10_000, 42, 256);
+        let other = distributed_keys(10_000, 43, 256);
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+        assert!(first.iter().all(|key| *key < 10_000));
+    }
+
+    #[test]
+    fn miss_keys_are_outside_the_fixture() {
+        let keys = miss_keys(10_000, 256);
+        assert_eq!(keys.len(), 256);
+        assert!(keys.iter().all(|key| *key > 10_000));
+    }
+
+    #[test]
+    fn process_counter_delta_saturates_each_field() {
+        let current = ProcessCounters {
+            read_bytes: 20,
+            write_bytes: 5,
+            minor_faults: 30,
+            major_faults: 1,
+        };
+        let baseline = ProcessCounters {
+            read_bytes: 10,
+            write_bytes: 8,
+            minor_faults: 12,
+            major_faults: 2,
+        };
+        let delta = current.saturating_sub(baseline);
+        assert_eq!(delta.read_bytes, 10);
+        assert_eq!(delta.write_bytes, 0);
+        assert_eq!(delta.minor_faults, 18);
+        assert_eq!(delta.major_faults, 0);
+    }
 }

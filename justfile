@@ -16,11 +16,11 @@ sync-local VETCH_APP_DIR="":
 db-ref-setup:
     ./scripts/setup-db-refs.sh
 
-# Run the 10K/five-sample reference comparison and print/write a Markdown table.
+# Run one rotated 10K/five-sample seven-engine v5 comparison.
 db-ref-bench-smoke OUTPUT_DIR="target/ref-db-bench/smoke":
     ./scripts/run-ref-db-bench.sh smoke "{{OUTPUT_DIR}}"
 
-# Run the 1M/20-sample reference comparison.
+# Run five rotated 1M/20-sample seven-engine v5 trials.
 db-ref-bench-full OUTPUT_DIR="target/ref-db-bench/full":
     ./scripts/run-ref-db-bench.sh full "{{OUTPUT_DIR}}"
 

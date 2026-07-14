@@ -10,10 +10,12 @@ case "$profile" in
   smoke)
     facts=10000
     repetitions=5
+    trials=1
     ;;
   full)
     facts=1000000
     repetitions=20
+    trials=5
     ;;
   *)
     echo "usage: $0 [smoke|full] [output-directory]" >&2
@@ -32,10 +34,20 @@ manifest="tools/ref-db-bench/Cargo.toml"
 cargo build --release --manifest-path "$manifest"
 binary="tools/ref-db-bench/target/release/vicia-ref-db-bench"
 
-for engine in vicia grafeo redb fjall turso cozo; do
-  echo "running ref-db benchmark: $engine" >&2
-  "$binary" run "$engine" "$output_dir/$engine-data" "$facts" "$repetitions" \
-    >"$output_dir/$engine.json"
+engines=(vicia grafeo sqlite redb fjall turso cozo)
+seed_base="${REF_DB_BENCH_SEED:-2026071401}"
+for ((trial = 0; trial < trials; trial++)); do
+  seed=$((seed_base + trial))
+  for ((position = 0; position < ${#engines[@]}; position++)); do
+    engine_index=$(((trial + position) % ${#engines[@]}))
+    engine="${engines[$engine_index]}"
+    echo "running ref-db benchmark: trial=$trial position=$position engine=$engine" >&2
+    REF_DB_BENCH_ORDER_POSITION="$position" \
+      "$binary" run "$engine" "$output_dir/$engine-trial-$trial-data" \
+      "$facts" "$repetitions" "$trial" "$seed" \
+      >"$output_dir/$engine-trial-$trial.json"
+  done
 done
 
 node scripts/summarize-ref-db-bench.mjs "$output_dir" "$profile"
+node scripts/audit-ref-db-bench-validator.mjs "$output_dir" "$profile"

@@ -47,6 +47,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Preserve open baseline RSS near 12 MiB. Current baseline: 12.164 MiB.
 - [x] Require exact count `1,000,000` and checksum `499999500000` for every run.
 - [x] Keep engine aggregate and KV owned-scan results in separate comparison groups. The v4 summary has no flat `rows`; JSON stores distinct `groups.engineAggregate` and `groups.ownedResultScan` arrays, and Markdown emits separate workload and memory tables.
+- [x] Promote the cross-engine receipt to v5 and add SQLite as the direct embedded SQL reference. Five clean 1M trials rotate all seven engines, close/reopen every freshly built database, adaptively batch hot/distributed/missing point reads, validate every result, retain host/source/durability provenance, and pass a 5% trial-MAD gate plus an eight-case mutation audit. Vicia records 0.00420/0.00459 ms hot point p50/p95, 171.455/177.240 ms aggregate p50/p95, and 1.625 MiB aggregate RSS delta; SQLite records 0.00942/0.01038 ms hot point and 29.530/32.769 ms aggregate.
 
 ## Next task
 
@@ -57,6 +58,8 @@ Temporary checklist based on the 1M reference DB benchmark.
 - The measured tail is sync-owned host-I/O variance without fixed-position
   bias. Do not weaken durability sync, alter receipt-owned gates, rerun until
   green, or add another checkpoint construction repair from this evidence.
+- The v5 SQLite comparison improves the reference measurement contract but does
+  not change the v12 checkpoint-tail classification or admit production code.
 - Keep `selectedFillPercent = null`, production fill 75, and the current Vetch
   browser package. There is no Vicia-to-Vetch package propagation from this
   slice.
