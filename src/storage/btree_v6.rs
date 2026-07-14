@@ -838,9 +838,11 @@ where
                 let child_arr_start = INTERNAL_HEADER_SIZE;
                 let slot_dir_start = INTERNAL_HEADER_SIZE + key_count * 8;
 
-                let mut descended = false;
-                for i in 0..key_count {
-                    let slot_off = slot_dir_start + i * SLOT_SIZE;
+                let mut low = 0usize;
+                let mut high = key_count;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let slot_off = slot_dir_start + middle * SLOT_SIZE;
                     let sep_offset = read_u16_at(&page[..], slot_off)? as usize;
                     let sep_length = read_u16_at(&page[..], slot_off + 2)? as usize;
                     let sep_slice = page
@@ -863,13 +865,15 @@ where
                     });
 
                     if *key < sep_key {
-                        let child_off = child_arr_start + i * 8;
-                        page_id = read_u64_at(&page[..], child_off)?;
-                        descended = true;
-                        break;
+                        high = middle;
+                    } else {
+                        low = middle.saturating_add(1);
                     }
                 }
-                if !descended {
+                if low < key_count {
+                    let child_off = child_arr_start + low * 8;
+                    page_id = read_u64_at(&page[..], child_off)?;
+                } else {
                     page_id = rightmost_child;
                 }
             }
@@ -3440,6 +3444,86 @@ mod tests {
                 slot_index: 0
             }
         );
+    }
+
+    #[test]
+    fn internal_separator_binary_search_preserves_child_boundaries() {
+        let mut backend = MemoryBackend::new();
+        let build_cache = PageCache::new(512);
+        let input = (0u128..100_000)
+            .map(|n| make_eavt(n, ":v", n as u64 + 1))
+            .collect::<Vec<_>>();
+        let serialized = btree_entries(input.iter().cloned()).unwrap();
+        let (root, _) = build_btree(serialized.into_iter(), &mut backend, &build_cache, 1).unwrap();
+        let root_page = backend.read_page(root).unwrap();
+        assert_eq!(root_page[0], PAGE_TYPE_INTERNAL);
+        let key_count = usize::from(read_u16_at(&root_page, 2).unwrap());
+        assert!(key_count > 1);
+        let slot_directory = INTERNAL_HEADER_SIZE + key_count * 8;
+        let separators = (0..key_count)
+            .map(|slot| {
+                let slot_offset = slot_directory + slot * SLOT_SIZE;
+                let offset = usize::from(read_u16_at(&root_page, slot_offset).unwrap());
+                let length = usize::from(read_u16_at(&root_page, slot_offset + 2).unwrap());
+                postcard::from_bytes::<EavtKey>(&root_page[offset..offset + length]).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let exact_separator = &separators[key_count / 2];
+        let exact_index = input
+            .binary_search_by(|entry| entry.0.cmp(exact_separator))
+            .unwrap();
+        assert!(exact_index > 0 && exact_index + 1 < input.len());
+
+        let cache = PageCache::new(512);
+        for index in [0, exact_index - 1, exact_index, exact_index + 1, 99_999] {
+            let start = &input[index].0;
+            let end = input.get(index + 1).map(|entry| &entry.0);
+            let refs = range_scan(root, start, end, &backend, &cache).unwrap();
+            assert_eq!(refs, vec![input[index].1]);
+        }
+        let after_last = make_eavt(100_000, ":v", 100_001).0;
+        assert!(
+            range_scan::<EavtKey>(root, &after_last, None, &backend, &cache)
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut malformed = root_page;
+        let selected_slot = slot_directory + (key_count / 2) * SLOT_SIZE;
+        malformed[selected_slot..selected_slot + 2]
+            .copy_from_slice(&u16::try_from(PAGE_SIZE - 1).unwrap().to_le_bytes());
+        malformed[selected_slot + 2..selected_slot + 4].copy_from_slice(&8u16.to_le_bytes());
+        backend.write_page(root, &malformed).unwrap();
+        let uncached = PageCache::new(8);
+        assert!(
+            range_scan(
+                root,
+                exact_separator,
+                Some(&input[exact_index + 1].0),
+                &backend,
+                &uncached,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn zero_separator_internal_page_descends_to_its_only_child() {
+        let expected = make_eavt(7, ":v", 8);
+        let serialized = btree_entries(std::iter::once(expected.clone()))
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        let mut backend = MemoryBackend::new();
+        backend.write_page(2, &raw_leaf_page(&serialized)).unwrap();
+        let mut internal = vec![0u8; PAGE_SIZE];
+        internal[0] = PAGE_TYPE_INTERNAL;
+        internal[4..12].copy_from_slice(&2u64.to_le_bytes());
+        backend.write_page(1, &internal).unwrap();
+        let cache = PageCache::new(8);
+        let refs = range_scan(1, &expected.0, None, &backend, &cache).unwrap();
+        assert_eq!(refs.first(), Some(&expected.1));
     }
 
     #[test]
