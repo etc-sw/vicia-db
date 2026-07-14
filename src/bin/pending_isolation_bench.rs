@@ -1,6 +1,11 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+mod bench_support;
+
 use anyhow::{Context, Result, bail};
+use bench_support::process_memory::{
+    MemoryBreakdown, current_rss_bytes, memory_breakdown, peak_rss_bytes, trim_allocator,
+};
 use minigraf::{
     CurrentAttributeCursorDiagnostics, Minigraf, OpenOptions, PendingMemoryDiagnostics,
     QueryResult, Value, WalReplayMemoryDiagnostics,
@@ -204,34 +209,6 @@ struct ElapsedSummary {
     p95: f64,
     max: f64,
     mad: f64,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MemoryBreakdown {
-    anonymous_rss_bytes: u64,
-    file_backed_rss_bytes: u64,
-    heap_mapping_rss_bytes: u64,
-    database_mapped_rss_bytes: u64,
-}
-
-impl MemoryBreakdown {
-    fn saturating_sub(self, baseline: Self) -> Self {
-        Self {
-            anonymous_rss_bytes: self
-                .anonymous_rss_bytes
-                .saturating_sub(baseline.anonymous_rss_bytes),
-            file_backed_rss_bytes: self
-                .file_backed_rss_bytes
-                .saturating_sub(baseline.file_backed_rss_bytes),
-            heap_mapping_rss_bytes: self
-                .heap_mapping_rss_bytes
-                .saturating_sub(baseline.heap_mapping_rss_bytes),
-            database_mapped_rss_bytes: self
-                .database_mapped_rss_bytes
-                .saturating_sub(baseline.database_mapped_rss_bytes),
-        }
-    }
 }
 
 fn main() -> Result<()> {
@@ -520,6 +497,7 @@ fn write_facts(
 fn open_without_auto_checkpoint(path: &Path) -> Result<Minigraf> {
     let mut options = OpenOptions::new();
     options.wal_checkpoint_threshold = usize::MAX;
+    options.max_results = usize::try_from(BASE_FACTS + SELECTED_CONTROL_FACTS + 1)?;
     options.path(path).open()
 }
 
@@ -607,23 +585,6 @@ fn audit_memory(path: &Path) -> Result<MemoryAudit> {
         live_unaccounted_rss_bytes: live_database_rss_bytes
             .saturating_sub(pending.total_accounted_bytes),
     })
-}
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn trim_allocator() -> (bool, bool) {
-    unsafe extern "C" {
-        fn malloc_trim(pad: usize) -> std::ffi::c_int;
-    }
-
-    // SAFETY: glibc's process-global `malloc_trim` accepts any padding value;
-    // this single-threaded benchmark child passes zero and owns no foreign
-    // allocator state. It never runs in the default library API.
-    (true, unsafe { malloc_trim(0) != 0 })
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn trim_allocator() -> (bool, bool) {
-    (false, false)
 }
 
 fn aggregate_sample(db: &Minigraf) -> Result<(AggregateSample, (u64, i128))> {
@@ -732,81 +693,6 @@ fn cpu_model() -> Option<String> {
         .ok()?
         .lines()
         .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
-}
-
-fn current_rss_bytes() -> Option<u64> {
-    proc_status_kib("VmRSS:")?.checked_mul(1024)
-}
-
-fn peak_rss_bytes() -> Option<u64> {
-    proc_status_kib("VmHWM:")?.checked_mul(1024)
-}
-
-fn proc_status_kib(field: &str) -> Option<u64> {
-    fs::read_to_string("/proc/self/status")
-        .ok()?
-        .lines()
-        .find(|line| line.starts_with(field))?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
-fn memory_breakdown(database_path: &Path) -> Result<MemoryBreakdown> {
-    let smaps = fs::read_to_string("/proc/self/smaps").context("read /proc/self/smaps")?;
-    let database_path = database_path.canonicalize()?;
-    let database_path = database_path.to_string_lossy();
-    let mut current_heap = false;
-    let mut current_database = false;
-    let mut total_rss = 0_u64;
-    let mut anonymous_rss = 0_u64;
-    let mut heap_rss = 0_u64;
-    let mut database_rss = 0_u64;
-
-    for line in smaps.lines() {
-        if is_smaps_header(line) {
-            let path = line.split_whitespace().nth(5).unwrap_or("");
-            current_heap = path == "[heap]";
-            current_database = path == database_path.as_ref();
-            continue;
-        }
-        if let Some(bytes) = smaps_kib_value(line, "Rss:") {
-            total_rss = total_rss.saturating_add(bytes);
-            if current_heap {
-                heap_rss = heap_rss.saturating_add(bytes);
-            }
-            if current_database {
-                database_rss = database_rss.saturating_add(bytes);
-            }
-        } else if let Some(bytes) = smaps_kib_value(line, "Anonymous:") {
-            anonymous_rss = anonymous_rss.saturating_add(bytes);
-        }
-    }
-    Ok(MemoryBreakdown {
-        anonymous_rss_bytes: anonymous_rss,
-        file_backed_rss_bytes: total_rss.saturating_sub(anonymous_rss),
-        heap_mapping_rss_bytes: heap_rss,
-        database_mapped_rss_bytes: database_rss,
-    })
-}
-
-fn is_smaps_header(line: &str) -> bool {
-    line.split_whitespace().next().is_some_and(|range| {
-        range.contains('-')
-            && range
-                .bytes()
-                .all(|byte| byte == b'-' || byte.is_ascii_hexdigit())
-    })
-}
-
-fn smaps_kib_value(line: &str, field: &str) -> Option<u64> {
-    line.strip_prefix(field)?
-        .split_whitespace()
-        .next()?
-        .parse::<u64>()
-        .ok()?
-        .checked_mul(1024)
 }
 
 fn remove_database_files(path: &Path) -> Result<()> {

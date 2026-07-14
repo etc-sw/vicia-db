@@ -103,6 +103,11 @@ path = "src/bin/pending_isolation_bench.rs"
 required-features = ["bench-internals"]
 
 [[bin]]
+name = "aggregate-retention-bench"
+path = "src/bin/aggregate_retention_bench.rs"
+required-features = ["bench-internals"]
+
+[[bin]]
 name = "storage-layout-bench"
 path = "src/bin/storage_layout_bench.rs"
 required-features = ["bench-internals"]

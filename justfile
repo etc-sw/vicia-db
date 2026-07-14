@@ -32,6 +32,14 @@ pending-isolation-smoke OUTPUT_DIR="target/pending-isolation/smoke":
 pending-isolation-full OUTPUT_DIR="target/pending-isolation/full":
     ./scripts/run-pending-isolation-bench.sh full "{{OUTPUT_DIR}}"
 
+# Compare live retained RSS after one and twenty aggregates on a 10K fixture.
+aggregate-retention-smoke OUTPUT_DIR="target/aggregate-retention/smoke":
+    ./scripts/run-aggregate-retention-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run the clean five-pair retained-memory gate on the canonical 1M fixture.
+aggregate-retention-full OUTPUT_DIR="target/aggregate-retention/full":
+    ./scripts/run-aggregate-retention-bench.sh full "{{OUTPUT_DIR}}"
+
 # Measure the 10K B-tree fill-factor and storage-layout matrix.
 storage-layout-smoke OUTPUT_DIR="target/storage-layout/smoke":
     ./scripts/run-storage-layout-bench.sh smoke "{{OUTPUT_DIR}}"

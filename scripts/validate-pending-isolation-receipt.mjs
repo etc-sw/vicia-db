@@ -84,6 +84,14 @@ const expectedBaselineDiagnostics = {
   peakEntityWindows: 1,
   yieldCount: 0,
   resumeCount: 0,
+  committedMergeElapsedNs: 0,
+  reducerEntries: BASE_FACTS,
+  reducerElapsedNs: 0,
+  entityFlushCount: BASE_FACTS,
+  entityFlushPrepareElapsedNs: 0,
+  visitorValues: BASE_FACTS,
+  visitorElapsedNs: 0,
+  aggregateFinishElapsedNs: 0,
 };
 for (const diagnostics of baselineDiagnostics) {
   assertDeepEqual(
@@ -160,6 +168,12 @@ for (const diagnostics of diagnosticsSeries(control)) {
   assert(
     diagnostics.yieldCount === 0 && diagnostics.resumeCount === 0,
     "native full-step control should not yield",
+  );
+  assert(
+    diagnostics.reducerEntries === BASE_FACTS + CONTROL_FACTS &&
+      diagnostics.entityFlushCount === BASE_FACTS + CONTROL_FACTS &&
+      diagnostics.visitorValues === BASE_FACTS + CONTROL_FACTS,
+    "selected control reducer and visitor counts must be exact",
   );
 }
 
@@ -382,6 +396,14 @@ function validateDiagnostics(diagnostics, label) {
     "peakEntityWindows",
     "yieldCount",
     "resumeCount",
+    "committedMergeElapsedNs",
+    "reducerEntries",
+    "reducerElapsedNs",
+    "entityFlushCount",
+    "entityFlushPrepareElapsedNs",
+    "visitorValues",
+    "visitorElapsedNs",
+    "aggregateFinishElapsedNs",
   ]) {
     assert(
       Number.isSafeInteger(diagnostics[field]) && diagnostics[field] >= 0,
