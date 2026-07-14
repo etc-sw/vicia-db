@@ -1848,6 +1848,25 @@ from source `e95f986`. This closes the measured point regression without
 changing v12 bytes, but rollout still requires a clean storage-layout full
 matrix to pass checkpoint, aggregate, RSS, size, and point gates together.
 
+The subsequent clean, mutation-audited `vicia.storage-layout.v2` full matrix
+from source `32e3882` confirms that the point repair is complete: every fill
+passes point, aggregate, and RSS gates. Fill 85 also passes checkpoint but its
+282.816 MiB image misses the required 10% size reduction. The size-valid fills
+90/95/100 produce 269.586/258.195/248.074 MiB images and pass point and
+aggregate gates, but their checkpoint p50/p95 results are
+3,715.512/5,128.051, 3,512.063/4,539.397, and
+3,374.320/4,340.480 ms, so each fails the checkpoint-tail rule.
+
+The derived variance report again assigns the common positive checkpoint tail
+to sync at three fills, finds no fixed execution-position bias, classifies it
+as host-I/O variance, and admits no implementation. `selectedFillPercent`
+therefore remains `null`, production remains at fill 75, and the Vetch browser
+package is unchanged. This is a stop verdict: rerunning until green, weakening
+sync or receipt gates, and reopening point/current-aggregate construction are
+not admitted by this evidence. The canonical receipt and variance report are
+preserved under
+`benchmarks/baselines/storage-layout/2026-07-14-hal7800-binary-search-full/`.
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full

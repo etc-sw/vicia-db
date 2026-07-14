@@ -39,6 +39,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Isolate the remaining v12 rollout variance. The reproducible `vicia.storage-layout-variance.v1` report maps checkpoint p95/max samples to phase medians and rotated order. Sync owns both observations for all four high-fill candidates without a fixed-position bias, so checkpoint construction is not admitted for another repair and durability sync remains unchanged. Point p50 exceeds fill 75 by 23.05%/32.63%/49.31% at fill 85/90/100, while fill 95 is a p95-only failure; the next risk probe is point-path density attribution.
 - [x] Attribute point-path density cost. The clean `vicia.point-path-density.v1` full receipt keeps tree height, raw leaf codec, leaf comparisons/decodes, and cached fact resolution effectively fixed across fills. Internal separator comparisons grow from 35 at fill 75 to 61/67/75 at fill 85/90/100; internal descent median grows from 5.004 microseconds to 8.548/9.198/10.387 microseconds and correlates with point p50 at 0.991. This admits only an internal separator binary-search repair.
 - [x] Binary-search internal separators. The repair preserves the first-separator-greater-than-key child rule and reduces full-receipt comparisons from 35/61/67/47/75 to 16/16/14/14/15 at fill 75/85/90/95/100. Point p50 becomes 0.00787/0.00776/0.00752/0.00739/0.00760 ms and candidate p95 is at most 0.01039 ms; all high fills pass the 20% relative gate with unchanged v12 bytes and exact result diagnostics.
+- [x] Rerun the complete v12 acceptance matrix from the binary-search source. Every fill passes point, aggregate, and RSS gates. Fill 85 passes checkpoint but misses the size gate; size-valid fills 90/95/100 fail only the checkpoint-tail gate. The mutation-audited variance report attributes the common tail to sync without fixed-position bias and admits no implementation. `selectedFillPercent` remains `null`, production remains at fill 75, and the Vetch browser package remains unchanged.
 
 ## Regression gates
 
@@ -49,21 +50,18 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-### Slice: rerun the v12 storage-layout acceptance matrix
+### Status: v12 rollout remains blocked; no production slice is admitted
 
-- Run one clean mutation-audited `storage-layout-full` receipt from the binary
-  internal-search source. Do not rerun until green or alter the receipt-owned
-  gates.
-- Require one high-fill candidate to pass size, checkpoint p50/p95/tail, point
-  p50/p95, aggregate p50/p95/tail, and RSS together before setting
-  `selectedFillPercent`.
-- If no fill passes, attribute only the remaining failing gate from the new
-  receipt. Do not reopen internal point, checkpoint construction, or current
-  aggregate tuning without a new production owner.
-- If a fill passes, run canonical storage-layout validation and mutation audit,
-  the full Rust/fmt/Clippy/WASM gates, and real Chrome before replacing the
-  complete Vetch browser package.
+- The point-path and current-aggregate work are closed. The only gate blocking
+  the size-valid fills in the latest clean full matrix is checkpoint tail.
+- The measured tail is sync-owned host-I/O variance without fixed-position
+  bias. Do not weaken durability sync, alter receipt-owned gates, rerun until
+  green, or add another checkpoint construction repair from this evidence.
 - Keep `selectedFillPercent = null`, production fill 75, and the current Vetch
-  browser package until one clean mutation-audited full receipt passes every
-  storage-layout gate. Replace the complete package only after that receipt and
-  another real-Chrome pass.
+  browser package. There is no Vicia-to-Vetch package propagation from this
+  slice.
+- Reopen rollout only when a controlled host-I/O acceptance condition or new
+  production-owned checkpoint bottleneck provides evidence that changes this
+  classification. Any future passing candidate still requires canonical
+  validation, mutation audit, full Rust/fmt/Clippy/WASM gates, and real Chrome
+  before complete-package replacement.
