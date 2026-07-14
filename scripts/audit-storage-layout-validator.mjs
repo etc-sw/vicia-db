@@ -25,6 +25,9 @@ try {
   rejectMutation("leaf-codec", (receipt) => {
     receipt.candidates[0].checkpoint.layout.aevt.prefixLeafPages += 1;
   });
+  rejectMutation("selected-fill", (receipt) => {
+    receipt.selectedFillPercent = receipt.selectedFillPercent === 86 ? 87 : 86;
+  });
   console.log(`audited ${source.schema} ${profile} validator rejection`);
 } finally {
   rmSync(directory, { recursive: true, force: true });

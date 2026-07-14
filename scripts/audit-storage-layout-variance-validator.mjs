@@ -25,6 +25,9 @@ try {
   rejectMutation("verdict", (report) => {
     report.verdict.checkpoint.implementationAdmitted = !report.verdict.checkpoint.implementationAdmitted;
   });
+  rejectMutation("production-fill", (report) => {
+    report.verdict.rollout.productionFillPercent += 1;
+  });
   console.log(`audited ${source.schema} validator rejection`);
 } finally {
   rmSync(directory, { recursive: true, force: true });

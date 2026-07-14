@@ -6,9 +6,13 @@ if (!path || !["smoke", "full"].includes(profile)) process.exit(2);
 const receipt = JSON.parse(readFileSync(path, "utf8"));
 const facts = profile === "full" ? 1_000_000 : 10_000;
 const repetitions = profile === "full" ? 20 : 5;
-const fills = [75, 85, 90, 95, 100];
+const fillContracts = {
+  "vicia.storage-layout.v2": [75, 85, 90, 95, 100],
+  "vicia.storage-layout.v3": [75, 85, 86, 87, 88, 89, 90, 95, 100],
+};
+const fills = fillContracts[receipt.schema];
 
-assert(receipt.schema === "vicia.storage-layout.v2", "schema");
+assert(Array.isArray(fills), "schema");
 assert(receipt.facts === facts && receipt.repetitions === repetitions, "profile shape");
 assert(receipt.candidates.map((candidate) => candidate.fillPercent).join(",") === fills.join(","), "fill candidates");
 validateOrder(receipt.checkpointOrder, repetitions, fills, "checkpoint");

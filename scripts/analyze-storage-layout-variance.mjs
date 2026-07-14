@@ -30,7 +30,10 @@ const PHASE_GROUPS = {
 const POINT_REGRESSION_LIMIT = 1.2;
 
 export function analyzeStorageLayoutVariance(receipt, provenance) {
-  assert(receipt.schema === "vicia.storage-layout.v2", "source schema");
+  assert(
+    receipt.schema === "vicia.storage-layout.v2" || receipt.schema === "vicia.storage-layout.v3",
+    "source schema",
+  );
   assert(Array.isArray(receipt.candidates) && receipt.candidates.length > 1, "candidates");
   const baseline = receipt.candidates.find((candidate) => candidate.fillPercent === 75);
   assert(baseline, "fill-75 baseline");
@@ -143,7 +146,7 @@ export function analyzeStorageLayoutVariance(receipt, provenance) {
       },
       rollout: {
         sourceSelectedFillPercent: receipt.selectedFillPercent,
-        productionFillPercent: 75,
+        productionFillPercent: receipt.selectedFillPercent ?? 75,
         authorized: receipt.selectedFillPercent !== null,
       },
     },

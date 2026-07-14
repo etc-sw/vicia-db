@@ -13,10 +13,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &str = "vicia.storage-layout.v2";
+const SCHEMA: &str = "vicia.storage-layout.v3";
 const POINT_DENSITY_SCHEMA: &str = "vicia.point-path-density.v1";
 const BATCH: usize = 1_000;
-const FILLS: &[u8] = &[75, 85, 90, 95, 100];
+const STORAGE_LAYOUT_FILLS: &[u8] = &[75, 85, 86, 87, 88, 89, 90, 95, 100];
+const POINT_DENSITY_FILLS: &[u8] = &[75, 85, 90, 95, 100];
 
 #[derive(Clone, Copy)]
 enum Profile {
@@ -210,8 +211,8 @@ fn run_point_density(profile: Profile, output: &Path) -> Result<()> {
     }
     fs::create_dir_all(output)?;
     let executable = std::env::current_exe()?;
-    let mut builds = Vec::with_capacity(FILLS.len());
-    for fill in FILLS {
+    let mut builds = Vec::with_capacity(POINT_DENSITY_FILLS.len());
+    for fill in POINT_DENSITY_FILLS {
         let path = output.join(format!("fill-{fill}.graph"));
         eprintln!("point-density: build fill-{fill}");
         builds.push(child::<CheckpointSample>(
@@ -225,8 +226,8 @@ fn run_point_density(profile: Profile, output: &Path) -> Result<()> {
         )?);
     }
 
-    let query_order = rotated_orders(profile.repetitions());
-    let mut samples: Vec<Vec<PointDensitySample>> = FILLS
+    let query_order = rotated_orders(POINT_DENSITY_FILLS, profile.repetitions());
+    let mut samples: Vec<Vec<PointDensitySample>> = POINT_DENSITY_FILLS
         .iter()
         .map(|_| Vec::with_capacity(profile.repetitions()))
         .collect();
@@ -239,7 +240,7 @@ fn run_point_density(profile: Profile, output: &Path) -> Result<()> {
                 profile.repetitions()
             );
             samples
-                .get_mut(fill_index(*fill)?)
+                .get_mut(fill_index(POINT_DENSITY_FILLS, *fill)?)
                 .context("missing point-density candidate")?
                 .push(child::<PointDensitySample>(
                     &executable,
@@ -251,9 +252,9 @@ fn run_point_density(profile: Profile, output: &Path) -> Result<()> {
         }
     }
 
-    let mut candidates = Vec::with_capacity(FILLS.len());
-    for fill in FILLS {
-        let index = fill_index(*fill)?;
+    let mut candidates = Vec::with_capacity(POINT_DENSITY_FILLS.len());
+    for fill in POINT_DENSITY_FILLS {
+        let index = fill_index(POINT_DENSITY_FILLS, *fill)?;
         let build = builds.get(index).context("missing point-density build")?;
         let candidate_samples = samples
             .get(index)
@@ -302,15 +303,15 @@ fn run(profile: Profile, output: &Path) -> Result<()> {
     }
     fs::create_dir_all(output)?;
     let executable = std::env::current_exe()?;
-    let checkpoint_order = rotated_orders(profile.repetitions());
-    let query_order = rotated_orders(profile.repetitions());
-    let mut checkpoint_samples: Vec<Vec<CheckpointSample>> = FILLS
+    let checkpoint_order = rotated_orders(STORAGE_LAYOUT_FILLS, profile.repetitions());
+    let query_order = rotated_orders(STORAGE_LAYOUT_FILLS, profile.repetitions());
+    let mut checkpoint_samples: Vec<Vec<CheckpointSample>> = STORAGE_LAYOUT_FILLS
         .iter()
         .map(|_| Vec::with_capacity(profile.repetitions()))
         .collect();
     for (repetition, order) in checkpoint_order.iter().enumerate() {
         for fill in order {
-            let fill_index = fill_index(*fill)?;
+            let fill_index = fill_index(STORAGE_LAYOUT_FILLS, *fill)?;
             let path = output.join(format!("fill-{fill}.graph"));
             eprintln!(
                 "storage-layout: checkpoint fill-{fill} {}/{}",
@@ -331,13 +332,13 @@ fn run(profile: Profile, output: &Path) -> Result<()> {
                 )?);
         }
     }
-    let mut query_samples: Vec<Vec<QuerySample>> = FILLS
+    let mut query_samples: Vec<Vec<QuerySample>> = STORAGE_LAYOUT_FILLS
         .iter()
         .map(|_| Vec::with_capacity(profile.repetitions()))
         .collect();
     for (repetition, order) in query_order.iter().enumerate() {
         for fill in order {
-            let fill_index = fill_index(*fill)?;
+            let fill_index = fill_index(STORAGE_LAYOUT_FILLS, *fill)?;
             let path = output.join(format!("fill-{fill}.graph"));
             eprintln!(
                 "storage-layout: query fill-{fill} {}/{}",
@@ -353,13 +354,13 @@ fn run(profile: Profile, output: &Path) -> Result<()> {
                 )?);
         }
     }
-    let mut candidates = Vec::with_capacity(FILLS.len());
-    for fill in FILLS {
+    let mut candidates = Vec::with_capacity(STORAGE_LAYOUT_FILLS.len());
+    for fill in STORAGE_LAYOUT_FILLS {
         let checkpoint = checkpoint_samples
-            .get_mut(fill_index(*fill)?)
+            .get_mut(fill_index(STORAGE_LAYOUT_FILLS, *fill)?)
             .context("missing checkpoint candidate")?;
         let query = query_samples
-            .get_mut(fill_index(*fill)?)
+            .get_mut(fill_index(STORAGE_LAYOUT_FILLS, *fill)?)
             .context("missing query candidate")?;
         candidates.push(Candidate {
             fill_percent: *fill,
@@ -542,7 +543,9 @@ fn point_value(result: QueryResult) -> Result<i64> {
     if results.len() != 1 {
         bail!("point query returned {} rows", results.len())
     }
-    results[0]
+    results
+        .first()
+        .context("point query returned no row")?
         .first()
         .and_then(|value| value.as_integer())
         .context("point query returned no integer")
@@ -639,17 +642,17 @@ fn summarize(values: &[f64]) -> MetricSummary {
 fn summarize_u64(values: &[u64]) -> MetricSummary {
     summarize(&values.iter().map(|value| *value as f64).collect::<Vec<_>>())
 }
-fn rotated_orders(repetitions: usize) -> Vec<Vec<u8>> {
+fn rotated_orders(fills: &[u8], repetitions: usize) -> Vec<Vec<u8>> {
     (0..repetitions)
         .map(|repetition| {
-            (0..FILLS.len())
-                .filter_map(|offset| FILLS.get((repetition + offset) % FILLS.len()).copied())
+            (0..fills.len())
+                .filter_map(|offset| fills.get((repetition + offset) % fills.len()).copied())
                 .collect()
         })
         .collect()
 }
-fn fill_index(fill: u8) -> Result<usize> {
-    FILLS
+fn fill_index(fills: &[u8], fill: u8) -> Result<usize> {
+    fills
         .iter()
         .position(|candidate| *candidate == fill)
         .context("unknown fill candidate")
@@ -696,8 +699,7 @@ fn populate_stats_and_gates(candidates: &mut [Candidate]) -> Result<()> {
     let baseline = baseline_candidate.stats;
     let baseline_bytes = baseline_candidate.checkpoint.graph_bytes;
     for candidate in candidates.iter_mut() {
-        let size =
-            candidate.checkpoint.graph_bytes.saturating_mul(10) <= baseline_bytes.saturating_mul(9);
+        let size = size_gate(candidate.checkpoint.graph_bytes, baseline_bytes);
         let checkpoint =
             latency_summary_gate(candidate.stats.checkpoint_ms, baseline.checkpoint_ms);
         let point = point_summary_gate(candidate.stats.point_ms, baseline.point_ms);
@@ -718,11 +720,20 @@ fn populate_stats_and_gates(candidates: &mut [Candidate]) -> Result<()> {
     Ok(())
 }
 fn select_fill(candidates: &[Candidate]) -> Option<u8> {
+    select_fill_from_gates(
+        candidates
+            .iter()
+            .map(|candidate| (candidate.fill_percent, candidate.gates.passed)),
+    )
+}
+fn select_fill_from_gates(candidates: impl Iterator<Item = (u8, bool)>) -> Option<u8> {
     candidates
-        .iter()
-        .filter(|candidate| candidate.fill_percent > 75 && candidate.gates.passed)
-        .map(|candidate| candidate.fill_percent)
+        .filter(|(fill_percent, passed)| *fill_percent > 75 && *passed)
+        .map(|(fill_percent, _)| fill_percent)
         .max()
+}
+fn size_gate(candidate_bytes: u64, baseline_bytes: u64) -> bool {
+    candidate_bytes.saturating_mul(10) <= baseline_bytes.saturating_mul(9)
 }
 fn latency_summary_gate(candidate: MetricSummary, baseline: MetricSummary) -> bool {
     candidate.p50 <= baseline.p50 * 1.10
@@ -805,14 +816,38 @@ mod tests {
 
     #[test]
     fn candidate_order_rotates_once_per_repetition() {
-        let orders = rotated_orders(FILLS.len());
-        assert_eq!(orders.len(), FILLS.len());
+        let orders = rotated_orders(STORAGE_LAYOUT_FILLS, STORAGE_LAYOUT_FILLS.len());
+        assert_eq!(orders.len(), STORAGE_LAYOUT_FILLS.len());
         for (repetition, order) in orders.iter().enumerate() {
-            assert_eq!(order.len(), FILLS.len());
-            assert_eq!(order[0], FILLS[repetition]);
+            assert_eq!(order.len(), STORAGE_LAYOUT_FILLS.len());
+            assert_eq!(order[0], STORAGE_LAYOUT_FILLS[repetition]);
             let mut sorted = order.clone();
             sorted.sort_unstable();
-            assert_eq!(sorted, FILLS);
+            assert_eq!(sorted, STORAGE_LAYOUT_FILLS);
         }
+    }
+
+    #[test]
+    fn point_density_candidates_remain_on_the_existing_contract() {
+        assert_eq!(POINT_DENSITY_FILLS, &[75, 85, 90, 95, 100]);
+    }
+
+    #[test]
+    fn size_gate_accepts_the_exact_ten_percent_boundary() {
+        let baseline_bytes = 329_318_400;
+        assert!(!size_gate(296_554_496, baseline_bytes));
+        assert!(size_gate(296_386_560, baseline_bytes));
+    }
+
+    #[test]
+    fn selection_uses_the_highest_passing_frontier_fill() {
+        assert_eq!(
+            select_fill_from_gates([(75, false), (85, true), (86, true), (87, false)].into_iter()),
+            Some(86)
+        );
+        assert_eq!(
+            select_fill_from_gates([(75, false), (86, false), (89, false)].into_iter()),
+            None
+        );
     }
 }
