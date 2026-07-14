@@ -55,6 +55,8 @@ pub(crate) const BROWSER_ATOMIC_MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 ))]
 const BROWSER_ATOMIC_MAX_TOKENS: usize = BROWSER_ATOMIC_MAX_FACTS * 8;
 use crate::graph::FactStorage;
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::graph::types::EntityId;
 use crate::graph::types::Value;
 use crate::query::datalog::access_plan::QueryAccessPlan;
 use crate::query::datalog::evaluator::DEFAULT_MAX_DERIVED_FACTS;
@@ -1665,6 +1667,81 @@ impl Minigraf {
     pub fn set_leaf_read_diagnostics_enabled(&self, enabled: bool) {
         crate::storage::btree_v6::set_leaf_read_diagnostics_enabled(enabled);
         crate::graph::storage::set_current_attribute_phase_diagnostics_enabled(enabled);
+    }
+
+    /// Build the repository-only R1 current-projection candidate.
+    ///
+    /// The write lock supplies a stable ledger watermark while the exact
+    /// current cursor builds the candidate. This hook is unavailable without
+    /// `bench-internals` and does not install the candidate into query routing.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_build_current_projection(
+        &self,
+        attribute: &str,
+        valid_at: i64,
+    ) -> Result<crate::CurrentProjectionCandidate> {
+        let _guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        self.inner
+            .fact_storage
+            .build_current_projection_candidate(attribute, valid_at)
+    }
+
+    /// Refresh the R1 candidate from the authoritative ledger tail.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_refresh_current_projection(
+        &self,
+        candidate: &mut crate::CurrentProjectionCandidate,
+    ) -> Result<crate::CurrentProjectionRefreshDiagnostics> {
+        let _guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        self.inner
+            .fact_storage
+            .refresh_current_projection_candidate(candidate)
+    }
+
+    /// Run the R1 integer count/sum probe after rejecting stale candidates.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_current_projection_integer_aggregate(
+        &self,
+        candidate: &crate::CurrentProjectionCandidate,
+    ) -> Result<(u64, i128)> {
+        let _guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        self.inner
+            .fact_storage
+            .validate_current_projection_candidate(candidate)?;
+        candidate.integer_count_sum()
+    }
+
+    /// Materialize R1 candidate rows for exact semantic fixtures.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_current_projection_rows(
+        &self,
+        candidate: &crate::CurrentProjectionCandidate,
+    ) -> Result<Vec<(EntityId, Value)>> {
+        let _guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        self.inner
+            .fact_storage
+            .validate_current_projection_candidate(candidate)?;
+        candidate.rows()
     }
 
     /// Return live pending-container memory accounting without cloning data.
@@ -5611,6 +5688,169 @@ mod capability_tests {
         assert!(
             !Minigraf::wal_path_for(&path).exists(),
             "raw Minigraf must retain legacy automatic checkpointing"
+        );
+    }
+
+    #[test]
+    fn current_projection_candidate_refreshes_exactly_from_ledger_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current-projection.graph");
+        let db = OpenOptions {
+            wal_checkpoint_threshold: usize::MAX,
+            ..OpenOptions::default()
+        }
+        .path(&path)
+        .open()
+        .unwrap();
+        let ids = (1_u128..=10).map(uuid::Uuid::from_u128).collect::<Vec<_>>();
+        let id = |index: usize| ids.get(index).copied().unwrap();
+        let command = format!(
+            "(transact {{:valid-from \"2020-01-01\" :valid-to \"2030-01-01\"}} [\
+             [#uuid \"{}\" :projection/value \"vetch\"]\
+             [#uuid \"{}\" :projection/value 42]\
+             [#uuid \"{}\" :projection/value 12.5]\
+             [#uuid \"{}\" :projection/value true]\
+             [#uuid \"{}\" :projection/value #uuid \"{}\"]\
+             [#uuid \"{}\" :projection/value :state/ready]\
+             [#uuid \"{}\" :projection/value nil]])",
+            id(0),
+            id(1),
+            id(2),
+            id(3),
+            id(4),
+            id(9),
+            id(5),
+            id(6),
+        );
+        db.execute(&command).unwrap();
+        db.execute(&format!(
+            "(transact {{:valid-from \"2020-01-01\" :valid-to \"2027-01-01\"}} \
+             [[#uuid \"{}\" :projection/value :state/overlap]])",
+            id(8)
+        ))
+        .unwrap();
+        db.execute(&format!(
+            "(transact {{:valid-from \"2024-01-01\" :valid-to \"2030-01-01\"}} \
+             [[#uuid \"{}\" :projection/value :state/overlap]])",
+            id(8)
+        ))
+        .unwrap();
+        db.checkpoint().unwrap();
+
+        const VALID_AT_2025: i64 = 1_735_689_600_000;
+        let mut candidate = db
+            .benchmark_build_current_projection(":projection/value", VALID_AT_2025)
+            .unwrap();
+        assert_eq!(candidate.row_count(), 9);
+        let initial_rows = db.benchmark_current_projection_rows(&candidate).unwrap();
+        assert!(initial_rows.contains(&(id(0), Value::String("vetch".to_owned()))));
+        assert!(initial_rows.contains(&(id(1), Value::Integer(42))));
+        assert!(initial_rows.contains(&(id(2), Value::Float(12.5))));
+        assert!(initial_rows.contains(&(id(3), Value::Boolean(true))));
+        assert!(initial_rows.contains(&(id(4), Value::Ref(id(9)))));
+        assert!(initial_rows.contains(&(id(5), Value::Keyword(":state/ready".to_owned()))));
+        assert!(initial_rows.contains(&(id(6), Value::Null)));
+        assert_eq!(
+            initial_rows
+                .iter()
+                .filter(|row| { **row == (id(8), Value::Keyword(":state/overlap".to_owned())) })
+                .count(),
+            2
+        );
+        let rebuilt = db
+            .benchmark_build_current_projection(":projection/value", VALID_AT_2025)
+            .unwrap();
+        assert_eq!(
+            candidate.fingerprint().unwrap(),
+            rebuilt.fingerprint().unwrap()
+        );
+
+        db.execute(&format!(
+            "(transact {{:valid-from \"2020-01-01\" :valid-to \"2030-01-01\"}} \
+             [[#uuid \"{}\" :projection/value 99]])",
+            id(7)
+        ))
+        .unwrap();
+        assert!(
+            db.benchmark_current_projection_rows(&candidate).is_err(),
+            "a write must stale the candidate before refresh"
+        );
+        let refresh = db
+            .benchmark_refresh_current_projection(&mut candidate)
+            .unwrap();
+        assert_eq!(refresh.tail_facts_visited, 1);
+        assert_eq!(refresh.touched_entities, 1);
+        assert_eq!(candidate.row_count(), 10);
+
+        db.execute(&format!(
+            "(retract [[#uuid \"{}\" :projection/value 42 \
+             {{:valid-from \"2020-01-01\" :valid-to \"2030-01-01\"}}]])",
+            id(1)
+        ))
+        .unwrap();
+        db.benchmark_refresh_current_projection(&mut candidate)
+            .unwrap();
+        assert!(
+            !db.benchmark_current_projection_rows(&candidate)
+                .unwrap()
+                .contains(&(id(1), Value::Integer(42)))
+        );
+
+        db.execute(&format!(
+            "(retract [[#uuid \"{}\" :projection/value \"vetch\"]])",
+            id(0)
+        ))
+        .unwrap();
+        db.benchmark_refresh_current_projection(&mut candidate)
+            .unwrap();
+        assert!(
+            !db.benchmark_current_projection_rows(&candidate)
+                .unwrap()
+                .contains(&(id(0), Value::String("vetch".to_owned())))
+        );
+
+        db.execute(&format!(
+            "(transact {{:valid-from \"2031-01-01\" :valid-to \"2040-01-01\"}} \
+             [[#uuid \"{}\" :projection/value false]])",
+            id(8)
+        ))
+        .unwrap();
+        db.benchmark_refresh_current_projection(&mut candidate)
+            .unwrap();
+        let after_outside_window = db.benchmark_current_projection_rows(&candidate).unwrap();
+        assert!(!after_outside_window.contains(&(id(8), Value::Boolean(false))));
+        assert_eq!(
+            after_outside_window
+                .iter()
+                .filter(|row| { **row == (id(8), Value::Keyword(":state/overlap".to_owned())) })
+                .count(),
+            2
+        );
+
+        let before_checkpoint = candidate.fingerprint().unwrap();
+        db.checkpoint().unwrap();
+        assert!(
+            db.benchmark_current_projection_rows(&candidate).is_err(),
+            "checkpoint publication must invalidate the captured generation"
+        );
+        let checkpoint_refresh = db
+            .benchmark_refresh_current_projection(&mut candidate)
+            .unwrap();
+        assert_eq!(checkpoint_refresh.tail_facts_visited, 0);
+        assert_eq!(checkpoint_refresh.touched_entities, 0);
+        assert_eq!(candidate.fingerprint().unwrap(), before_checkpoint);
+
+        let rebuilt_after_updates = db
+            .benchmark_build_current_projection(":projection/value", VALID_AT_2025)
+            .unwrap();
+        assert_eq!(
+            db.benchmark_current_projection_rows(&candidate).unwrap(),
+            db.benchmark_current_projection_rows(&rebuilt_after_updates)
+                .unwrap()
+        );
+        assert_eq!(
+            candidate.fingerprint().unwrap(),
+            rebuilt_after_updates.fingerprint().unwrap()
         );
     }
 }

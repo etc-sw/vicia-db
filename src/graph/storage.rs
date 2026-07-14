@@ -1,3 +1,8 @@
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::graph::current_projection::{
+    CurrentProjectionBuilder, CurrentProjectionCandidate, CurrentProjectionRefreshDiagnostics,
+    encode_values,
+};
 use crate::graph::pending_overlay::{PendingFactId, PendingOverlay};
 use crate::graph::types::{
     Attribute, EntityId, Fact, RETRACT_ALL_VALID_FROM, TransactOptions, TxId, VALID_TIME_FOREVER,
@@ -269,6 +274,8 @@ pub(crate) struct CurrentEntityAttributeCursor {
     last_key: Option<EavtKey>,
     committed_complete: bool,
     complete: bool,
+    #[cfg(any(test, feature = "bench-internals"))]
+    emit_each_visible_window: bool,
 }
 
 /// Resumable current reverse-reference reduction for one exact VAET range.
@@ -1921,6 +1928,120 @@ impl FactStorage {
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn build_current_projection_candidate(
+        &self,
+        attribute: &str,
+        valid_at: i64,
+    ) -> Result<CurrentProjectionCandidate> {
+        let (publication_generation, tx_count) = self.current_projection_watermark();
+        let mut builder =
+            CurrentProjectionBuilder::new(attribute, valid_at, publication_generation, tx_count);
+        self.visit_current_attribute_values(
+            &attribute.to_owned(),
+            None,
+            CurrentValidTime::At(valid_at),
+            &mut |entity, value| builder.push(entity, value),
+        )?;
+        if self.current_projection_watermark() != (publication_generation, tx_count) {
+            anyhow::bail!("current projection publication changed during rebuild")
+        }
+        builder.finish()
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn refresh_current_projection_candidate(
+        &self,
+        candidate: &mut CurrentProjectionCandidate,
+    ) -> Result<CurrentProjectionRefreshDiagnostics> {
+        let (publication_generation, tx_count) = self.current_projection_watermark();
+        if candidate.tx_count() > tx_count {
+            anyhow::bail!("current projection transaction watermark is ahead of the ledger")
+        }
+        let mut tail_facts_visited = 0_u64;
+        let mut touched = std::collections::BTreeSet::new();
+        self.for_each_fact_since(candidate.tx_count(), |fact| {
+            tail_facts_visited = tail_facts_visited.saturating_add(1);
+            if fact.attribute == candidate.attribute() {
+                touched.insert(fact.entity);
+            }
+            Ok(())
+        })?;
+        if self.current_projection_watermark() != (publication_generation, tx_count) {
+            anyhow::bail!("current projection publication changed while reading the ledger tail")
+        }
+
+        let mut replacements = Vec::with_capacity(touched.len());
+        let mut replacement_rows = 0_u64;
+        for entity in &touched {
+            let mut values = Vec::new();
+            let mut cursor = self.current_entity_attribute_cursor(
+                *entity,
+                candidate.attribute(),
+                None,
+                CurrentValidTime::At(candidate.valid_at()),
+            )?;
+            cursor.emit_each_visible_window = true;
+            loop {
+                if matches!(
+                    self.step_current_entity_attribute_cursor(
+                        &mut cursor,
+                        usize::MAX,
+                        &mut |value| {
+                            values.push(value.clone());
+                            Ok(())
+                        },
+                    )?,
+                    CurrentEntityAttributeStep::Complete { .. }
+                ) {
+                    break;
+                }
+            }
+            replacement_rows =
+                replacement_rows.saturating_add(u64::try_from(values.len()).unwrap_or(u64::MAX));
+            replacements.push((*entity, encode_values(&values)));
+        }
+
+        if self.current_projection_watermark() != (publication_generation, tx_count) {
+            anyhow::bail!("current projection publication changed during entity refresh")
+        }
+        for (entity, values) in replacements {
+            candidate.replace_entity(entity, values);
+        }
+        candidate.set_watermark(publication_generation, tx_count);
+        Ok(CurrentProjectionRefreshDiagnostics {
+            tail_facts_visited,
+            touched_entities: u64::try_from(touched.len()).unwrap_or(u64::MAX),
+            replacement_rows,
+            publication_generation,
+            tx_count,
+        })
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn validate_current_projection_candidate(
+        &self,
+        candidate: &CurrentProjectionCandidate,
+    ) -> Result<()> {
+        let (publication_generation, tx_count) = self.current_projection_watermark();
+        if candidate.publication_generation() != publication_generation
+            || candidate.tx_count() != tx_count
+        {
+            anyhow::bail!("current projection candidate is stale")
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    fn current_projection_watermark(&self) -> (u64, u64) {
+        let publication_generation = self
+            .data
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .publication_generation;
+        (publication_generation, self.current_tx_count())
+    }
+
     pub(crate) fn current_entity_attribute_cursor(
         &self,
         entity: EntityId,
@@ -1970,6 +2091,8 @@ impl FactStorage {
             last_key: None,
             committed_complete: false,
             complete: false,
+            #[cfg(any(test, feature = "bench-internals"))]
+            emit_each_visible_window: false,
         })
     }
 
@@ -2082,37 +2205,42 @@ impl FactStorage {
 
         let mut output = Vec::new();
         for (encoded, state) in &cursor.values {
-            let visible_fact = state.assertions.iter().find_map(
-                |((valid_from, valid_to), (assert_tx, fact_ref))| {
-                    let scoped_retract = state
-                        .max_scoped_retract_tx
-                        .get(&(*valid_from, *valid_to))
-                        .copied()
-                        .unwrap_or(0);
-                    (*assert_tx > state.max_unscoped_retract_tx.max(scoped_retract)
-                        && !matches!(cursor.valid_time, CurrentValidTime::At(at) if !(*valid_from <= at && at < *valid_to)))
-                    .then_some(*fact_ref)
-                },
-            );
-            let Some(fact_ref) = visible_fact else {
-                continue;
-            };
-            let value = if encoded.first() == Some(&0x03) {
-                match fact_ref {
-                    CursorFactRef::Pending(id) => d.pending.get(id)?.to_fact().value,
-                    CursorFactRef::Committed(fact_ref) => {
-                        cursor
-                            .committed_fact_reader
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("current cursor has no fact reader"))?
-                            .resolve(fact_ref)?
-                            .value
-                    }
+            for ((valid_from, valid_to), (assert_tx, fact_ref)) in &state.assertions {
+                let scoped_retract = state
+                    .max_scoped_retract_tx
+                    .get(&(*valid_from, *valid_to))
+                    .copied()
+                    .unwrap_or(0);
+                if *assert_tx <= state.max_unscoped_retract_tx.max(scoped_retract)
+                    || matches!(cursor.valid_time, CurrentValidTime::At(at) if !(*valid_from <= at && at < *valid_to))
+                {
+                    continue;
                 }
-            } else {
-                decode_index_value(encoded)?
-            };
-            output.push((encoded, value));
+                let value = if encoded.first() == Some(&0x03) {
+                    match fact_ref {
+                        CursorFactRef::Pending(id) => d.pending.get(*id)?.to_fact().value,
+                        CursorFactRef::Committed(fact_ref) => {
+                            cursor
+                                .committed_fact_reader
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("current cursor has no fact reader")
+                                })?
+                                .resolve(*fact_ref)?
+                                .value
+                        }
+                    }
+                } else {
+                    decode_index_value(encoded)?
+                };
+                output.push((encoded, value));
+                #[cfg(any(test, feature = "bench-internals"))]
+                if !cursor.emit_each_visible_window {
+                    break;
+                }
+                #[cfg(not(any(test, feature = "bench-internals")))]
+                break;
+            }
         }
         output.sort_unstable_by(|left, right| left.0.cmp(right.0));
         for (_, value) in &output {

@@ -127,6 +127,11 @@ name = "current-reader-bench"
 path = "src/bin/current_reader_bench.rs"
 required-features = ["bench-internals"]
 
+[[bin]]
+name = "current-projection-bench"
+path = "src/bin/current_projection_bench.rs"
+required-features = ["bench-internals"]
+
 [features]
 default = []
 wasm = []

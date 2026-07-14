@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) mod current_projection;
 pub(crate) mod pending_overlay;
 pub(crate) mod storage;
 pub(crate) mod types;
