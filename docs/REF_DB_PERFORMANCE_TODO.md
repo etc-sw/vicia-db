@@ -38,6 +38,7 @@ Temporary checklist based on the 1M reference DB benchmark.
 - [x] Attribute current-read phases and repair the measured reducer. The diagnostic-only 1M probe assigns 22.84% of query time to `reduce_current_entry`; the accepted repair reuses one inline value/window state and promotes to the existing map only for multi-value entities. The clean same-fixture receipt reduces aggregate p50 from 355.045 to 282.403 ms (20.46%), keeps p95/p50 at 102.82%, improves point p95 from 0.01496 to 0.01363 ms, holds query RSS to 1.250 MiB, and retains exactly 1,000,000 projected entries with zero owned AEVT decode or full-leaf materialization. The clean storage-layout rerun and mutation audit pass structurally, but no high-fill candidate passes every rollout gate, so v12 and Vetch package rollout remain open.
 - [x] Isolate the remaining v12 rollout variance. The reproducible `vicia.storage-layout-variance.v1` report maps checkpoint p95/max samples to phase medians and rotated order. Sync owns both observations for all four high-fill candidates without a fixed-position bias, so checkpoint construction is not admitted for another repair and durability sync remains unchanged. Point p50 exceeds fill 75 by 23.05%/32.63%/49.31% at fill 85/90/100, while fill 95 is a p95-only failure; the next risk probe is point-path density attribution.
 - [x] Attribute point-path density cost. The clean `vicia.point-path-density.v1` full receipt keeps tree height, raw leaf codec, leaf comparisons/decodes, and cached fact resolution effectively fixed across fills. Internal separator comparisons grow from 35 at fill 75 to 61/67/75 at fill 85/90/100; internal descent median grows from 5.004 microseconds to 8.548/9.198/10.387 microseconds and correlates with point p50 at 0.991. This admits only an internal separator binary-search repair.
+- [x] Binary-search internal separators. The repair preserves the first-separator-greater-than-key child rule and reduces full-receipt comparisons from 35/61/67/47/75 to 16/16/14/14/15 at fill 75/85/90/95/100. Point p50 becomes 0.00787/0.00776/0.00752/0.00739/0.00760 ms and candidate p95 is at most 0.01039 ms; all high fills pass the 20% relative gate with unchanged v12 bytes and exact result diagnostics.
 
 ## Regression gates
 
@@ -48,24 +49,20 @@ Temporary checklist based on the 1M reference DB benchmark.
 
 ## Next task
 
-### Slice: binary-search internal separators
+### Slice: rerun the v12 storage-layout acceptance matrix
 
-- Replace the internal page's linear separator walk with a binary search for
-  the first separator strictly greater than the requested key. Preserve the
-  existing child-selection rule and page bytes.
-- Cover before-first, exact separator, between-separator, and after-last keys
-  on multi-level raw and prefix-leaf trees, including malformed selected
-  separator bytes and zero-key internal nodes.
-- Re-run the clean point-density full receipt. Every fill must keep exact value
-  5,000, height 4, one leaf, one fact resolution, zero owned EAVT decode, and
-  zero full-leaf materialization. High-fill internal comparisons must be no
-  greater than the old fill-75 count of 35.
-- Require every high-fill point p50 and p95 to remain within 20% of the new
-  fill-75 candidate. Stop without rollout if the point gate or any semantic,
-  corruption, RSS, checkpoint, or aggregate gate remains open.
-- Do not change leaf seek, checkpoint or current-attribute aggregate code,
-  weaken sync, change v12 bytes, or add an API, cache, prefetch layer, or
-  dependency.
+- Run one clean mutation-audited `storage-layout-full` receipt from the binary
+  internal-search source. Do not rerun until green or alter the receipt-owned
+  gates.
+- Require one high-fill candidate to pass size, checkpoint p50/p95/tail, point
+  p50/p95, aggregate p50/p95/tail, and RSS together before setting
+  `selectedFillPercent`.
+- If no fill passes, attribute only the remaining failing gate from the new
+  receipt. Do not reopen internal point, checkpoint construction, or current
+  aggregate tuning without a new production owner.
+- If a fill passes, run canonical storage-layout validation and mutation audit,
+  the full Rust/fmt/Clippy/WASM gates, and real Chrome before replacing the
+  complete Vetch browser package.
 - Keep `selectedFillPercent = null`, production fill 75, and the current Vetch
   browser package until one clean mutation-audited full receipt passes every
   storage-layout gate. Replace the complete package only after that receipt and

@@ -1832,6 +1832,22 @@ The clean receipt and mutation-audited analysis are preserved under
 `benchmarks/baselines/point-path-density/2026-07-14-hal7800-internal-descent-full/`
 from source `1b4391d`.
 
+The admitted repair binary-searches the first internal separator strictly
+greater than the requested key, preserving exact-separator right-child and
+rightmost fallback behavior. The clean candidate reduces internal comparisons
+to 16/16/14/14/15 and median descent time to
+2.687/2.642/2.398/2.363/2.543 microseconds at fill 75/85/90/95/100. Point p50
+falls to 0.00787/0.00776/0.00752/0.00739/0.00760 ms, 23.48–51.44% below each
+fill's linear-search baseline. Candidate p95 is at most 0.01039 ms, and every
+high fill remains within 106% of the new fill-75 p50 and p95.
+
+All exact-value, tree-height, leaf-codec, projection, fact-resolution, owned
+decode, and full-leaf invariants pass. The candidate receipt is preserved under
+`benchmarks/baselines/point-path-density/2026-07-14-hal7800-binary-search-full/`
+from source `e95f986`. This closes the measured point regression without
+changing v12 bytes, but rollout still requires a clean storage-layout full
+matrix to pass checkpoint, aggregate, RSS, size, and point gates together.
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full
