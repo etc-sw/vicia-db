@@ -23,10 +23,12 @@ try {
     for (const sample of samples.slice(-5)) sample.rssBytes = samples[0].rssBytes + 3 * 1024 * 1024;
   });
   rejectMutation("retained", (receipt) => {
-    const measurement = receipt.pairs[0].twenty;
-    measurement.rssAfterLiveTrimBytes = measurement.baselineRssBytes + 17 * 1024 * 1024;
-    measurement.retainedDeltaAfterLiveTrimBytes = 17 * 1024 * 1024;
-    measurement.liveDatabaseRssBytes = Math.max(0, measurement.rssAfterLiveTrimBytes - measurement.rssAfterDropTrimBytes);
+    for (const pair of receipt.pairs) {
+      const measurement = pair.twenty;
+      measurement.rssAfterLiveTrimBytes = measurement.baselineRssBytes + 17 * 1024 * 1024;
+      measurement.retainedDeltaAfterLiveTrimBytes = 17 * 1024 * 1024;
+      measurement.liveDatabaseRssBytes = Math.max(0, measurement.rssAfterLiveTrimBytes - measurement.rssAfterDropTrimBytes);
+    }
   });
   console.log(`audited ${source.schema} ${profile} validator rejection`);
 } finally {
