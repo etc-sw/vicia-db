@@ -1,7 +1,7 @@
 #[cfg(any(test, feature = "bench-internals"))]
 use crate::graph::current_projection::{
     CurrentProjectionBuilder, CurrentProjectionCandidate, CurrentProjectionRefreshDiagnostics,
-    encode_values,
+    ProjectedInterval,
 };
 use crate::graph::pending_overlay::{PendingFactId, PendingOverlay};
 use crate::graph::types::{
@@ -1655,6 +1655,19 @@ impl FactStorage {
         max_entries: usize,
         visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
     ) -> Result<CurrentAttributeStep> {
+        self.step_current_attribute_interval_cursor(
+            cursor,
+            max_entries,
+            &mut |entity, value, _, _| visit(entity, value),
+        )
+    }
+
+    fn step_current_attribute_interval_cursor(
+        &self,
+        cursor: &mut CurrentAttributeCursor,
+        max_entries: usize,
+        visit: &mut dyn FnMut(EntityId, &Value, i64, i64) -> Result<()>,
+    ) -> Result<CurrentAttributeStep> {
         cursor.begin_step();
         let result = self.step_current_attribute_cursor_inner(cursor, max_entries, visit);
         #[cfg(any(test, feature = "bench-internals"))]
@@ -1666,7 +1679,7 @@ impl FactStorage {
         &self,
         cursor: &mut CurrentAttributeCursor,
         max_entries: usize,
-        visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>,
+        visit: &mut dyn FnMut(EntityId, &Value, i64, i64) -> Result<()>,
     ) -> Result<CurrentAttributeStep> {
         if cursor.complete {
             return Ok(CurrentAttributeStep::Complete { entries: 0 });
@@ -1681,7 +1694,7 @@ impl FactStorage {
         let bounded = max_entries != usize::MAX;
 
         let flush_entity = |cursor: &mut CurrentAttributeCursor,
-                            visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>|
+                            visit: &mut dyn FnMut(EntityId, &Value, i64, i64) -> Result<()>|
          -> Result<()> {
             let Some(entity) = cursor.current_entity else {
                 return Ok(());
@@ -1718,9 +1731,15 @@ impl FactStorage {
                     } else {
                         decode_index_value(encoded)?
                     };
-                    output.push(value);
+                    output.push((encoded.to_vec(), value, *valid_from, *valid_to));
                 }
             }
+            output.sort_unstable_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| left.2.cmp(&right.2))
+                    .then_with(|| left.3.cmp(&right.3))
+            });
             #[cfg(any(test, feature = "bench-internals"))]
             if let Some(started) = prepare_started {
                 cursor.diagnostics.entity_flush_prepare_elapsed_ns = cursor
@@ -1728,12 +1747,12 @@ impl FactStorage {
                     .entity_flush_prepare_elapsed_ns
                     .saturating_add(elapsed_ns(started));
             }
-            for value in &output {
+            for (_, value, valid_from, valid_to) in &output {
                 #[cfg(any(test, feature = "bench-internals"))]
                 let visitor_started = cursor
                     .phase_diagnostics_enabled
                     .then(std::time::Instant::now);
-                let visit_result = visit(entity, value);
+                let visit_result = visit(entity, value, *valid_from, *valid_to);
                 #[cfg(any(test, feature = "bench-internals"))]
                 if let Some(started) = visitor_started {
                     cursor.diagnostics.visitor_elapsed_ns = cursor
@@ -1765,7 +1784,7 @@ impl FactStorage {
         let accept = |cursor: &mut CurrentAttributeCursor,
                       key: CurrentAevtEntryRef<'_>,
                       fact_ref: CursorFactRef,
-                      visit: &mut dyn FnMut(EntityId, &Value) -> Result<()>|
+                      visit: &mut dyn FnMut(EntityId, &Value, i64, i64) -> Result<()>|
          -> Result<()> {
             if !entry_visible_as_of(key, cursor.as_of.as_ref()) {
                 return Ok(());
@@ -1929,19 +1948,40 @@ impl FactStorage {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
+    fn visit_current_attribute_intervals(
+        &self,
+        attribute: &Attribute,
+        visit: &mut dyn FnMut(EntityId, &Value, i64, i64) -> Result<()>,
+    ) -> Result<()> {
+        let mut cursor = self.current_attribute_cursor(attribute, None, CurrentValidTime::Any);
+        loop {
+            if matches!(
+                self.step_current_attribute_interval_cursor(&mut cursor, usize::MAX, visit,)?,
+                CurrentAttributeStep::Complete { .. }
+            ) {
+                return Ok(());
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn build_current_projection_candidate(
         &self,
         attribute: &str,
-        valid_at: i64,
+        valid_time_floor: i64,
     ) -> Result<CurrentProjectionCandidate> {
         let (publication_generation, tx_count) = self.current_projection_watermark();
-        let mut builder =
-            CurrentProjectionBuilder::new(attribute, valid_at, publication_generation, tx_count);
-        self.visit_current_attribute_values(
+        let mut builder = CurrentProjectionBuilder::new(
+            attribute,
+            valid_time_floor,
+            publication_generation,
+            tx_count,
+        );
+        self.visit_current_attribute_intervals(
             &attribute.to_owned(),
-            None,
-            CurrentValidTime::At(valid_at),
-            &mut |entity, value| builder.push(entity, value),
+            &mut |entity, value, valid_from, valid_to| {
+                builder.push(entity, value, valid_from, valid_to)
+            },
         )?;
         if self.current_projection_watermark() != (publication_generation, tx_count) {
             anyhow::bail!("current projection publication changed during rebuild")
@@ -1974,21 +2014,23 @@ impl FactStorage {
         let mut replacements = Vec::with_capacity(touched.len());
         let mut replacement_rows = 0_u64;
         for entity in &touched {
-            let mut values = Vec::new();
+            let mut intervals = Vec::new();
             let mut cursor = self.current_entity_attribute_cursor(
                 *entity,
                 candidate.attribute(),
                 None,
-                CurrentValidTime::At(candidate.valid_at()),
+                CurrentValidTime::Any,
             )?;
             cursor.emit_each_visible_window = true;
             loop {
                 if matches!(
-                    self.step_current_entity_attribute_cursor(
+                    self.step_current_entity_attribute_interval_cursor(
                         &mut cursor,
                         usize::MAX,
-                        &mut |value| {
-                            values.push(value.clone());
+                        &mut |value, valid_from, valid_to| {
+                            if valid_to > candidate.valid_time_floor() {
+                                intervals.push(ProjectedInterval::new(value, valid_from, valid_to));
+                            }
                             Ok(())
                         },
                     )?,
@@ -1998,8 +2040,8 @@ impl FactStorage {
                 }
             }
             replacement_rows =
-                replacement_rows.saturating_add(u64::try_from(values.len()).unwrap_or(u64::MAX));
-            replacements.push((*entity, encode_values(&values)));
+                replacement_rows.saturating_add(u64::try_from(intervals.len()).unwrap_or(u64::MAX));
+            replacements.push((*entity, intervals));
         }
 
         if self.current_projection_watermark() != (publication_generation, tx_count) {
@@ -2101,6 +2143,28 @@ impl FactStorage {
         cursor: &mut CurrentEntityAttributeCursor,
         max_entries: usize,
         visit: &mut dyn FnMut(&Value) -> Result<()>,
+    ) -> Result<CurrentEntityAttributeStep> {
+        self.step_current_entity_attribute_interval_cursor(
+            cursor,
+            max_entries,
+            &mut |value, _, _| visit(value),
+        )
+    }
+
+    fn step_current_entity_attribute_interval_cursor(
+        &self,
+        cursor: &mut CurrentEntityAttributeCursor,
+        max_entries: usize,
+        visit: &mut dyn FnMut(&Value, i64, i64) -> Result<()>,
+    ) -> Result<CurrentEntityAttributeStep> {
+        self.step_current_entity_attribute_cursor_inner(cursor, max_entries, visit)
+    }
+
+    fn step_current_entity_attribute_cursor_inner(
+        &self,
+        cursor: &mut CurrentEntityAttributeCursor,
+        max_entries: usize,
+        visit: &mut dyn FnMut(&Value, i64, i64) -> Result<()>,
     ) -> Result<CurrentEntityAttributeStep> {
         if cursor.complete {
             return Ok(CurrentEntityAttributeStep::Complete { entries: 0 });
@@ -2233,7 +2297,7 @@ impl FactStorage {
                 } else {
                     decode_index_value(encoded)?
                 };
-                output.push((encoded, value));
+                output.push((encoded, value, *valid_from, *valid_to));
                 #[cfg(any(test, feature = "bench-internals"))]
                 if !cursor.emit_each_visible_window {
                     break;
@@ -2242,9 +2306,14 @@ impl FactStorage {
                 break;
             }
         }
-        output.sort_unstable_by(|left, right| left.0.cmp(right.0));
-        for (_, value) in &output {
-            visit(value)?;
+        output.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(right.0)
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.3.cmp(&right.3))
+        });
+        for (_, value, valid_from, valid_to) in &output {
+            visit(value, *valid_from, *valid_to)?;
         }
         cursor.values.clear();
         cursor.complete = true;

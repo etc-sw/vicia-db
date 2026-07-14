@@ -1669,7 +1669,7 @@ impl Minigraf {
         crate::graph::storage::set_current_attribute_phase_diagnostics_enabled(enabled);
     }
 
-    /// Build the repository-only R1 current-projection candidate.
+    /// Build the repository-only temporal current-projection candidate.
     ///
     /// The write lock supplies a stable ledger watermark while the exact
     /// current cursor builds the candidate. This hook is unavailable without
@@ -1679,7 +1679,7 @@ impl Minigraf {
     pub fn benchmark_build_current_projection(
         &self,
         attribute: &str,
-        valid_at: i64,
+        valid_time_floor: i64,
     ) -> Result<crate::CurrentProjectionCandidate> {
         let _guard = self
             .inner
@@ -1688,7 +1688,7 @@ impl Minigraf {
             .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
         self.inner
             .fact_storage
-            .build_current_projection_candidate(attribute, valid_at)
+            .build_current_projection_candidate(attribute, valid_time_floor)
     }
 
     /// Refresh the R1 candidate from the authoritative ledger tail.
@@ -1726,6 +1726,25 @@ impl Minigraf {
         candidate.integer_count_sum()
     }
 
+    /// Run the integer count/sum probe at or after the candidate time floor.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_current_projection_integer_aggregate_at(
+        &self,
+        candidate: &crate::CurrentProjectionCandidate,
+        valid_at: i64,
+    ) -> Result<(u64, i128)> {
+        let _guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        self.inner
+            .fact_storage
+            .validate_current_projection_candidate(candidate)?;
+        candidate.integer_count_sum_at(valid_at)
+    }
+
     /// Materialize R1 candidate rows for exact semantic fixtures.
     #[cfg(any(test, feature = "bench-internals"))]
     #[doc(hidden)]
@@ -1742,6 +1761,25 @@ impl Minigraf {
             .fact_storage
             .validate_current_projection_candidate(candidate)?;
         candidate.rows()
+    }
+
+    /// Materialize candidate rows at or after its valid-time floor.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_current_projection_rows_at(
+        &self,
+        candidate: &crate::CurrentProjectionCandidate,
+        valid_at: i64,
+    ) -> Result<Vec<(EntityId, Value)>> {
+        let _guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        self.inner
+            .fact_storage
+            .validate_current_projection_candidate(candidate)?;
+        candidate.rows_at(valid_at)
     }
 
     /// Return live pending-container memory accounting without cloning data.
@@ -5851,6 +5889,87 @@ mod capability_tests {
         assert_eq!(
             candidate.fingerprint().unwrap(),
             rebuilt_after_updates.fingerprint().unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_projection_crosses_valid_time_boundaries_without_a_write() {
+        const BOUNDARY: i64 = 1_735_689_600_000;
+        const BEFORE: i64 = BOUNDARY - 1;
+        const AFTER: i64 = BOUNDARY + 1;
+
+        let db = Minigraf::in_memory().unwrap();
+        let future = uuid::Uuid::from_u128(101);
+        let expiring = uuid::Uuid::from_u128(102);
+        let overlap = uuid::Uuid::from_u128(103);
+        db.execute(&format!(
+            "(transact {{:valid-from \"2025-01-01\" :valid-to \"2030-01-01\"}} [[#uuid \"{future}\" :projection/value 10]])"
+        ))
+        .unwrap();
+        db.execute(&format!(
+            "(transact {{:valid-from \"2020-01-01\" :valid-to \"2025-01-01\"}} [[#uuid \"{expiring}\" :projection/value 20]])"
+        ))
+        .unwrap();
+        db.execute(&format!(
+            "(transact {{:valid-from \"2020-01-01\" :valid-to \"2026-01-01\"}} [[#uuid \"{overlap}\" :projection/value 30]])"
+        ))
+        .unwrap();
+        db.execute(&format!(
+            "(transact {{:valid-from \"2024-01-01\" :valid-to \"2030-01-01\"}} [[#uuid \"{overlap}\" :projection/value 30]])"
+        ))
+        .unwrap();
+
+        let mut candidate = db
+            .benchmark_build_current_projection(":projection/value", BEFORE)
+            .unwrap();
+        assert!(
+            db.benchmark_current_projection_rows_at(&candidate, BEFORE - 1)
+                .is_err(),
+            "projection must reject historical reads before its floor"
+        );
+        assert_eq!(
+            db.benchmark_current_projection_integer_aggregate_at(&candidate, BEFORE)
+                .unwrap(),
+            (3, 80)
+        );
+        assert_eq!(
+            db.benchmark_current_projection_integer_aggregate_at(&candidate, BOUNDARY)
+                .unwrap(),
+            (3, 70)
+        );
+        assert_eq!(
+            db.benchmark_current_projection_integer_aggregate_at(&candidate, AFTER)
+                .unwrap(),
+            (3, 70)
+        );
+
+        db.execute(&format!(
+            "(retract [[#uuid \"{overlap}\" :projection/value 30 {{:valid-from \"2020-01-01\" :valid-to \"2026-01-01\"}}]])"
+        ))
+        .unwrap();
+        assert!(
+            db.benchmark_current_projection_rows_at(&candidate, BOUNDARY)
+                .is_err(),
+            "a ledger write must stale the temporal candidate"
+        );
+        db.benchmark_refresh_current_projection(&mut candidate)
+            .unwrap();
+        assert_eq!(
+            db.benchmark_current_projection_integer_aggregate_at(&candidate, BOUNDARY)
+                .unwrap(),
+            (2, 40)
+        );
+
+        db.execute(&format!(
+            "(retract [[#uuid \"{overlap}\" :projection/value 30]])"
+        ))
+        .unwrap();
+        db.benchmark_refresh_current_projection(&mut candidate)
+            .unwrap();
+        assert_eq!(
+            db.benchmark_current_projection_integer_aggregate_at(&candidate, BOUNDARY)
+                .unwrap(),
+            (1, 10)
         );
     }
 }
