@@ -254,8 +254,7 @@ fn main() -> Result<()> {
 fn measure_page_image(path: &Path, facts: u64, samples: usize) -> Result<PageImageMeasurement> {
     let graph_bytes = fs::metadata(path)?.len();
     let db = open(path)?;
-    let mut candidate =
-        db.benchmark_build_current_projection(":projection/value", TEMPORAL_BEFORE)?;
+    let candidate = db.benchmark_build_current_projection(":projection/value", TEMPORAL_BEFORE)?;
     if candidate.row_count() != usize::try_from(facts)? {
         bail!("page-image candidate row count mismatch")
     }
@@ -294,6 +293,20 @@ fn measure_page_image(path: &Path, facts: u64, samples: usize) -> Result<PageIma
         .saturating_sub(peak_before);
     let round_trip = decoded.fingerprint()? == candidate.fingerprint()?
         && decoded.row_count() == candidate.row_count();
+    let image_identity = image.identity();
+    let logical_bytes = image.logical_bytes();
+    let padded_bytes = image.padded_bytes();
+    let image_shape = PageImageShapeMeasurement {
+        logical_bytes,
+        padded_bytes,
+        padding_bytes: padded_bytes.saturating_sub(logical_bytes),
+        page_count: image.page_count(),
+        image_ratio: padded_bytes as f64 / graph_bytes as f64,
+        row_count: image.row_count(),
+        fingerprint: format!("{:016x}", image.fingerprint()),
+    };
+    drop(image);
+    drop(candidate);
 
     let query_rss = current_rss_bytes().context("read page-image query RSS baseline")?;
     let mut probes = Vec::new();
@@ -327,6 +340,8 @@ fn measure_page_image(path: &Path, facts: u64, samples: usize) -> Result<PageIma
         .saturating_sub(query_rss);
     drop(decoded);
 
+    let mut candidate =
+        db.benchmark_build_current_projection(":projection/value", TEMPORAL_BEFORE)?;
     let added_value = i64::try_from(facts)?;
     db.execute(&format!(
         "(transact {{:valid-from \"2025-01-01T00:00:00.000Z\" \
@@ -340,9 +355,6 @@ fn measure_page_image(path: &Path, facts: u64, samples: usize) -> Result<PageIma
     let rebuilt_image = db.benchmark_encode_current_projection_page_image(&rebuilt)?;
     let overlay_flatten = overlay_image == rebuilt_image;
 
-    let identity = image.identity();
-    let logical_bytes = image.logical_bytes();
-    let padded_bytes = image.padded_bytes();
     Ok(PageImageMeasurement {
         schema: "vicia.current-projection-page-image.v1",
         facts,
@@ -350,19 +362,11 @@ fn measure_page_image(path: &Path, facts: u64, samples: usize) -> Result<PageIma
         graph_bytes,
         valid_time_floor: TEMPORAL_BEFORE,
         identity: PageImageIdentityMeasurement {
-            base_generation: identity.base_generation(),
-            manifest_generation: identity.manifest_generation(),
-            tx_count: identity.tx_count(),
+            base_generation: image_identity.base_generation(),
+            manifest_generation: image_identity.manifest_generation(),
+            tx_count: image_identity.tx_count(),
         },
-        image: PageImageShapeMeasurement {
-            logical_bytes,
-            padded_bytes,
-            padding_bytes: padded_bytes.saturating_sub(logical_bytes),
-            page_count: image.page_count(),
-            image_ratio: padded_bytes as f64 / graph_bytes as f64,
-            row_count: image.row_count(),
-            fingerprint: format!("{:016x}", image.fingerprint()),
-        },
+        image: image_shape,
         encode: summarize_timing(encode_samples)?,
         decode: summarize_timing(decode_samples)?,
         maintenance_peak_rss_delta_bytes,
