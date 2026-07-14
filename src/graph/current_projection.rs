@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-type IntervalVisitor<'a> = dyn FnMut(EntityId, &[u8], i64, i64) -> Result<()> + 'a;
+pub(crate) type IntervalVisitor<'a> = dyn FnMut(EntityId, &[u8], i64, i64) -> Result<()> + 'a;
 
 /// Result of refreshing a candidate from the authoritative ledger tail.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -51,14 +51,14 @@ struct OverlayEntry {
 }
 
 #[derive(Debug, Default)]
-struct TemporalColumnBuilder {
-    bytes: Vec<u8>,
+pub(crate) struct TemporalColumnBuilder {
+    pub(crate) bytes: Vec<u8>,
     predictors: [u64; 8],
     next_predictor: usize,
 }
 
 impl TemporalColumnBuilder {
-    fn push(&mut self, value: i64) {
+    pub(crate) fn push(&mut self, value: i64) {
         let bits = u64::from_ne_bytes(value.to_ne_bytes());
         let (predictor, delta) = self
             .predictors
@@ -151,6 +151,18 @@ pub struct CurrentProjectionCandidate {
     valid_from_bytes: Vec<u8>,
     valid_to_bytes: Vec<u8>,
     overlay: BTreeMap<EntityId, OverlayEntry>,
+}
+
+pub(crate) struct EncodedProjectionColumns {
+    pub(crate) attribute: String,
+    pub(crate) valid_time_floor: i64,
+    pub(crate) publication_generation: u64,
+    pub(crate) tx_count: u64,
+    pub(crate) entities: Vec<EntityId>,
+    pub(crate) value_offsets: Vec<u32>,
+    pub(crate) value_bytes: Vec<u8>,
+    pub(crate) valid_from_bytes: Vec<u8>,
+    pub(crate) valid_to_bytes: Vec<u8>,
 }
 
 impl CurrentProjectionCandidate {
@@ -356,7 +368,7 @@ impl CurrentProjectionCandidate {
             .ok_or_else(|| anyhow!("current projection value range is corrupt"))
     }
 
-    fn visit_merged_encoded(&self, visit: &mut IntervalVisitor<'_>) -> Result<()> {
+    pub(crate) fn visit_merged_encoded(&self, visit: &mut IntervalVisitor<'_>) -> Result<()> {
         let mut valid_from = TemporalColumnDecoder::new(&self.valid_from_bytes);
         let mut valid_to = TemporalColumnDecoder::new(&self.valid_to_bytes);
         let mut overlay_iter = self.overlay.iter();
@@ -404,6 +416,79 @@ impl CurrentProjectionCandidate {
             overlay = overlay_iter.next();
         }
         Ok(())
+    }
+
+    pub(crate) fn from_encoded_columns(columns: EncodedProjectionColumns) -> Result<Self> {
+        let EncodedProjectionColumns {
+            attribute,
+            valid_time_floor,
+            publication_generation,
+            tx_count,
+            entities,
+            value_offsets,
+            value_bytes,
+            valid_from_bytes,
+            valid_to_bytes,
+        } = columns;
+        if !entities
+            .windows(2)
+            .all(|pair| matches!(pair, [left, right] if left <= right))
+        {
+            bail!("current projection entities are not sorted")
+        }
+        if value_offsets.len() != entities.len().saturating_add(1) {
+            bail!("current projection value offset count does not match rows")
+        }
+        if value_offsets.first().copied() != Some(0) {
+            bail!("current projection value offsets must start at zero")
+        }
+        if !value_offsets
+            .windows(2)
+            .all(|pair| matches!(pair, [left, right] if left <= right))
+        {
+            bail!("current projection value offsets are not monotonic")
+        }
+        if value_offsets
+            .last()
+            .copied()
+            .map(usize::try_from)
+            .transpose()?
+            != Some(value_bytes.len())
+        {
+            bail!("current projection final value offset does not match payload")
+        }
+        for range in value_offsets.windows(2) {
+            let [start, end] = range else {
+                continue;
+            };
+            let start = usize::try_from(*start)?;
+            let end = usize::try_from(*end)?;
+            validate_encoded_value(
+                value_bytes
+                    .get(start..end)
+                    .ok_or_else(|| anyhow!("current projection value range is corrupt"))?,
+            )?;
+        }
+
+        validate_temporal_columns(
+            &valid_from_bytes,
+            &valid_to_bytes,
+            entities.len(),
+            valid_time_floor,
+        )?;
+
+        Ok(Self {
+            attribute,
+            valid_time_floor,
+            publication_generation,
+            tx_count,
+            entities,
+            value_offsets,
+            value_bytes,
+            valid_from_bytes,
+            valid_to_bytes,
+            overlay: BTreeMap::new(),
+        })
     }
 }
 
@@ -602,6 +687,47 @@ fn decode_value(encoded: &[u8]) -> Result<Value> {
         Some(tag) => bail!("malformed current projection value tag 0x{tag:02x}"),
         None => bail!("empty current projection value"),
     }
+}
+
+pub(crate) fn validate_encoded_value(encoded: &[u8]) -> Result<()> {
+    let payload = encoded
+        .get(1..)
+        .ok_or_else(|| anyhow!("empty current projection value"))?;
+    match encoded.first().copied() {
+        Some(0x00) if payload.is_empty() => Ok(()),
+        Some(0x01) if payload == [0] || payload == [1] => Ok(()),
+        Some(0x02 | 0x03) if payload.len() == 8 => Ok(()),
+        Some(0x04 | 0x05) => {
+            std::str::from_utf8(payload)?;
+            Ok(())
+        }
+        Some(0x06) if payload.len() == 16 => Ok(()),
+        Some(tag) => bail!("malformed current projection value tag 0x{tag:02x}"),
+        None => bail!("empty current projection value"),
+    }
+}
+
+pub(crate) fn validate_temporal_columns(
+    valid_from_bytes: &[u8],
+    valid_to_bytes: &[u8],
+    rows: usize,
+    valid_time_floor: i64,
+) -> Result<()> {
+    let mut valid_from = TemporalColumnDecoder::new(valid_from_bytes);
+    let mut valid_to = TemporalColumnDecoder::new(valid_to_bytes);
+    for _ in 0..rows {
+        let from = valid_from.next()?;
+        let to = valid_to.next()?;
+        if from >= to {
+            bail!("current projection interval is empty or inverted")
+        }
+        if to <= valid_time_floor {
+            bail!("current projection interval ends at or before its floor")
+        }
+    }
+    valid_from.finish(rows)?;
+    valid_to.finish(rows)?;
+    Ok(())
 }
 
 fn hash_bytes(hash: &mut u64, bytes: &[u8]) {

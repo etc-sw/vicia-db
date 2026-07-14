@@ -2075,7 +2075,7 @@ impl FactStorage {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    fn current_projection_watermark(&self) -> (u64, u64) {
+    pub(crate) fn current_projection_watermark(&self) -> (u64, u64) {
         let publication_generation = self
             .data
             .read()

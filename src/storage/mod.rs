@@ -9,6 +9,8 @@ pub mod backend;
 pub mod btree;
 pub mod btree_v6;
 pub mod cache;
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) mod current_projection_image;
 pub(crate) mod delta_growth;
 pub(crate) mod delta_index;
 pub(crate) mod delta_manifest;

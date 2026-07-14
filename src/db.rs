@@ -1708,6 +1708,60 @@ impl Minigraf {
             .refresh_current_projection_candidate(candidate)
     }
 
+    /// Encode a detached, generation-bound R2 projection page image.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_encode_current_projection_page_image(
+        &self,
+        candidate: &crate::CurrentProjectionCandidate,
+    ) -> Result<crate::CurrentProjectionPageImage> {
+        let guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        self.inner
+            .fact_storage
+            .validate_current_projection_candidate(candidate)?;
+        let (_, tx_count) = self.inner.fact_storage.current_projection_watermark();
+        let identity = match &*guard {
+            WriteContext::Memory => crate::ProjectionLedgerIdentity::new(0, 0, tx_count),
+            #[cfg(not(target_arch = "wasm32"))]
+            WriteContext::File { pfs, .. } => pfs.projection_ledger_identity()?,
+        };
+        crate::storage::current_projection_image::encode(candidate, identity)
+    }
+
+    /// Decode a detached R2 image only when it matches the selected ledger.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
+    pub fn benchmark_decode_current_projection_page_image(
+        &self,
+        image: &crate::CurrentProjectionPageImage,
+        expected_attribute: &str,
+        expected_floor: i64,
+    ) -> Result<crate::CurrentProjectionCandidate> {
+        let guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        let (publication_generation, tx_count) =
+            self.inner.fact_storage.current_projection_watermark();
+        let identity = match &*guard {
+            WriteContext::Memory => crate::ProjectionLedgerIdentity::new(0, 0, tx_count),
+            #[cfg(not(target_arch = "wasm32"))]
+            WriteContext::File { pfs, .. } => pfs.projection_ledger_identity()?,
+        };
+        crate::storage::current_projection_image::decode(
+            image.as_bytes(),
+            identity,
+            expected_attribute,
+            expected_floor,
+            publication_generation,
+        )
+    }
+
     /// Run the R1 integer count/sum probe after rejecting stale candidates.
     #[cfg(any(test, feature = "bench-internals"))]
     #[doc(hidden)]

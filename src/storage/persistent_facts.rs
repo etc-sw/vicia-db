@@ -3155,6 +3155,45 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.last_checkpointed_tx_count
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn projection_ledger_identity(
+        &self,
+    ) -> Result<crate::storage::current_projection_image::ProjectionLedgerIdentity> {
+        let base_generation = self
+            .base_integrity
+            .as_ref()
+            .map(|catalog| catalog.base_generation())
+            .unwrap_or(0);
+        let manifest_generation = match (
+            self.header_manifest_selection,
+            &self.delta_manifest_selection,
+        ) {
+            (
+                HeaderManifestSlotSelection::NoDeltaManifest,
+                PersistedManifestSelection::NoDeltaManifest,
+            ) => 0,
+            (
+                HeaderManifestSlotSelection::Use { slot, descriptor },
+                PersistedManifestSelection::Use {
+                    slot: selected_slot,
+                    manifest,
+                },
+            ) if slot == *selected_slot && descriptor.generation() == manifest.generation() => {
+                manifest.generation()
+            }
+            _ => anyhow::bail!(
+                "current projection image cannot bind to an inconsistent manifest selection"
+            ),
+        };
+        Ok(
+            crate::storage::current_projection_image::ProjectionLedgerIdentity::new(
+                base_generation,
+                manifest_generation,
+                self.storage.current_tx_count(),
+            ),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn header_manifest_selection(&self) -> HeaderManifestSlotSelection {
         self.header_manifest_selection

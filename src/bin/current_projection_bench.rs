@@ -160,6 +160,64 @@ struct TemporalMeasurement {
     provenance: serde_json::Value,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimingMeasurement {
+    samples_ms: Vec<f64>,
+    p50_ms: f64,
+    p95_ms: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageImageIdentityMeasurement {
+    base_generation: u64,
+    manifest_generation: u64,
+    tx_count: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageImageShapeMeasurement {
+    logical_bytes: u64,
+    padded_bytes: u64,
+    padding_bytes: u64,
+    page_count: u64,
+    image_ratio: f64,
+    row_count: u64,
+    fingerprint: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageImageProofMeasurement {
+    round_trip: bool,
+    deterministic_rebuild: bool,
+    overlay_flatten: bool,
+    production_query_routing_changed: bool,
+    public_api_changed: bool,
+    file_format_changed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageImageMeasurement {
+    schema: &'static str,
+    facts: u64,
+    samples: usize,
+    graph_bytes: u64,
+    valid_time_floor: i64,
+    identity: PageImageIdentityMeasurement,
+    image: PageImageShapeMeasurement,
+    encode: TimingMeasurement,
+    decode: TimingMeasurement,
+    maintenance_peak_rss_delta_bytes: u64,
+    query_rss_delta_bytes: u64,
+    probes: Vec<TemporalProbeMeasurement>,
+    proof: PageImageProofMeasurement,
+    provenance: serde_json::Value,
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     match args.as_slice() {
@@ -179,12 +237,147 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&measurement)?);
             Ok(())
         }
+        [_, command, path, facts, samples] if command == "measure-page-image" => {
+            let measurement =
+                measure_page_image(Path::new(path), facts.parse()?, samples.parse()?)?;
+            println!("{}", serde_json::to_string(&measurement)?);
+            Ok(())
+        }
         _ => bail!(
             "usage: current-projection-bench \
              build|build-temporal <graph> <facts> | \
-             measure|measure-temporal <graph> <facts> <samples>"
+             measure|measure-temporal|measure-page-image <graph> <facts> <samples>"
         ),
     }
+}
+
+fn measure_page_image(path: &Path, facts: u64, samples: usize) -> Result<PageImageMeasurement> {
+    let graph_bytes = fs::metadata(path)?.len();
+    let db = open(path)?;
+    let mut candidate =
+        db.benchmark_build_current_projection(":projection/value", TEMPORAL_BEFORE)?;
+    if candidate.row_count() != usize::try_from(facts)? {
+        bail!("page-image candidate row count mismatch")
+    }
+
+    let peak_before = peak_rss_bytes().context("read page-image high-water RSS baseline")?;
+    let mut encode_samples = Vec::with_capacity(samples);
+    let mut image = None;
+    for _ in 0..samples {
+        drop(image.take());
+        let started = Instant::now();
+        image = Some(db.benchmark_encode_current_projection_page_image(&candidate)?);
+        encode_samples.push(elapsed_ms(started));
+    }
+    let image = image.context("page-image encode produced no image")?;
+    let rebuilt_before_write =
+        db.benchmark_build_current_projection(":projection/value", TEMPORAL_BEFORE)?;
+    let deterministic =
+        db.benchmark_encode_current_projection_page_image(&rebuilt_before_write)? == image;
+    drop(rebuilt_before_write);
+
+    let mut decode_samples = Vec::with_capacity(samples);
+    let mut decoded = None;
+    for _ in 0..samples {
+        drop(decoded.take());
+        let started = Instant::now();
+        decoded = Some(db.benchmark_decode_current_projection_page_image(
+            &image,
+            ":projection/value",
+            TEMPORAL_BEFORE,
+        )?);
+        decode_samples.push(elapsed_ms(started));
+    }
+    let decoded = decoded.context("page-image decode produced no candidate")?;
+    let maintenance_peak_rss_delta_bytes = peak_rss_bytes()
+        .context("read page-image high-water RSS")?
+        .saturating_sub(peak_before);
+    let round_trip = decoded.fingerprint()? == candidate.fingerprint()?
+        && decoded.row_count() == candidate.row_count();
+
+    let query_rss = current_rss_bytes().context("read page-image query RSS baseline")?;
+    let mut probes = Vec::new();
+    for (name, valid_at) in [
+        ("beforeBoundary", TEMPORAL_BEFORE),
+        ("atBoundary", TEMPORAL_BOUNDARY),
+        ("afterBoundary", TEMPORAL_AFTER),
+    ] {
+        let expected = expected_temporal_pair(facts, valid_at);
+        let query = format!(
+            "(query [:find (count ?v) (sum ?v) :valid-at \"{}\" \
+             :where [?e :projection/value ?v]])",
+            format_timestamp(valid_at)?
+        );
+        let baseline = measure_query(&db, &query, samples)?;
+        let projection = measure_candidate_at(&db, &decoded, valid_at, samples)?;
+        if (baseline.count, baseline.checksum) != expected
+            || (projection.count, projection.checksum) != expected
+        {
+            bail!("decoded page-image probe mismatch at {name}")
+        }
+        probes.push(TemporalProbeMeasurement {
+            name,
+            valid_at,
+            baseline,
+            projection,
+        });
+    }
+    let query_rss_delta_bytes = current_rss_bytes()
+        .context("read page-image query RSS")?
+        .saturating_sub(query_rss);
+    drop(decoded);
+
+    let added_value = i64::try_from(facts)?;
+    db.execute(&format!(
+        "(transact {{:valid-from \"2025-01-01T00:00:00.000Z\" \
+         :valid-to \"2030-01-01T00:00:00.000Z\"}} \
+         [[#uuid \"{}\" :projection/value {added_value}]])",
+        Uuid::from_u128(u128::from(facts).saturating_add(1))
+    ))?;
+    db.benchmark_refresh_current_projection(&mut candidate)?;
+    let overlay_image = db.benchmark_encode_current_projection_page_image(&candidate)?;
+    let rebuilt = db.benchmark_build_current_projection(":projection/value", TEMPORAL_BEFORE)?;
+    let rebuilt_image = db.benchmark_encode_current_projection_page_image(&rebuilt)?;
+    let overlay_flatten = overlay_image == rebuilt_image;
+
+    let identity = image.identity();
+    let logical_bytes = image.logical_bytes();
+    let padded_bytes = image.padded_bytes();
+    Ok(PageImageMeasurement {
+        schema: "vicia.current-projection-page-image.v1",
+        facts,
+        samples,
+        graph_bytes,
+        valid_time_floor: TEMPORAL_BEFORE,
+        identity: PageImageIdentityMeasurement {
+            base_generation: identity.base_generation(),
+            manifest_generation: identity.manifest_generation(),
+            tx_count: identity.tx_count(),
+        },
+        image: PageImageShapeMeasurement {
+            logical_bytes,
+            padded_bytes,
+            padding_bytes: padded_bytes.saturating_sub(logical_bytes),
+            page_count: image.page_count(),
+            image_ratio: padded_bytes as f64 / graph_bytes as f64,
+            row_count: image.row_count(),
+            fingerprint: format!("{:016x}", image.fingerprint()),
+        },
+        encode: summarize_timing(encode_samples)?,
+        decode: summarize_timing(decode_samples)?,
+        maintenance_peak_rss_delta_bytes,
+        query_rss_delta_bytes,
+        probes,
+        proof: PageImageProofMeasurement {
+            round_trip,
+            deterministic_rebuild: deterministic,
+            overlay_flatten,
+            production_query_routing_changed: false,
+            public_api_changed: false,
+            file_format_changed: false,
+        },
+        provenance: provenance(),
+    })
 }
 
 fn build_fixture(path: &Path, facts: u64) -> Result<()> {
@@ -583,6 +776,15 @@ fn summarize(mut samples_ms: Vec<f64>, pair: (u64, i128)) -> Result<AggregateMea
     })
 }
 
+fn summarize_timing(mut samples_ms: Vec<f64>) -> Result<TimingMeasurement> {
+    samples_ms.sort_by(f64::total_cmp);
+    Ok(TimingMeasurement {
+        p50_ms: percentile(&samples_ms, 50).context("missing timing p50 sample")?,
+        p95_ms: percentile(&samples_ms, 95).context("missing timing p95 sample")?,
+        samples_ms,
+    })
+}
+
 fn measure_semantics() -> Result<SemanticMeasurement> {
     const VALID_AT_2025: i64 = 1_735_689_600_000;
     let db = Minigraf::in_memory()?;
@@ -909,6 +1111,18 @@ fn current_rss_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?
         .checked_mul(1024)
+}
+
+fn peak_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    kib.checked_mul(1024)
 }
 
 fn provenance() -> serde_json::Value {

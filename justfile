@@ -96,6 +96,14 @@ temporal-projection-smoke OUTPUT_DIR="target/temporal-projection/smoke":
 temporal-projection-full OUTPUT_DIR="target/temporal-projection/full":
     ./scripts/run-temporal-projection-bench.sh full "{{OUTPUT_DIR}}"
 
+# Prove the deterministic R2-B page codec on a 10K temporal fixture.
+projection-page-image-smoke OUTPUT_DIR="target/projection-page-image/smoke":
+    ./scripts/run-projection-page-image-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run the detached R2-B projection page-image gate on the exact 1M fixture.
+projection-page-image-full OUTPUT_DIR="target/projection-page-image/full":
+    ./scripts/run-projection-page-image-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser

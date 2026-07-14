@@ -126,6 +126,8 @@ pub use graph::storage::{
 };
 #[cfg(feature = "bench-internals")]
 pub use storage::btree_v6::LeafReadDiagnostics;
+#[cfg(any(test, feature = "bench-internals"))]
+pub use storage::current_projection_image::{CurrentProjectionPageImage, ProjectionLedgerIdentity};
 #[cfg(feature = "bench-internals")]
 pub use storage::layout_diagnostics::{
     PrefixEstimate, StorageIndexLayout, StorageLayoutDiagnostics, StoragePageLayout,
