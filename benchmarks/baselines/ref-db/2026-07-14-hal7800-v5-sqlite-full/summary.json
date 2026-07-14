@@ -1,0 +1,444 @@
+{
+  "schema": "vicia.ref-db-bench.summary.v5",
+  "profile": "full",
+  "facts": 1000000,
+  "repetitionsPerTrial": 20,
+  "trials": 5,
+  "seeds": [
+    2026071401,
+    2026071402,
+    2026071403,
+    2026071404,
+    2026071405
+  ],
+  "trialOrders": [
+    [
+      "vicia",
+      "grafeo",
+      "sqlite",
+      "redb",
+      "fjall",
+      "turso",
+      "cozo"
+    ],
+    [
+      "grafeo",
+      "sqlite",
+      "redb",
+      "fjall",
+      "turso",
+      "cozo",
+      "vicia"
+    ],
+    [
+      "sqlite",
+      "redb",
+      "fjall",
+      "turso",
+      "cozo",
+      "vicia",
+      "grafeo"
+    ],
+    [
+      "redb",
+      "fjall",
+      "turso",
+      "cozo",
+      "vicia",
+      "grafeo",
+      "sqlite"
+    ],
+    [
+      "fjall",
+      "turso",
+      "cozo",
+      "vicia",
+      "grafeo",
+      "sqlite",
+      "redb"
+    ]
+  ],
+  "provenance": {
+    "cpuModel": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "logicalCpus": 16,
+    "kernel": "Linux 6.6.87.2-microsoft-standard-WSL2 x86_64 GNU/Linux",
+    "filesystem": "ext2/ext3",
+    "rustc": "rustc 1.96.0-nightly (fb27476aa 2026-03-28)",
+    "cargo": "cargo 1.96.0-nightly (e84cb639e 2026-03-21)",
+    "benchmarkBinarySha256": "1211438e83c44fa9076a3dbe69445183fc586ebf1a84d846a4806b1ac2e8bda4",
+    "viciaDirty": false
+  },
+  "sourceCommits": {
+    "grafeo": "4ebae02f06f8f0cbc57543f74b6ba06f259dbed3",
+    "redb": "27160a52e8ec9c0eb6a563023f1f2a95aa210faa",
+    "fjall": "80cf6bcce931a9f65dac3d0558abd02564107630",
+    "turso": "d115b414ad83d05a1b3b66063eeefd07a5f51268",
+    "cozo": "481af058abac9444ea8c9c52c78f096ed4b5bfc4",
+    "vicia": "0dab25179766f8fa3dd801af27ba4fcd588bd4de",
+    "sqlite": "sqlite 3045001 (crate 0.36.0)"
+  },
+  "comparisonPolicy": {
+    "engineAggregate": [
+      "vicia",
+      "grafeo",
+      "sqlite",
+      "turso",
+      "cozo"
+    ],
+    "ownedResultScan": [
+      "redb",
+      "fjall"
+    ],
+    "warning": "Engine aggregate and owned result scan are different contracts and must not be ranked in one column.",
+    "lifecycle": "Each trial builds and closes a new database, then a fresh child measures open, first read, warmed point workloads, and aggregate/scan.",
+    "pointTiming": "Point samples are adaptively batched to at least 20 ms when possible; values are reported as milliseconds per operation.",
+    "storage": "Physical bytes describe each adapter schema, not equivalent product semantics. Vicia retains native bi-temporal ledger identity and four index orders.",
+    "kernelPageCache": "Not controlled or attributed; first-read and warmed-read results are reported separately."
+  },
+  "stability": {
+    "gateMadPercent": 5,
+    "passed": true,
+    "failures": []
+  },
+  "groups": {
+    "engineAggregate": [
+      {
+        "engine": "vicia",
+        "role": "bi-temporal Datalog product",
+        "boundary": "engineAggregate",
+        "adapterSchema": "EAV ledger fact: entity + attribute + integer value + bi-temporal identity",
+        "semanticScope": "native bi-temporal current projection",
+        "durability": {
+          "barrier": "checkpoint then close",
+          "batch": "1000 facts per ledger transaction"
+        },
+        "runtimeVersion": null,
+        "buildP50Ms": 5924.611434,
+        "openP50Ms": 0.696288,
+        "firstReadP50Ms": 0.083986,
+        "hotPointP50Ms": 0.004195,
+        "hotPointP95Ms": 0.004586,
+        "hotPointMadPercent": 1.591776,
+        "distributedPointP50Ms": 0.009137,
+        "distributedPointP95Ms": 0.00985,
+        "distributedPointMadPercent": 0.709331,
+        "missPointP50Ms": 0.006772,
+        "missPointP95Ms": 0.007423,
+        "missPointMadPercent": 1.224075,
+        "workloadP50Ms": 171.455389,
+        "workloadP95Ms": 177.240236,
+        "workloadMaxMs": 182.979217,
+        "workloadMadPercent": 0.486157,
+        "baselineRssMiB": 12.097656,
+        "deltaRssMiB": 1.625,
+        "retainedRssMiB": 1.625,
+        "queryReadMiB": 0,
+        "queryWriteMiB": 0,
+        "storageMiB": 262.609375,
+        "pointOperationsPerSample": {
+          "hot": [
+            8192
+          ],
+          "distributed": [
+            4096
+          ],
+          "miss": [
+            4096
+          ]
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      },
+      {
+        "engine": "grafeo",
+        "role": "embedded graph query peer",
+        "boundary": "engineAggregate",
+        "adapterSchema": "Fact node: integer entity property + integer value property",
+        "semanticScope": "common current entity/value projection",
+        "durability": {
+          "barrier": "database close",
+          "batch": "engine-native node writes"
+        },
+        "runtimeVersion": null,
+        "buildP50Ms": 10349.302192,
+        "openP50Ms": 2377.054442,
+        "firstReadP50Ms": 531.177549,
+        "hotPointP50Ms": 531.312662,
+        "hotPointP95Ms": 594.626376,
+        "hotPointMadPercent": 1.182926,
+        "distributedPointP50Ms": 523.821601,
+        "distributedPointP95Ms": 591.407483,
+        "distributedPointMadPercent": 1.045526,
+        "missPointP50Ms": 0.320553,
+        "missPointP95Ms": 0.35135,
+        "missPointMadPercent": 2.527172,
+        "workloadP50Ms": 618.555322,
+        "workloadP95Ms": 654.114642,
+        "workloadMaxMs": 682.739678,
+        "workloadMadPercent": 2.283487,
+        "baselineRssMiB": 666.53125,
+        "deltaRssMiB": 343.46875,
+        "retainedRssMiB": 2.375,
+        "queryReadMiB": 0,
+        "queryWriteMiB": 0,
+        "storageMiB": 69.116327,
+        "pointOperationsPerSample": {
+          "hot": [
+            1
+          ],
+          "distributed": [
+            1
+          ],
+          "miss": [
+            64
+          ]
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      },
+      {
+        "engine": "sqlite",
+        "role": "embedded SQL reference",
+        "boundary": "engineAggregate",
+        "adapterSchema": "facts(entity INTEGER PRIMARY KEY, value INTEGER NOT NULL)",
+        "semanticScope": "common current entity/value projection",
+        "durability": {
+          "barrier": "COMMIT then close",
+          "batch": "1000 rows per SQL transaction",
+          "journalMode": "delete",
+          "synchronous": "full"
+        },
+        "runtimeVersion": "sqlite 3045001 (crate 0.36.0)",
+        "buildP50Ms": 2988.483638,
+        "openP50Ms": 0.24853,
+        "firstReadP50Ms": 0.040592,
+        "hotPointP50Ms": 0.00942,
+        "hotPointP95Ms": 0.010382,
+        "hotPointMadPercent": 0.134632,
+        "distributedPointP50Ms": 0.009605,
+        "distributedPointP95Ms": 0.010486,
+        "distributedPointMadPercent": 0.902553,
+        "missPointP50Ms": 0.009404,
+        "missPointP95Ms": 0.010293,
+        "missPointMadPercent": 2.114649,
+        "workloadP50Ms": 29.529511,
+        "workloadP95Ms": 32.768821,
+        "workloadMaxMs": 34.598536,
+        "workloadMadPercent": 3.912792,
+        "baselineRssMiB": 11.875,
+        "deltaRssMiB": 2.25,
+        "retainedRssMiB": 2.25,
+        "queryReadMiB": 0,
+        "queryWriteMiB": 0,
+        "storageMiB": 11.480469,
+        "pointOperationsPerSample": {
+          "hot": [
+            2048,
+            4096
+          ],
+          "distributed": [
+            2048,
+            4096
+          ],
+          "miss": [
+            2048,
+            4096
+          ]
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      },
+      {
+        "engine": "turso",
+        "role": "embedded SQL peer",
+        "boundary": "engineAggregate",
+        "adapterSchema": "facts(entity INTEGER PRIMARY KEY, value INTEGER NOT NULL)",
+        "semanticScope": "common current entity/value projection",
+        "durability": {
+          "barrier": "COMMIT then close",
+          "batch": "1000 rows per SQL transaction"
+        },
+        "runtimeVersion": null,
+        "buildP50Ms": 5889.372352,
+        "openP50Ms": 0.797434,
+        "firstReadP50Ms": 0.201225,
+        "hotPointP50Ms": 0.006731,
+        "hotPointP95Ms": 0.007382,
+        "hotPointMadPercent": 2.519661,
+        "distributedPointP50Ms": 0.007426,
+        "distributedPointP95Ms": 0.008641,
+        "distributedPointMadPercent": 3.157091,
+        "missPointP50Ms": 0.006466,
+        "missPointP95Ms": 0.006956,
+        "missPointMadPercent": 2.92708,
+        "workloadP50Ms": 70.77016,
+        "workloadP95Ms": 77.212949,
+        "workloadMaxMs": 83.791477,
+        "workloadMadPercent": 3.617729,
+        "baselineRssMiB": 18.675781,
+        "deltaRssMiB": 10.125,
+        "retainedRssMiB": 10.125,
+        "queryReadMiB": 0,
+        "queryWriteMiB": 0,
+        "storageMiB": 11.563423,
+        "pointOperationsPerSample": {
+          "hot": [
+            4096
+          ],
+          "distributed": [
+            4096,
+            2048
+          ],
+          "miss": [
+            4096
+          ]
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      },
+      {
+        "engine": "cozo",
+        "role": "embedded Datalog peer",
+        "boundary": "engineAggregate",
+        "adapterSchema": "facts {entity: Int => value: Int}",
+        "semanticScope": "common current entity/value projection",
+        "durability": {
+          "barrier": "mutable script completion then close",
+          "batch": "1000 rows per :put"
+        },
+        "runtimeVersion": null,
+        "buildP50Ms": 6507.499935,
+        "openP50Ms": 0.557003,
+        "firstReadP50Ms": 1.279859,
+        "hotPointP50Ms": 0.066259,
+        "hotPointP95Ms": 0.074389,
+        "hotPointMadPercent": 0.187957,
+        "distributedPointP50Ms": 0.069899,
+        "distributedPointP95Ms": 0.079155,
+        "distributedPointMadPercent": 2.399758,
+        "missPointP50Ms": 0.063698,
+        "missPointP95Ms": 0.070763,
+        "missPointMadPercent": 0.690257,
+        "workloadP50Ms": 316.729832,
+        "workloadP95Ms": 405.28922,
+        "workloadMaxMs": 413.576777,
+        "workloadMadPercent": 2.693689,
+        "baselineRssMiB": 13.875,
+        "deltaRssMiB": 4.875,
+        "retainedRssMiB": 4.875,
+        "queryReadMiB": 0,
+        "queryWriteMiB": 0,
+        "storageMiB": 78.195313,
+        "pointOperationsPerSample": {
+          "hot": [
+            512
+          ],
+          "distributed": [
+            512
+          ],
+          "miss": [
+            512
+          ]
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      }
+    ],
+    "ownedResultScan": [
+      {
+        "engine": "redb",
+        "role": "B-tree KV storage floor",
+        "boundary": "ownedResultScan",
+        "adapterSchema": "integer key -> integer value",
+        "semanticScope": "owned KV scan storage floor",
+        "durability": {
+          "barrier": "transaction commit then close",
+          "batch": "1000 entries per write transaction"
+        },
+        "runtimeVersion": null,
+        "buildP50Ms": 1658.968082,
+        "openP50Ms": 0.509528,
+        "firstReadP50Ms": 0.017223,
+        "hotPointP50Ms": 0.000331,
+        "hotPointP95Ms": 0.000364,
+        "hotPointMadPercent": 0.521286,
+        "distributedPointP50Ms": 0.000405,
+        "distributedPointP95Ms": 0.00046,
+        "distributedPointMadPercent": 0.690078,
+        "missPointP50Ms": 0.000326,
+        "missPointP95Ms": 0.000371,
+        "missPointMadPercent": 1.122726,
+        "workloadP50Ms": 26.746946,
+        "workloadP95Ms": 29.194229,
+        "workloadMaxMs": 37.13598,
+        "workloadMadPercent": 1.529122,
+        "baselineRssMiB": 11.375,
+        "deltaRssMiB": 32.375,
+        "retainedRssMiB": 32.375,
+        "queryReadMiB": 0,
+        "queryWriteMiB": 0,
+        "storageMiB": 38.753906,
+        "pointOperationsPerSample": {
+          "hot": [
+            16384
+          ],
+          "distributed": [
+            16384
+          ],
+          "miss": [
+            16384
+          ]
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      },
+      {
+        "engine": "fjall",
+        "role": "LSM KV storage floor",
+        "boundary": "ownedResultScan",
+        "adapterSchema": "integer key -> integer value",
+        "semanticScope": "owned KV scan storage floor",
+        "durability": {
+          "barrier": "batch commit then close",
+          "batch": "1000 entries per database batch"
+        },
+        "runtimeVersion": null,
+        "buildP50Ms": 527.102922,
+        "openP50Ms": 984.362517,
+        "firstReadP50Ms": 0.008321,
+        "hotPointP50Ms": 0.000264,
+        "hotPointP95Ms": 0.00028,
+        "hotPointMadPercent": 1.502492,
+        "distributedPointP50Ms": 0.000518,
+        "distributedPointP95Ms": 0.000548,
+        "distributedPointMadPercent": 0.282378,
+        "missPointP50Ms": 0.000211,
+        "missPointP95Ms": 0.000226,
+        "missPointMadPercent": 0.646811,
+        "workloadP50Ms": 185.382756,
+        "workloadP95Ms": 190.674086,
+        "workloadMaxMs": 193.040235,
+        "workloadMadPercent": 1.606472,
+        "baselineRssMiB": 110.625,
+        "deltaRssMiB": 13.625,
+        "retainedRssMiB": 13.625,
+        "queryReadMiB": 0,
+        "queryWriteMiB": 0,
+        "storageMiB": 50.028607,
+        "pointOperationsPerSample": {
+          "hot": [
+            16384
+          ],
+          "distributed": [
+            16384
+          ],
+          "miss": [
+            16384
+          ]
+        },
+        "count": 1000000,
+        "checksum": 499999500000
+      }
+    ]
+  }
+}

@@ -62,32 +62,37 @@ result queries still intentionally materialize their result rows and therefore
 retain the prior approximately 506 MiB RSS shape; a future bounded result cursor
 is required to change that public result boundary.
 
-### Cross-database scan comparison contract (v2)
+### Cross-database comparison contract (v5)
 
-The cross-database stress harness does not publish one ambiguous `fullScan`
-ranking. It records two independently verified workloads:
+The cross-database harness records lifecycle, point, and scan behavior without
+flattening query engines and KV storage floors into one ranking:
 
 | Workload | Comparable boundary | Included engines |
 |---|---|---|
-| `engineAggregate` | Engine computes count and sum, returns one scalar row | Vicia Datalog, CozoScript, SQLite SQL; redb is N/A |
-| `materializedScan` | Adapter owns every value in one `Vec<i64>`, then the shared Rust fold computes count/checksum | Vicia, Cozo, SQLite, redb |
+| `engineAggregate` | Engine computes count and sum, returning one scalar row | Vicia, Grafeo, SQLite, Turso, Cozo |
+| `ownedResultScan` | Adapter owns each KV value while the shared Rust loop computes count and checksum | redb, Fjall |
 
-Each workload runs in a fresh child process after the stress database is built.
-Its elapsed time excludes open, while its `VmHWM` includes open plus that one
-scan only. Build/checkpoint/append memory and the other scan can therefore not
-pollute the read-memory comparison. Both workloads must independently equal the
-same arithmetic count and checksum. The v2 summarizer also checks the exact
-engine-specific execution-boundary label and rejects a redb aggregate result;
-redb has no query engine and must not receive a simulated scalar fast path.
-Only a full-profile summary whose source checkout was clean is marked
-`acceptanceEligible`; the Markdown and JSON summaries both carry the exact
-source commit and testbed identity.
+Every full run contains five independent trials. Trial order rotates across the
+seven engines, each trial builds and closes a new database, and a fresh child
+then measures open, first read, warmed point workloads, and aggregate or scan.
+Point timing uses an adaptive number of operations so a timed sample reaches at
+least 20 ms when the engine is fast enough. The receipt retains the operation
+count, deterministic seed, order position, raw samples, source revisions,
+binary hash, host identity, adapter schema, and durability boundary.
 
-The historical 2026-07-12 v1 baseline remains useful for build, append, point
-read, reopen, storage, and crash evidence. Its single scan column compared
-Vicia/Cozo materialization with SQLite engine aggregation and redb iteration,
-and its process-wide RSS included build/checkpoint history; do not use those two
-v1 fields for cross-engine ranking.
+Point coverage includes a repeated hot hit, seeded distributed hits, and
+missing keys. Every point result and every aggregate sample is checked; the
+full aggregate must equal count `1,000,000` and checksum `499999500000`.
+Validation also requires a successful close/reopen, and the mutation audit
+rejects changes to correctness, sample counts, SQLite durability, comparison
+boundary, trial order, reopen status, timing validity, and source version.
+
+SQLite is the stable embedded SQL reference and uses 1,000-row transactions,
+`journal_mode=DELETE`, and `synchronous=FULL`. Its compact current-value table
+does not carry Vicia's bi-temporal history identity or EAVT/AEVT/AVET/VAET
+indexes, so physical storage remains descriptive rather than a semantic
+capacity ranking. Kernel page cache is not dropped or attributed to a process;
+first-read and warmed-read latency are therefore reported separately.
 
 Benchmarks were run with [Criterion 0.8](https://bheisler.github.io/criterion.rs/book/). Each benchmark group is described below.
 
@@ -1417,15 +1422,22 @@ The clean production-path reference rerun at source `aaf32a9` also measured a
 are in
 `benchmarks/baselines/ref-db/2026-07-12-hal7800-v3-pending-isolation-full/`.
 
-The review-driven v4 rerun at clean source `7cedc1b` replaces that single point
-observation with one excluded warmup plus 20 retained samples per engine. On
-the 1M Vicia graph, point-read p50 was `0.011 ms` and p95/max was `0.019 ms`;
-aggregate p50/p95 was `320.751/341.448 ms`, with exact count/checksum. The v4
-summary removes the flat `rows` collection: `groups.engineAggregate` contains
-Vicia/Grafeo/Turso/Cozo, while `groups.ownedResultScan` contains only the redb
-and Fjall storage floors. Markdown likewise renders separate workload and
-memory tables. The retained evidence is under
-`benchmarks/baselines/ref-db/2026-07-12-hal7800-v4-review-full/`.
+The clean v5 seven-engine matrix at source `0dab251` runs five rotated trials
+with 20 samples per trial. Vicia records hot point p50/p95
+`0.00420/0.00459 ms`, distributed point `0.00914/0.00985 ms`, aggregate
+`171.455/177.240 ms`, 12.098 MiB open RSS, 1.625 MiB aggregate RSS delta, and
+262.609 MiB physical storage. Trial-median MAD is 1.592% or less for all Vicia
+point workloads and 0.486% for aggregate.
+
+SQLite 3.45.1 provides the direct embedded SQL reference: hot point p50 is
+`0.00942 ms`, aggregate p50/p95 is `29.530/32.769 ms`, and its common current
+table occupies 11.480 MiB. Turso records `0.00673 ms` hot point and
+`70.770/77.213 ms` aggregate. Cozo records `316.730/405.289 ms` aggregate and
+Grafeo `618.555/654.115 ms`; redb and Fjall remain separately labeled owned KV
+scan floors. All 35 trial receipts pass exact results, close/reopen validation,
+the 5% trial-MAD stability gate, and the eight-case validator mutation audit.
+The retained evidence is under
+`benchmarks/baselines/ref-db/2026-07-14-hal7800-v5-sqlite-full/`.
 
 ## Unrelated Pending Aggregate Isolation and Ownership (2026-07-12)
 
