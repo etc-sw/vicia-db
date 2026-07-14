@@ -271,6 +271,29 @@ fill-90 image, and prove clock-boundary transitions, overlapping windows,
 retractions, and deterministic rebuild. Do not create persisted projection
 pages until this temporal identity is green.
 
+### R2-A measured outcome
+
+R2-A passes on the clean 1M receipt from source `96980b5`. The candidate keeps
+every surviving assertion window at or after a current-only valid-time floor,
+then filters row-aligned valid-time columns during the projected scan. Recent
+endpoint predictors and XOR-varint deltas keep mixed temporal cohorts compact
+without changing ledger identity.
+
+| Probe | Ledger p50/p95 | Projection p50/p95 |
+|---|---:|---:|
+| Before boundary | 237.713 / 270.498 ms | 9.257 / 10.112 ms |
+| At boundary | 253.636 / 267.104 ms | 9.654 / 10.685 ms |
+| After boundary | 240.361 / 258.657 ms | 9.245 / 9.816 ms |
+
+The 1M candidate accounts 34,603,025 bytes, including 4 MiB of temporal
+payload, or 13.98% of the graph image. Query RSS grows by 0.125 MiB, build time
+is 438.063 ms, and one-fact/one-entity refresh takes 0.091 ms. All three probes
+match the ledger count/checksum exactly; the worst projected p95/p50 ratio is
+110.68%. Floor rejection, no-write boundary transitions, overlapping windows,
+all value types including Ref, scoped/unscoped retract, checkpoint
+invalidation, and deterministic rebuild pass. R2-B page-layout work is
+admitted, but no production root or format change is implied.
+
 ### Storage boundary
 
 - projection pages live inside the logical `.graph` image;
@@ -600,16 +623,18 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 and R1 are closed. The only active slice is R2-A temporal projection layout:
+R0, R1, and R2-A are closed. The only active slice is R2-B
+generation-bound projection page image:
 
 ```text
-carry exact valid-time intervals or boundary transitions in compact columns
-measure moving-time reads, rebuild, update, bytes, latency, and RSS
-assign no in-file root until temporal identity passes
+encode the admitted compact columns into deterministic page-aligned bytes
+bind the image to ledger generation, tx watermark, attribute, and time floor
+reject corruption and prove exact rebuild before adding a published root
 ```
 
-R2-A is a durable risk probe inside the admitted in-file projection shape. It
-must stay behind `bench-internals`, preserve ledger authority, and avoid public
-API or persisted-byte changes. If exact temporal state exceeds the size or
-latency gate, stop R2 and proceed to R3 rather than persisting the fixed-time R1
-snapshot. R3-R6 remain parked behind their respective evidence gates.
+R2-B is a durable format probe inside the admitted in-file projection shape.
+It should define the page codec, bounds, checksum, generation identity, and
+corruption behavior in detached benchmark/test bytes first. Do not assign a
+header root, publish pages, retire WAL state, change the public format version,
+or route production queries until that codec is deterministic and rebuildable.
+R3-R6 remain parked behind their respective evidence gates.

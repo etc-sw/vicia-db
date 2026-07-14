@@ -46,6 +46,7 @@ current executable checklist.
 - [x] Measure the exact fill frontier instead of rerunning the coarse matrix. The clean `vicia.storage-layout.v3` full receipt adds fill 86/87/88/89 under the same 20-run rotated contract and selects fill 87. Its 276.590 MiB image is 11.93% smaller than fill 75; checkpoint p50/p95 is 3,274.761/3,496.123 ms, point p95 is 0.01420 ms, aggregate p50/p95 is 283.743/304.362 ms, and query RSS p95 is 0.125 MiB. Receipt and variance mutation audits pass; this measurement leaves the current source default at fill 90 and does not replace the Vetch package.
 - [x] Close exact fill tuning with a direct fill-87/fill-90 risk probe. Forty alternating paired 1M runs preserve exact count/checksum in all 80 query samples. Fill 90 is smaller (269.586 versus 276.590 MiB), wins 28/40 paired checkpoints, and leads checkpoint p50/p95 (3,198.195/3,748.090 versus 3,248.581/4,090.620 ms), point p50/p95 (0.01112/0.01368 versus 0.01142/0.01431 ms), and aggregate p50/p95 (273.993/289.283 versus 275.595/294.044 ms). Retain production fill 90, reject the fill-87 promotion, and end fine fill search. Neither candidate proves the existing checkpoint-tail rollout gate, so the Vetch package remains unchanged.
 - [x] Pass R1 current-projection feasibility without creating a second authority. The clean 1M `vicia.current-projection-feasibility.v1` receipt reduces exact count/sum p50/p95 from 264.261/269.842 ms to 4.033/4.244 ms, accounts 29.000 MiB (11.46% of the graph image), adds zero query RSS, rebuilds in 283.045 ms, and refreshes one changed entity from one ledger-tail fact in 0.105 ms. Exact count/checksum, all value types, Ref, scoped/unscoped retract, overlapping valid windows, stale-generation rejection, checkpoint invalidation, and deterministic rebuild pass. Production routing, public API, checkpoint path, and persisted bytes remain unchanged.
+- [x] Pass R2-A moving-time projection identity on a temporally diverse 1M fixture. Before/at/after boundary projection p50 is 9.257/9.654/9.245 ms against 237.713/253.636/240.361 ms ledger folds; every count/checksum is exact and the worst p95/p50 ratio is 110.68%. The candidate accounts 33.000 MiB (13.98% of image), including 4 MiB of compressed temporal payload, adds 0.125 MiB query RSS, builds in 438.063 ms, and refreshes one entity in 0.091 ms. Pre-floor rejection, no-write boundary changes, Ref, overlaps, retracts, checkpoint invalidation, deterministic rebuild, validator, and mutation audit pass without persisted-byte or production-route changes.
 
 ## Regression gates
 
@@ -57,25 +58,22 @@ current executable checklist.
 
 ## Next task
 
-### Status: R1 passes; R2-A temporal projection layout is next
+### Status: R2-A passes; R2-B projection page image is next
 
-- Extend the compact candidate with exact valid-time state before designing an
-  in-file root. The R1 snapshot is fixed to one `valid_at`; ledger generation
-  alone cannot detect a wall-clock crossing of `valid_from` or `valid_to`.
-- Prefer compact surviving interval columns filtered during the 4 ms scan. A
-  boundary-schedule alternative is admitted only if it updates crossing rows
-  without total-history work and rebuilds deterministically from the ledger.
-- Exercise reads immediately before, at, and after future starts and expiries;
-  overlapping windows; scoped and unscoped retractions; Ref values; pending and
-  checkpoint refresh; and rebuild equality.
-- Measure interval/boundary bytes, build time, moving-time aggregate p50/p95,
-  query RSS, and one-row update cost on the same 1M fixture. Keep the R1 gates:
-  p50 `<= 150 ms` or 35% improvement, p95 `<= 115%` of p50, query RSS within
-  +2 MiB, and total projection bytes within 15% of the fill-90 image.
-- Keep R2-A behind `bench-internals`. Do not add persisted pages, a file-format
-  version, production routing, or a public projection API in this slice.
+- Add a deterministic, page-aligned codec for the admitted entity, value, and
+  temporal columns. Keep it behind `bench-internals` and tests.
+- Bind the image header to exact attribute bytes, valid-time floor, ledger
+  publication generation, tx watermark, row count, column ranges, and checksum.
+- Decode with bounded range checks and reject truncation, overlap, trailing
+  bytes, unknown codec version, checksum mismatch, and generation mismatch.
+- Round-trip base-only and base+overlay candidates, then prove byte-identical
+  rebuild from the same ledger state and semantic equality at all three time
+  probes.
+- Measure page padding, encoded size, encode/decode time, and peak RSS against
+  the R2-A receipt. The encoded page image must remain within the same 15%
+  graph-image budget.
 
-If exact temporal state misses size/latency, requires foreground full rebuild,
-or becomes a second time authority, stop R2 and proceed to R3. If it passes,
-the following R2-B slice may define generation-bound in-file pages, checksum,
-publication/fallback, and corruption rebuild behavior.
+Do not add a page-0/header root, publish protocol, fallback selection, WAL
+retirement coupling, public API, or production query routing in R2-B. Those
+belong to a later publication slice only after the detached page image is
+corruption-safe and exactly rebuildable.

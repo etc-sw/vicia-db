@@ -2053,6 +2053,40 @@ just current-projection-smoke
 just current-projection-full
 ```
 
+### R2-A temporal current-projection feasibility
+
+`vicia.temporal-current-projection.v1` measures the compact candidate on a
+1M fixture whose rows span more than 500,000 distinct valid-time windows.
+Surviving assertion intervals are retained at or after a current-only floor;
+historical reads before that floor stay on the ledger. Row-aligned endpoint
+columns use bounded recent predictors plus XOR-varint deltas and are filtered
+at scan time.
+
+| 1M probe | Ledger p50/p95 | Projection p50/p95 | Count | Checksum |
+|---|---:|---:|---:|---:|
+| Before boundary | 237.713 / 270.498 ms | 9.257 / 10.112 ms | 500,000 | 249,999,500,000 |
+| At boundary | 253.636 / 267.104 ms | 9.654 / 10.685 ms | 750,000 | 374,999,500,000 |
+| After boundary | 240.361 / 258.657 ms | 9.245 / 9.816 ms | 500,000 | 249,999,250,000 |
+
+The candidate builds in 438.063 ms and accounts 34,603,025 bytes (13.98% of
+the 247,562,240-byte graph), including 4 MiB of temporal payload. Resident RSS
+grows by 33.25 MiB, query RSS by 0.125 MiB, and one-fact/one-entity refresh
+takes 0.091 ms. The worst projected p95/p50 ratio is 110.68%.
+
+The semantic receipt proves start-inclusive/end-exclusive boundaries, a
+no-write clock transition, pre-floor rejection, overlapping windows, scoped
+and unscoped retractions, every Value variant including Ref, checkpoint
+invalidation, and deterministic rebuild. The validator and mutation audit pass.
+No public API, file format, production query route, checkpoint path, or Vetch
+package changes. The clean source `96980b58110334562db15d36f4bdd73058658266`
+receipt is preserved at
+`benchmarks/baselines/temporal-current-projection/2026-07-14-hal7800-r2a-full/receipt.json`.
+
+```bash
+just temporal-projection-smoke
+just temporal-projection-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a
