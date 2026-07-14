@@ -202,7 +202,10 @@ impl CurrentProjectionCandidate {
                 .entities
                 .get(base)
                 .ok_or_else(|| anyhow!("current projection entity missing"))?;
-            let (_, base_end) = self.base_entity_range(entity);
+            let mut base_end = base.saturating_add(1);
+            while self.entities.get(base_end) == Some(&entity) {
+                base_end = base_end.saturating_add(1);
+            }
 
             while overlay.is_some_and(|(overlay_entity, _)| *overlay_entity < entity) {
                 if let Some((overlay_entity, entry)) = overlay {
