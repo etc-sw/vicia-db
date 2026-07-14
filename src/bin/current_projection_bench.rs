@@ -1087,12 +1087,11 @@ fn remove_graph(path: &Path) -> Result<()> {
 }
 
 fn percentile(samples: &[f64], percentile: usize) -> Option<f64> {
-    let index = samples
-        .len()
-        .saturating_sub(1)
-        .saturating_mul(percentile)
-        .div_ceil(100);
-    samples.get(index).copied()
+    if samples.is_empty() || percentile == 0 || percentile > 100 {
+        return None;
+    }
+    let rank = samples.len().saturating_mul(percentile).div_ceil(100);
+    samples.get(rank.saturating_sub(1)).copied()
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -1149,4 +1148,18 @@ fn provenance() -> serde_json::Value {
         "publicApiChanged": false,
         "fileFormatChanged": false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percentile;
+
+    #[test]
+    fn percentile_uses_nearest_rank_instead_of_maximum_for_twenty_samples() {
+        let samples = (1..=20).map(f64::from).collect::<Vec<_>>();
+        assert_eq!(percentile(&samples, 50), Some(10.0));
+        assert_eq!(percentile(&samples, 95), Some(19.0));
+        assert_eq!(percentile(&samples, 100), Some(20.0));
+        assert_eq!(percentile(&samples, 0), None);
+    }
 }
