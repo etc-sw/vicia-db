@@ -1,0 +1,14 @@
+{
+  "schema": "vicia.vetch-bounded-selective-read.v1",
+  "visibleSourceCount": 4096,
+  "assertedSourceCount": 4097,
+  "postViewSourceIndex": 4098,
+  "keywordAttribute": ":vetch_event_payload_chunk/event-keyword",
+  "refAttribute": ":vetch_event_payload_chunk/event-ref",
+  "keywordTarget": ":vetch_entity/string_utf8hex_v1_626f756e6465642d746172676574",
+  "refTarget": "70000000-0000-0000-0000-000000000001",
+  "firstValidFrom": "2020-01-01",
+  "firstValidTo": "2021-01-01",
+  "secondValidFrom": "2021-01-01",
+  "secondValidTo": "2022-01-01"
+}

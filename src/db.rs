@@ -240,9 +240,12 @@ impl ReadView<'_> {
         self.tx_count
     }
 
-    /// Execute one selective query with an explicit complete-result bound.
+    /// Execute one selective query with an explicit result and work bound.
     ///
-    /// The method rejects results larger than `max_rows`; it never truncates.
+    /// `max_rows` bounds the complete result and conservatively limits source
+    /// visits, bindings, branches, and aggregate inputs while that result is
+    /// produced. A query may therefore reject even when its final projection
+    /// would fit. The method never returns a truncated prefix.
     pub fn query(&self, input: &str, max_rows: usize) -> Result<QueryResult> {
         let command =
             prepare_read_view_query(input, self.tx_count, self.valid_at.clone(), max_rows)?;
@@ -5020,6 +5023,125 @@ mod tests {
             })
             .unwrap();
         assert_eq!(refs, vec![second, first]);
+    }
+
+    #[test]
+    fn bounded_selective_read_contract_covers_keyword_and_ref_relationships() {
+        fn query_source_refs(result: QueryResult) -> Vec<crate::EntityId> {
+            let QueryResult::QueryResults { results, .. } = result else {
+                panic!("expected query results");
+            };
+            let mut sources = results
+                .into_iter()
+                .map(|row| {
+                    assert_eq!(row.len(), 1, "source query must return one column");
+                    let Some(Value::Ref(source)) = row.into_iter().next() else {
+                        panic!("source query must return an internal entity ref");
+                    };
+                    source
+                })
+                .collect::<Vec<_>>();
+            sources.sort_unstable();
+            sources
+        }
+
+        let fixture = crate::gate_e_test_support::bounded_selective_read_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bounded-selective-read.graph");
+        {
+            let db = Minigraf::open(&path).unwrap();
+            for command in fixture.setup_commands() {
+                db.execute(&command).unwrap();
+            }
+            db.checkpoint().unwrap();
+        }
+
+        let db = Minigraf::open(&path).unwrap();
+        let view = db
+            .read_view(ReadViewOptions {
+                valid_at: ReadViewValidAt::AnyValidTime,
+                ..Default::default()
+            })
+            .unwrap();
+        let expected = fixture.expected_visible_sources();
+        let raw = query_source_refs(
+            view.query(&fixture.keyword_query(), READ_VIEW_MAX_ROWS)
+                .unwrap(),
+        );
+        assert_eq!(raw, expected);
+
+        let typed = view
+            .refs_to(CurrentRefsRequest {
+                attribute: &fixture.ref_attribute,
+                value: fixture.ref_target,
+                limit: fixture.visible_source_count,
+            })
+            .unwrap();
+        assert_eq!(typed, expected);
+        assert_eq!(typed.first(), Some(&fixture.source(1)));
+        assert!(!typed.contains(&fixture.source(fixture.asserted_source_count)));
+
+        assert!(
+            view.query(&fixture.keyword_query(), fixture.visible_source_count - 1)
+                .is_err(),
+            "undersized raw budget must reject the complete result"
+        );
+        assert!(
+            view.refs_to(CurrentRefsRequest {
+                attribute: &fixture.ref_attribute,
+                value: fixture.ref_target,
+                limit: fixture.visible_source_count - 1,
+            })
+            .is_err(),
+            "undersized typed limit must reject the complete result"
+        );
+
+        db.execute(&fixture.post_view_command()).unwrap();
+        assert_eq!(
+            query_source_refs(
+                view.query(&fixture.keyword_query(), READ_VIEW_MAX_ROWS)
+                    .unwrap()
+            ),
+            expected,
+            "the original raw read view must remain transaction-pinned"
+        );
+        assert_eq!(
+            view.refs_to(CurrentRefsRequest {
+                attribute: &fixture.ref_attribute,
+                value: fixture.ref_target,
+                limit: READ_VIEW_MAX_ROWS,
+            })
+            .unwrap(),
+            expected,
+            "the original typed read view must remain transaction-pinned"
+        );
+
+        let fresh = db
+            .read_view(ReadViewOptions {
+                valid_at: ReadViewValidAt::AnyValidTime,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut expected_fresh = expected;
+        expected_fresh.push(fixture.source(fixture.post_view_source_index));
+        assert_eq!(
+            query_source_refs(
+                fresh
+                    .query(&fixture.keyword_query(), READ_VIEW_MAX_ROWS)
+                    .unwrap()
+            ),
+            expected_fresh
+        );
+        assert_eq!(
+            fresh
+                .refs_to(CurrentRefsRequest {
+                    attribute: &fixture.ref_attribute,
+                    value: fixture.ref_target,
+                    limit: READ_VIEW_MAX_ROWS,
+                })
+                .unwrap(),
+            expected_fresh
+        );
     }
 
     #[test]

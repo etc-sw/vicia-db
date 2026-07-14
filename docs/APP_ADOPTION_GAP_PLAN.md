@@ -60,7 +60,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G11 | No bulk valid-time closure primitive; closing many facts requires per-fact round-trips. | `retract_batch` exists but no query-result-set atomic closure command. | **Harrekki P1 #6**. Slice A8. |
 | G12 | A caller needs an openable rollback point while the writer remains live. | `Minigraf::backup_to()` and the session `backup` op now hold one write lock across checkpoint, published-prefix copy, fsync, and atomic no-clobber publish. | **Harrekki P1 #7 — CLOSED by A9.** External `checkpoint(); copy` is explicitly not the contract. |
 | G13 | Durability states were not classified for the caller: applied-and-visible vs durably published vs rejected vs maintenance-pending. | Native session frames and BrowserDb write results now expose ordered transaction/durability fields; the backend-specific contract and failure states live in `docs/DURABILITY_AND_CALLER_RULES.md`. | **Vetch P0** (explicit durability receipts) — CLOSED by A5-3/A5-4/A6. Session frames and browser writes both report durability, while browser writes additionally report maintenance pressure/advice. |
-| G14 | The bounded read contract exposes one `max_rows` number as a complete-result bound, while raw Datalog also spends it on fact visitation, bindings, and intermediate branch work. The typed `refsTo` path avoids that ambiguity but accepts only UUID entity IDs, while an existing Vetch ledger uses deterministic keyword entities. | Vetch recovery requested 3,142 chunk IDs with `maxRows = chunkCount * 2`; the two-clause indexed join exceeded 6,284 units of source work and failed closed before returning a partial result. `ReadView::refs_to` / `BrowserReadView.refsTo()` already provide bounded VAET selection, but the browser method parses its target as a UUID and cannot directly consume Vetch's keyword entity literal. | **Backlog A10.** Keep fail-closed work accounting. Clarify the generic Datalog budget contract, lock the exact large reverse-reference case with native/browser fixtures, and measure whether an additive keyword-or-UUID entity selector is justified. Vetch owns the immediate query-shape repair and must not wait for A10. |
+| G14 | The bounded read contract exposes one `max_rows` number for both complete results and conservative execution work. Vetch's owner relation is a reversible keyword value, while typed `refsTo` intentionally selects only true UUID Ref values. | Vetch's repaired single-clause indexed query and Vicia's shared 4,096-source keyword/Ref fixture prove the two existing paths without partial results. Native and paged browser tests cover retractions, pinned views, undersized budgets, and sparse residency. | **CLOSED by A10.** Keep fail-closed work accounting and the keyword/Ref semantic boundary. No additive selector is admitted without another measured caller. |
 
 ## Slice Plan
 
@@ -457,32 +457,32 @@ session ordering are separately covered. Public `checkpoint(); fs::copy()` is
 rejected as a guarantee because the next writer can mutate page 0/EOF after the
 checkpoint lock is released.
 
-### A10 — Bounded reverse-reference contract and entity-selector interop (BACKLOG)
+### A10 — Bounded selective relationship-read contract (COMPLETE)
 
-Recommendation: preserve the existing fail-closed execution-work ceiling and
-make its contract explicit. Do not fix the Vetch incident by raising the global
-row cap or by returning a truncated reverse-reference set.
+Vetch's event-payload owner relation is encoded as a reversible Datalog keyword
+value. It is not a Vicia `Value::Ref`, so UUID-only `refsTo()` was never the
+missing execution path. The immediate Vetch repair correctly uses the indexed
+single-attribute Datalog path and preserves the fail-closed execution-work
+ceiling.
 
-The first slice is documentation plus a caller-shaped regression fixture:
+The completed contract slice is documentation plus a caller-shaped regression
+fixture:
 
 1. Document that `ReadView::query(max_rows)` and browser
    `BrowserReadView.query(..., max_rows, ...)` bound both complete results and
    internal source/binding/branch work. Keep the existing parameter for
    compatibility; describe separate concepts even if the implementation keeps
    one conservative ceiling.
-2. Add a 4,096-source VAET fixture with a transaction-pinned,
-   `AnyValidTime` reverse-reference read. Prove exact source count, deterministic
-   order, scoped/unscoped retraction semantics, bounded page/history work, and
-   whole-request rejection at an undersized result limit in native and real
-   browser WASM tests.
-3. Measure the Vetch keyword-entity case. If the existing typed selector cannot
-   address it without reproducing Vicia's keyword-to-UUID algorithm in the
-   caller, design an additive generic selector that accepts either a UUID or a
-   Datalog keyword entity literal and still returns canonical internal entity
-   IDs. Keep product IDs, chunk schemas, and replay policy outside Vicia.
-4. Update the high-level ledger API guidance so callers choose typed
-   `refsTo` for exact reverse-reference reads and reserve raw Datalog budgets for
-   genuinely relational queries.
+2. Use one 4,096-source descriptor to exercise both the Vetch-shaped keyword
+   relation and a true UUID Ref relation under a transaction-pinned
+   `AnyValidTime` view. Native and browser tests prove exact deterministic
+   sources, scoped and unscoped retractions, pinned-view isolation, and
+   whole-request rejection at an undersized limit.
+3. Run the browser fixture through `openPaged()` and prove selective page demand
+   without foreground full-image residency.
+4. Keep product ID encoding, chunk schemas, and replay policy in Vetch. Keep
+   `refsTo()` reserved for UUID Ref values; do not overload it to reinterpret
+   keyword relations.
 
 Required gate:
 
@@ -492,17 +492,18 @@ Required gate:
 - exact `asOf` and `validAt` semantics match raw Datalog;
 - the 4,096-source browser fixture completes through `openPaged()` without an
   unindexed scan or foreground full-image residency;
-- any new public selector is admitted only after the keyword-entity fixture
-  proves the existing typed surface insufficient.
+- no new public selector is admitted without a second measured caller or an
+  `openPaged()` failure that neither existing path can address.
 
 Stop conditions:
 
-- stop at docs/tests if Vetch's immediate single-seed Datalog repair stays
-  bounded and the typed keyword selector has no second measured caller;
+- stop at docs/tests because Vetch's immediate single-seed Datalog repair stays
+  bounded and there is no second measured caller for another typed selector;
 - stop and split storage work if the fixture exposes a VAET cursor or sparse
   page-residency defect rather than an API-shape gap;
 - reject a second query language, Vetch-specific chunk API, global budget
-  relaxation, or caller-side duplication of Vicia's entity hashing.
+  relaxation, caller-side entity hashing, or keyword reinterpretation inside
+  `refsTo()`.
 
 ## Candidates (demoted — promote only on measured evidence)
 
@@ -518,7 +519,7 @@ A0 first — every later gate and both promotion decisions cite it. A6 and A7
 are independent of each other and of A0; A6 unblocks harrekki v0 and should
 start early. A2 depends on A6 only for its exposure surface (the Rust API
 part can land first). A5's evidence part consumes A0's browser suite. A8 and
-A9 are P1, after the P0 set. A10 is a measured compatibility and contract
+A9 are P1, after the P0 set. A10 closed as a compatibility and contract
 backlog item; its documentation/fixture slice may proceed independently, while
 public API growth remains evidence-gated. Candidates have no schedule.
 

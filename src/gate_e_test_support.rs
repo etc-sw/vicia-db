@@ -2,10 +2,115 @@
 
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use uuid::Uuid;
 
 pub(crate) const PAGE_SIZE: usize = crate::storage::PAGE_SIZE;
 pub(crate) const NATIVE_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/gate_e/native.graph");
 pub(crate) const BROWSER_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/gate_e/browser.graph");
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoundedSelectiveReadFixture {
+    pub schema: String,
+    pub visible_source_count: usize,
+    pub asserted_source_count: usize,
+    pub post_view_source_index: usize,
+    pub keyword_attribute: String,
+    pub ref_attribute: String,
+    pub keyword_target: String,
+    pub ref_target: Uuid,
+    pub first_valid_from: String,
+    pub first_valid_to: String,
+    pub second_valid_from: String,
+    pub second_valid_to: String,
+}
+
+impl BoundedSelectiveReadFixture {
+    pub(crate) fn source(&self, index: usize) -> Uuid {
+        assert!(index > 0, "fixture source indices are one-based");
+        Uuid::from_u128(index as u128)
+    }
+
+    pub(crate) fn expected_visible_sources(&self) -> Vec<Uuid> {
+        (1..=self.visible_source_count)
+            .map(|index| self.source(index))
+            .collect()
+    }
+
+    pub(crate) fn setup_commands(&self) -> Vec<String> {
+        let first_window_rows = (1..=self.asserted_source_count)
+            .flat_map(|index| self.rows_for_source(index))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let first_source_rows = self.rows_for_source(1).join(" ");
+        let retracted_source_rows = self.rows_for_source(self.asserted_source_count).join(" ");
+        vec![
+            format!(
+                r#"(transact {{:valid-from "{}" :valid-to "{}"}} [{first_window_rows}])"#,
+                self.first_valid_from, self.first_valid_to
+            ),
+            format!(
+                r#"(transact {{:valid-from "{}" :valid-to "{}"}} [{first_source_rows}])"#,
+                self.second_valid_from, self.second_valid_to
+            ),
+            format!(
+                r#"(retract {{:valid-from "{}" :valid-to "{}"}} [{first_source_rows}])"#,
+                self.first_valid_from, self.first_valid_to
+            ),
+            format!("(retract [{retracted_source_rows}])"),
+        ]
+    }
+
+    pub(crate) fn post_view_command(&self) -> String {
+        format!(
+            "(transact [{}])",
+            self.rows_for_source(self.post_view_source_index).join(" ")
+        )
+    }
+
+    pub(crate) fn keyword_query(&self) -> String {
+        format!(
+            "(query [:find ?source :where [?source {} {}]])",
+            self.keyword_attribute, self.keyword_target
+        )
+    }
+
+    fn rows_for_source(&self, index: usize) -> [String; 2] {
+        let source = self.source(index);
+        [
+            format!(
+                r#"[#uuid "{source}" {} {}]"#,
+                self.keyword_attribute, self.keyword_target
+            ),
+            format!(
+                r#"[#uuid "{source}" {} #uuid "{}"]"#,
+                self.ref_attribute, self.ref_target
+            ),
+        ]
+    }
+}
+
+pub(crate) fn bounded_selective_read_fixture() -> BoundedSelectiveReadFixture {
+    let fixture: BoundedSelectiveReadFixture = serde_json::from_str(include_str!(
+        "../benchmarks/fixtures/vetch-bounded-selective-read.v1.json"
+    ))
+    .expect("bounded selective-read fixture JSON must parse");
+    assert_eq!(
+        fixture.schema, "vicia.vetch-bounded-selective-read.v1",
+        "bounded selective-read fixture schema"
+    );
+    assert_eq!(
+        fixture.asserted_source_count,
+        fixture.visible_source_count + 1,
+        "one asserted source must be removed by the unscoped retract"
+    );
+    assert_eq!(
+        fixture.post_view_source_index,
+        fixture.asserted_source_count + 1,
+        "post-view source must follow the checkpointed fixture"
+    );
+    fixture
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Corpus {

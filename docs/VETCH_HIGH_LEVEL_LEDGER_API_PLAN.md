@@ -618,7 +618,7 @@ interactive lifetime, and explicit maintenance publication. The generated
 `scripts/validate-browser-capability-surface.mjs`, including the retained raw
 compatibility methods.
 
-The real Chrome suite passes 74/74 tests. Its H3 regressions prove atomic
+The real Chrome suite passes 75/75 tests. Its H3 regressions prove atomic
 interactive write plus bounded read, mandatory paged persistent constructors,
 and maintenance-owned export/import. Existing fault-injected browser tests
 continue to prove that failed replacement preserves the previous live and
@@ -642,9 +642,19 @@ merely by opening or dropping; only its explicit maintenance operation owns
 publication. Raw `Minigraf` retains its legacy threshold and close behavior for
 compatibility. Threshold-one WAL regressions pin all three lifetimes.
 
-Verification passed the full native suite (1351 tests: 1339 passing, 12
+The Vetch event-payload owner relation is a reversible product-ID keyword, not
+a Vicia `Value::Ref`. Its bounded single-attribute Datalog lookup therefore
+remains the correct foreground path; `refsTo()` remains the exact typed path
+for true UUID Ref values and must not reinterpret keywords. A shared
+4,096-source fixture proves both representations through native and paged
+browser reads, including deterministic complete results, scoped and unscoped
+retractions, pinned-view isolation, undersized-budget rejection, and sparse
+page residency. That evidence does not justify another public selector: admit
+one only if a second measured caller cannot use either existing path.
+
+Verification passed the full native suite (1358 tests: 1346 passing, 12
 ignored), formatting, warning-denied library Clippy, browser WASM compilation,
-generated capability-surface validation, and 74/74 real-Chrome tests. File
+generated capability-surface validation, and 75/75 real-Chrome tests. File
 format bytes, public method signatures, Datalog syntax, and bi-temporal
 semantics remain unchanged.
 

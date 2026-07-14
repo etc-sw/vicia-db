@@ -950,8 +950,11 @@ impl BrowserReadView {
 
     /// Execute one selective query and return a complete JSON result.
     ///
-    /// Both limits are mandatory. Oversized results are rejected, never
-    /// truncated, and queries without an indexed seed are rejected before I/O.
+    /// `max_rows` bounds both the complete result and conservative execution
+    /// work across source visits, bindings, branches, and aggregate inputs, so
+    /// a query may reject even when its final projection would fit. Both limits
+    /// are mandatory. Oversized results are rejected, never truncated, and
+    /// queries without an indexed seed are rejected before I/O.
     pub async fn query(
         &self,
         datalog: String,
@@ -2234,8 +2237,8 @@ fn query_result_to_json(result: QueryResult) -> String {
 mod tests {
     use super::*;
     use crate::gate_e_test_support::{
-        BROWSER_FIXTURE, CorruptionCase, NATIVE_FIXTURE, Probe, QueryCase, apply_mutation, corpus,
-        normalize_rows, published_byte_len,
+        BROWSER_FIXTURE, CorruptionCase, NATIVE_FIXTURE, Probe, QueryCase, apply_mutation,
+        bounded_selective_read_fixture, corpus, normalize_rows, published_byte_len,
     };
     use wasm_bindgen_test::*;
 
@@ -2274,6 +2277,42 @@ mod tests {
             .export_graph()
             .expect("export sparse fixture")
             .to_vec()
+    }
+
+    async fn build_bounded_selective_read_image() -> Vec<u8> {
+        let fixture = bounded_selective_read_fixture();
+        let source = BrowserDb::open_in_memory().expect("open bounded selective-read source");
+        for command in fixture.setup_commands() {
+            source
+                .execute(command)
+                .await
+                .expect("write bounded selective-read fixture");
+        }
+        source
+            .export_graph()
+            .expect("export bounded selective-read fixture")
+            .to_vec()
+    }
+
+    fn browser_query_source_refs(encoded: &str) -> Vec<String> {
+        let value: serde_json::Value =
+            serde_json::from_str(encoded).expect("source query JSON must parse");
+        let rows = value["results"]
+            .as_array()
+            .expect("source query results must be an array");
+        let mut sources = rows
+            .iter()
+            .map(|row| {
+                let row = row.as_array().expect("source query row must be an array");
+                assert_eq!(row.len(), 1, "source query must return one column");
+                row[0]["$ref"]
+                    .as_str()
+                    .expect("source query must return a tagged entity ref")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+        sources
     }
 
     fn downgrade_current_fixture_to_v11(bytes: &mut [u8]) {
@@ -2459,6 +2498,121 @@ mod tests {
                 backend.resident_page_count(),
                 backend.pinned_page_count(),
                 "operation staging pages must be released after the query"
+            );
+        });
+    }
+
+    #[wasm_bindgen_test]
+    async fn paged_bounded_selective_read_distinguishes_keyword_and_ref_relationships() {
+        let fixture = bounded_selective_read_fixture();
+        let bytes = build_bounded_selective_read_image().await;
+        let header = crate::storage::FileHeader::from_bytes(
+            bytes
+                .get(..crate::storage::PAGE_SIZE)
+                .expect("bounded fixture must contain page 0"),
+        )
+        .expect("bounded fixture page 0 must decode");
+        let db_name = format!("vicia-paged-bounded-selective-{}", js_sys::Date::now());
+        let idb = IndexedDbBackend::open(&db_name)
+            .await
+            .expect("open bounded fixture IDB");
+        idb.replace_all_pages(fixture_pages(&bytes))
+            .await
+            .expect("seed bounded fixture pages");
+        idb.reset_read_counters_for_test();
+
+        let db = BrowserDb::open_paged_from_idb(idb.clone_handle())
+            .await
+            .expect("open bounded paged fixture");
+        let open_counts = idb.read_counters_for_test();
+        assert_eq!(open_counts.full_store_reads, 0);
+        let pinned_tx = db.inner.borrow().fact_storage.current_tx_count();
+        let view = db
+            .read_view_any_valid_time(pinned_tx)
+            .expect("capture any-valid-time view");
+        let expected = fixture
+            .expected_visible_sources()
+            .into_iter()
+            .map(|source| source.to_string())
+            .collect::<Vec<_>>();
+
+        let raw = view
+            .query(
+                fixture.keyword_query(),
+                crate::db::READ_VIEW_MAX_ROWS,
+                BROWSER_READ_VIEW_MAX_RESULT_BYTES,
+            )
+            .await
+            .expect("read keyword-valued owner relationship");
+        assert_eq!(browser_query_source_refs(&raw), expected);
+
+        let typed = view
+            .refs_to(
+                fixture.ref_attribute.clone(),
+                fixture.ref_target.to_string(),
+                fixture.visible_source_count,
+            )
+            .await
+            .expect("read Ref-valued owner relationship");
+        let typed = typed
+            .iter()
+            .map(|value| {
+                value
+                    .as_string()
+                    .expect("typed source must be a UUID string")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(typed, expected);
+
+        assert!(
+            view.query(
+                fixture.keyword_query(),
+                fixture.visible_source_count - 1,
+                BROWSER_READ_VIEW_MAX_RESULT_BYTES,
+            )
+            .await
+            .is_err(),
+            "undersized raw budget must reject the complete browser result"
+        );
+        assert!(
+            view.refs_to(
+                fixture.ref_attribute.clone(),
+                fixture.ref_target.to_string(),
+                fixture.visible_source_count - 1,
+            )
+            .await
+            .is_err(),
+            "undersized typed limit must reject the complete browser result"
+        );
+
+        db.execute(fixture.post_view_command())
+            .await
+            .expect("append post-view source");
+        let pinned = view
+            .refs_to(
+                fixture.ref_attribute.clone(),
+                fixture.ref_target.to_string(),
+                crate::db::READ_VIEW_MAX_ROWS,
+            )
+            .await
+            .expect("reread pinned typed relationship");
+        assert_eq!(
+            usize::try_from(pinned.length()).unwrap(),
+            fixture.visible_source_count,
+            "pinned browser view must exclude later writes"
+        );
+
+        let counts = idb.read_counters_for_test();
+        assert_eq!(counts.full_store_reads, 0);
+        assert!(
+            counts.pages_returned > open_counts.pages_returned,
+            "bounded relationship reads must demand committed pages"
+        );
+        db.inner.borrow().pfs.with_backend(|backend| {
+            assert!(backend.is_sparse());
+            assert!(
+                u64::try_from(backend.resident_page_count()).unwrap() < header.page_count,
+                "bounded relationship reads must not retain the complete image"
             );
         });
     }
