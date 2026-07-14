@@ -1,6 +1,9 @@
 # Vicia Performance TODO
 
 Temporary checklist based on the 1M reference DB benchmark.
+The whole-shape direction, ordering, and admission rules live in
+[`PERFORMANCE_ROADMAP.md`](PERFORMANCE_ROADMAP.md); this file remains the
+current executable checklist.
 
 ## P0 — Aggregate memory
 
