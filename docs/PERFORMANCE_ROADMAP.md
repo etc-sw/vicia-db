@@ -217,6 +217,26 @@ Proceed to R2 only when the same-source 1M receipt shows:
 If the probe misses the latency gate, delete the prototype and proceed to R3.
 Do not ship a second current-state authority for a marginal improvement.
 
+### Measured outcome
+
+R1 passes on the clean 1M full receipt from source `853a800`:
+
+| Metric | Ledger fold | Projection candidate |
+|---|---:|---:|
+| Aggregate p50 | 264.261 ms | 4.033 ms |
+| Aggregate p95 | 269.842 ms | 4.244 ms |
+| Query RSS delta | — | 0 MiB |
+| Accounted projection bytes | — | 29.000 MiB (11.46% of image) |
+| Deterministic rebuild | — | pass |
+| One-fact ledger-tail refresh | — | 0.105 ms |
+
+The candidate preserves exact count/checksum, all `Value` variants,
+`Value::Ref`, scoped and unscoped retractions, overlapping valid windows,
+pending/base precedence, and checkpoint-generation invalidation. It is not
+installed in production routing and changes no public API or persisted bytes.
+This admits R2 design work; it does not authorize persisting the fixed-time
+candidate unchanged.
+
 ### Reference implementations
 
 - Turso's DBSP-style incremental aggregate operator:
@@ -232,6 +252,24 @@ invariants. Do not import either engine or adopt a general columnar backend.
 ## R2. In-File Current Projection
 
 This stage exists only if R1 passes.
+
+### First slice: temporal projection layout
+
+Before assigning a page root, extend the compact candidate with the valid-time
+information required to answer a moving current read without a hidden rebuild.
+The fixed-time R1 candidate becomes stale when wall clock time crosses a
+`valid_from` or `valid_to` boundary even if the ledger generation is unchanged.
+R2-A must therefore choose and measure one durable representation:
+
+- compact surviving `(valid_from, valid_to)` interval columns filtered at read
+  time; or
+- an equivalent boundary schedule that updates only rows crossing the current
+  time and remains exactly rebuildable from the ledger.
+
+The representation must retain R1 latency/RSS gates, stay within 15% of the
+fill-90 image, and prove clock-boundary transitions, overlapping windows,
+retractions, and deterministic rebuild. Do not create persisted projection
+pages until this temporal identity is green.
 
 ### Storage boundary
 
@@ -562,16 +600,16 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 is closed. The only active slice is R1 current-projection feasibility:
+R0 and R1 are closed. The only active slice is R2-A temporal projection layout:
 
 ```text
-build an exact resident projection in bench-internals
-measure rebuild, incremental update, query, size, and invalidation behavior
-admit an in-file projection only if every R1 gate passes
+carry exact valid-time intervals or boundary transitions in compact columns
+measure moving-time reads, rebuild, update, bytes, latency, and RSS
+assign no in-file root until temporal identity passes
 ```
 
-R1 is a direct risk probe into the intended rebuildable in-file projection. It
-must not change public APIs, persisted pages, file-format versions, or ledger
-authority. Delete the prototype and proceed to R3 if it misses the latency or
-correctness gate. R2 and R3-R6 remain parked behind their respective evidence
-gates.
+R2-A is a durable risk probe inside the admitted in-file projection shape. It
+must stay behind `bench-internals`, preserve ledger authority, and avoid public
+API or persisted-byte changes. If exact temporal state exceeds the size or
+latency gate, stop R2 and proceed to R3 rather than persisting the fixed-time R1
+snapshot. R3-R6 remain parked behind their respective evidence gates.

@@ -2014,6 +2014,45 @@ VICIA_BENCH_RECEIPT=target/h0-browser.json \
   /path-served-under-repo/1m.graph 20
 ```
 
+### R1 current-projection feasibility
+
+`vicia.current-projection-feasibility.v1` measures a repository-only compact
+current projection against the same exact 1M count/sum workload. The candidate
+stores sorted entity and canonical value columns, then replaces changed base
+entities through a small overlay rebuilt from the authoritative ledger tail and
+exact current entity cursor. It is not installed in production query routing.
+
+| 1M metric | Ledger fold | Projection candidate |
+|---|---:|---:|
+| Aggregate p50 | 264.261 ms | 4.033 ms |
+| Aggregate p95 | 269.842 ms | 4.244 ms |
+| Build time | — | 283.045 ms |
+| Accounted bytes | — | 30,408,721 B (11.46% of image) |
+| Resident RSS delta | — | 27.703 MiB |
+| Query RSS delta | — | 0 MiB |
+| One-fact/one-entity refresh | — | 0.105 ms |
+
+All 20 baseline and candidate observations return exact count/checksum
+`1,000,000/499,999,500,000`. The candidate p50 improves 98.47%, p95 is 105.24%
+of p50, and all admission gates pass. The semantic probe covers Integer,
+Float, Boolean, Ref, Keyword, String, Null, scoped and unscoped retractions,
+overlapping valid windows, pending/base refresh, stale generation rejection,
+checkpoint invalidation, and deterministic rebuild. The validator mutation
+audit rejects altered exactness, latency, tail, RSS, size, refresh scope,
+checkpoint isolation, semantic coverage, and rebuild evidence.
+
+R1 therefore admits R2 design work without changing the current Vetch package,
+file format, default public API, or production checkpoint/query path. The
+candidate is fixed to one `valid_at`; R2-A must prove compact moving-time
+semantics before any persisted projection root is designed. The clean receipt
+from source `853a8009243bd89e348188d59ba104abdbe0af13` is preserved at
+`benchmarks/baselines/current-projection/2026-07-14-hal7800-r1-full/receipt.json`.
+
+```bash
+just current-projection-smoke
+just current-projection-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a
