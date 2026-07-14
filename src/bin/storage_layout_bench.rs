@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use minigraf::{
-    CheckpointConstructionDiagnostics, Minigraf, OpenOptions, QueryResult,
+    CheckpointConstructionDiagnostics, LeafReadDiagnostics, Minigraf, OpenOptions, QueryResult,
     StorageLayoutDiagnostics, inspect_storage_layout,
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = "vicia.storage-layout.v2";
+const POINT_DENSITY_SCHEMA: &str = "vicia.point-path-density.v1";
 const BATCH: usize = 1_000;
 const FILLS: &[u8] = &[75, 85, 90, 95, 100];
 
@@ -139,11 +140,47 @@ struct QuerySample {
     delta_rss_bytes: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PointDensityReceipt {
+    schema: &'static str,
+    profile: &'static str,
+    facts: u64,
+    repetitions: usize,
+    generated_at_unix_ms: u128,
+    source_commit: String,
+    tracked_clean: bool,
+    query_order: Vec<Vec<u8>>,
+    candidates: Vec<PointDensityCandidate>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PointDensityCandidate {
+    fill_percent: u8,
+    graph_bytes: u64,
+    layout: StorageLayoutDiagnostics,
+    point_samples_ms: Vec<f64>,
+    diagnostics_samples: Vec<LeafReadDiagnostics>,
+    stats: MetricSummary,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PointDensitySample {
+    point_ms: f64,
+    value: i64,
+    diagnostics: LeafReadDiagnostics,
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.as_slice() {
         [command, profile, output] if command == "run" => {
             run(Profile::parse(profile)?, Path::new(output))
+        }
+        [command, profile, output] if command == "point-density" => {
+            run_point_density(Profile::parse(profile)?, Path::new(output))
         }
         [command, path, facts, fill] if command == "build" => {
             println!(
@@ -156,8 +193,107 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&measure(Path::new(path))?)?);
             Ok(())
         }
-        _ => bail!("usage: storage-layout-bench run <smoke|full> <output-dir>"),
+        [command, path] if command == "measure-point-density" => {
+            println!(
+                "{}",
+                serde_json::to_string(&measure_point_density(Path::new(path))?)?
+            );
+            Ok(())
+        }
+        _ => bail!("usage: storage-layout-bench <run|point-density> <smoke|full> <output-dir>"),
     }
+}
+
+fn run_point_density(profile: Profile, output: &Path) -> Result<()> {
+    if output.exists() {
+        fs::remove_dir_all(output)?;
+    }
+    fs::create_dir_all(output)?;
+    let executable = std::env::current_exe()?;
+    let mut builds = Vec::with_capacity(FILLS.len());
+    for fill in FILLS {
+        let path = output.join(format!("fill-{fill}.graph"));
+        eprintln!("point-density: build fill-{fill}");
+        builds.push(child::<CheckpointSample>(
+            &executable,
+            &[
+                "build",
+                path.to_str().context("non-UTF8 path")?,
+                &profile.facts().to_string(),
+                &fill.to_string(),
+            ],
+        )?);
+    }
+
+    let query_order = rotated_orders(profile.repetitions());
+    let mut samples: Vec<Vec<PointDensitySample>> = FILLS
+        .iter()
+        .map(|_| Vec::with_capacity(profile.repetitions()))
+        .collect();
+    for (repetition, order) in query_order.iter().enumerate() {
+        for fill in order {
+            let path = output.join(format!("fill-{fill}.graph"));
+            eprintln!(
+                "point-density: query fill-{fill} {}/{}",
+                repetition + 1,
+                profile.repetitions()
+            );
+            samples
+                .get_mut(fill_index(*fill)?)
+                .context("missing point-density candidate")?
+                .push(child::<PointDensitySample>(
+                    &executable,
+                    &[
+                        "measure-point-density",
+                        path.to_str().context("non-UTF8 path")?,
+                    ],
+                )?);
+        }
+    }
+
+    let mut candidates = Vec::with_capacity(FILLS.len());
+    for fill in FILLS {
+        let index = fill_index(*fill)?;
+        let build = builds.get(index).context("missing point-density build")?;
+        let candidate_samples = samples
+            .get(index)
+            .context("missing point-density samples")?;
+        if candidate_samples.iter().any(|sample| sample.value != 5_000) {
+            bail!("point-density query returned the wrong value")
+        }
+        let point_samples_ms = candidate_samples
+            .iter()
+            .map(|sample| sample.point_ms)
+            .collect::<Vec<_>>();
+        candidates.push(PointDensityCandidate {
+            fill_percent: *fill,
+            graph_bytes: build.graph_bytes,
+            layout: build.layout.clone(),
+            diagnostics_samples: candidate_samples
+                .iter()
+                .map(|sample| sample.diagnostics.clone())
+                .collect(),
+            stats: summarize(&point_samples_ms),
+            point_samples_ms,
+        });
+    }
+    let receipt = PointDensityReceipt {
+        schema: POINT_DENSITY_SCHEMA,
+        profile: profile.name(),
+        facts: profile.facts(),
+        repetitions: profile.repetitions(),
+        generated_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+        source_commit: command_text("git", &["rev-parse", "HEAD"])?,
+        tracked_clean: command_text("git", &["status", "--short", "--untracked-files=no"])?
+            .is_empty(),
+        query_order,
+        candidates,
+    };
+    fs::write(
+        output.join("receipt.json"),
+        serde_json::to_vec_pretty(&receipt)?,
+    )?;
+    Ok(())
 }
 
 fn run(profile: Profile, output: &Path) -> Result<()> {
@@ -376,6 +512,40 @@ fn measure(path: &Path) -> Result<QuerySample> {
         peak_rss_bytes: peak.load(Ordering::SeqCst),
         delta_rss_bytes: peak.load(Ordering::SeqCst).saturating_sub(baseline),
     })
+}
+
+fn measure_point_density(path: &Path) -> Result<PointDensitySample> {
+    let db = Minigraf::open(path)?;
+    let point = "(query [:find ?v :where [:layout/e5000 :layout/value ?v]])";
+    point_value(db.execute(point)?)?;
+    db.set_leaf_read_diagnostics_enabled(true);
+    let diagnostic_value = point_value(db.execute(point)?)?;
+    let diagnostics = db.last_leaf_read_diagnostics();
+    db.set_leaf_read_diagnostics_enabled(false);
+    let started = Instant::now();
+    let value = point_value(db.execute(point)?)?;
+    let point_ms = elapsed(started);
+    if diagnostic_value != value {
+        bail!("diagnostic and timed point queries returned different values")
+    }
+    Ok(PointDensitySample {
+        point_ms,
+        value,
+        diagnostics,
+    })
+}
+
+fn point_value(result: QueryResult) -> Result<i64> {
+    let QueryResult::QueryResults { results, .. } = result else {
+        bail!("point query returned non-query result")
+    };
+    if results.len() != 1 {
+        bail!("point query returned {} rows", results.len())
+    }
+    results[0]
+        .first()
+        .and_then(|value| value.as_integer())
+        .context("point query returned no integer")
 }
 
 fn combine_query_samples(samples: Vec<QuerySample>) -> Result<QueryMeasurement> {

@@ -185,6 +185,16 @@ impl PageCache {
             .entries
             .len()
     }
+
+    /// Whether one page is already resident, for serial repository benchmarks.
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn contains_page(&self, page_id: u64) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .entries
+            .contains_key(&page_id)
+    }
 }
 
 #[cfg(test)]

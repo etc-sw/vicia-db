@@ -22,11 +22,15 @@ use std::cell::{Cell, RefCell};
 
 /// Repository-only counters for the page-backed leaf read path.
 #[cfg(feature = "bench-internals")]
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(missing_docs)]
 pub struct LeafReadDiagnostics {
     pub internal_pages_visited: u64,
+    pub internal_keys_available: u64,
+    pub internal_key_comparisons: u64,
+    pub internal_key_bytes_decoded: u64,
+    pub internal_descent_elapsed_ns: u64,
     pub leaf_pages_visited: u64,
     pub raw_leaf_pages_visited: u64,
     pub prefix_leaf_pages_visited: u64,
@@ -35,6 +39,10 @@ pub struct LeafReadDiagnostics {
     pub leaf_entries_emitted: u64,
     pub leaf_entries_skipped: u64,
     pub lower_bound_key_comparisons: u64,
+    pub raw_lower_bound_key_comparisons: u64,
+    pub prefix_restart_key_comparisons: u64,
+    pub prefix_linear_key_comparisons: u64,
+    pub leaf_seek_elapsed_ns: u64,
     pub prefix_restart_blocks_reconstructed: u64,
     pub prefix_entries_reconstructed: u64,
     pub reconstructed_key_bytes: u64,
@@ -58,6 +66,10 @@ pub struct LeafReadDiagnostics {
     pub projected_owned_vaet_decodes: u64,
     pub resume_key_materializations: u64,
     pub resume_key_buffer_reuses: u64,
+    pub exact_fact_resolutions: u64,
+    pub fact_page_cache_hits: u64,
+    pub fact_page_cache_misses: u64,
+    pub exact_fact_resolution_elapsed_ns: u64,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -68,6 +80,10 @@ thread_local! {
     static LEAF_READ_DIAGNOSTICS: RefCell<LeafReadDiagnostics> = const {
         RefCell::new(LeafReadDiagnostics {
             internal_pages_visited: 0,
+            internal_keys_available: 0,
+            internal_key_comparisons: 0,
+            internal_key_bytes_decoded: 0,
+            internal_descent_elapsed_ns: 0,
             leaf_pages_visited: 0,
             raw_leaf_pages_visited: 0,
             prefix_leaf_pages_visited: 0,
@@ -76,6 +92,10 @@ thread_local! {
             leaf_entries_emitted: 0,
             leaf_entries_skipped: 0,
             lower_bound_key_comparisons: 0,
+            raw_lower_bound_key_comparisons: 0,
+            prefix_restart_key_comparisons: 0,
+            prefix_linear_key_comparisons: 0,
+            leaf_seek_elapsed_ns: 0,
             prefix_restart_blocks_reconstructed: 0,
             prefix_entries_reconstructed: 0,
             reconstructed_key_bytes: 0,
@@ -99,6 +119,10 @@ thread_local! {
             projected_owned_vaet_decodes: 0,
             resume_key_materializations: 0,
             resume_key_buffer_reuses: 0,
+            exact_fact_resolutions: 0,
+            fact_page_cache_hits: 0,
+            fact_page_cache_misses: 0,
+            exact_fact_resolution_elapsed_ns: 0,
         })
     };
 }
@@ -136,7 +160,7 @@ pub(crate) fn set_leaf_read_diagnostics_enabled(enabled: bool) {
 
 #[cfg(feature = "bench-internals")]
 #[inline(always)]
-fn leaf_read_diagnostics_enabled() -> bool {
+pub(crate) fn leaf_read_diagnostics_enabled() -> bool {
     LEAF_READ_DIAGNOSTICS_ENABLED.get()
 }
 
@@ -146,6 +170,22 @@ fn update_leaf_read_diagnostics(update: impl FnOnce(&mut LeafReadDiagnostics)) {
     if leaf_read_diagnostics_enabled() {
         LEAF_READ_DIAGNOSTICS.with(|slot| update(&mut slot.borrow_mut()));
     }
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn note_exact_fact_resolution(cache_hit: bool, elapsed_ns: u64) {
+    update_leaf_read_diagnostics(|diagnostics| {
+        diagnostics.exact_fact_resolutions = diagnostics.exact_fact_resolutions.saturating_add(1);
+        if cache_hit {
+            diagnostics.fact_page_cache_hits = diagnostics.fact_page_cache_hits.saturating_add(1);
+        } else {
+            diagnostics.fact_page_cache_misses =
+                diagnostics.fact_page_cache_misses.saturating_add(1);
+        }
+        diagnostics.exact_fact_resolution_elapsed_ns = diagnostics
+            .exact_fact_resolution_elapsed_ns
+            .saturating_add(elapsed_ns);
+    });
 }
 
 #[cfg(feature = "bench-internals")]
@@ -759,6 +799,8 @@ fn find_leaf_for_key<K>(
 where
     K: for<'de> Deserialize<'de> + Ord,
 {
+    #[cfg(feature = "bench-internals")]
+    let started = leaf_read_diagnostics_enabled().then(std::time::Instant::now);
     let mut page_id = root;
     loop {
         let page = cache.get_or_load(page_id, backend)?;
@@ -767,7 +809,18 @@ where
             .copied()
             .ok_or_else(|| anyhow!("empty page at page_id={page_id}"))?;
         match page_type {
-            page_type if is_leaf_page_type(page_type) => return Ok(page_id),
+            page_type if is_leaf_page_type(page_type) => {
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    if let Some(started) = started {
+                        diagnostics.internal_descent_elapsed_ns =
+                            diagnostics.internal_descent_elapsed_ns.saturating_add(
+                                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                            );
+                    }
+                });
+                return Ok(page_id);
+            }
             PAGE_TYPE_INTERNAL => {
                 #[cfg(feature = "bench-internals")]
                 update_leaf_read_diagnostics(|diagnostics| {
@@ -775,6 +828,12 @@ where
                         diagnostics.internal_pages_visited.saturating_add(1);
                 });
                 let key_count = read_u16_at(&page[..], 2)? as usize;
+                #[cfg(feature = "bench-internals")]
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.internal_keys_available = diagnostics
+                        .internal_keys_available
+                        .saturating_add(u64::try_from(key_count).unwrap_or(u64::MAX));
+                });
                 let rightmost_child = read_u64_at(&page[..], 4)?;
                 let child_arr_start = INTERNAL_HEADER_SIZE;
                 let slot_dir_start = INTERNAL_HEADER_SIZE + key_count * 8;
@@ -793,6 +852,15 @@ where
                             )
                         })?;
                     let sep_key: K = postcard::from_bytes(sep_slice)?;
+
+                    #[cfg(feature = "bench-internals")]
+                    update_leaf_read_diagnostics(|diagnostics| {
+                        diagnostics.internal_key_comparisons =
+                            diagnostics.internal_key_comparisons.saturating_add(1);
+                        diagnostics.internal_key_bytes_decoded = diagnostics
+                            .internal_key_bytes_decoded
+                            .saturating_add(u64::try_from(sep_slice.len()).unwrap_or(u64::MAX));
+                    });
 
                     if *key < sep_key {
                         let child_off = child_arr_start + i * 8;
@@ -1008,11 +1076,22 @@ where
     }
 
     fn seek_lower_bound(&mut self, start: &K) -> Result<()> {
-        if self.page_type == PAGE_TYPE_PREFIX_LEAF {
+        #[cfg(feature = "bench-internals")]
+        let started = leaf_read_diagnostics_enabled().then(std::time::Instant::now);
+        let result = if self.page_type == PAGE_TYPE_PREFIX_LEAF {
             self.seek_prefix_lower_bound(start)
         } else {
             self.seek_raw_lower_bound(start)
-        }
+        };
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            if let Some(started) = started {
+                diagnostics.leaf_seek_elapsed_ns = diagnostics.leaf_seek_elapsed_ns.saturating_add(
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                );
+            }
+        });
+        result
     }
 
     fn seek_raw_lower_bound(&mut self, start: &K) -> Result<()> {
@@ -1025,6 +1104,9 @@ where
             update_leaf_read_diagnostics(|diagnostics| {
                 diagnostics.lower_bound_key_comparisons =
                     diagnostics.lower_bound_key_comparisons.saturating_add(1);
+                diagnostics.raw_lower_bound_key_comparisons = diagnostics
+                    .raw_lower_bound_key_comparisons
+                    .saturating_add(1);
             });
             if key < *start {
                 low = middle.saturating_add(1);
@@ -1061,6 +1143,8 @@ where
             update_leaf_read_diagnostics(|diagnostics| {
                 diagnostics.lower_bound_key_comparisons =
                     diagnostics.lower_bound_key_comparisons.saturating_add(1);
+                diagnostics.prefix_restart_key_comparisons =
+                    diagnostics.prefix_restart_key_comparisons.saturating_add(1);
             });
             if key <= *start {
                 low = middle.saturating_add(1);
@@ -1079,6 +1163,8 @@ where
             update_leaf_read_diagnostics(|diagnostics| {
                 diagnostics.lower_bound_key_comparisons =
                     diagnostics.lower_bound_key_comparisons.saturating_add(1);
+                diagnostics.prefix_linear_key_comparisons =
+                    diagnostics.prefix_linear_key_comparisons.saturating_add(1);
             });
             if entry.0 >= *start {
                 self.buffered = Some(entry);
@@ -1633,6 +1719,10 @@ fn visit_current_eavt_range(
 
         let mut slot = 0usize;
         let mut previous = Vec::new();
+        #[cfg(feature = "bench-internals")]
+        let seek_started =
+            (leaf_read_diagnostics_enabled() && leaf_id == start_leaf && entry_count != 0)
+                .then(std::time::Instant::now);
         if leaf_id == start_leaf && entry_count != 0 {
             if page_type == PAGE_TYPE_PREFIX_LEAF {
                 let restart_count = entry_count.div_ceil(PREFIX_RESTART_INTERVAL);
@@ -1648,6 +1738,8 @@ fn visit_current_eavt_range(
                     update_leaf_read_diagnostics(|diagnostics| {
                         diagnostics.lower_bound_key_comparisons =
                             diagnostics.lower_bound_key_comparisons.saturating_add(1);
+                        diagnostics.prefix_restart_key_comparisons =
+                            diagnostics.prefix_restart_key_comparisons.saturating_add(1);
                     });
                     if wire.cmp_owned(start).is_lt() {
                         low = middle.saturating_add(1);
@@ -1673,6 +1765,9 @@ fn visit_current_eavt_range(
                     update_leaf_read_diagnostics(|diagnostics| {
                         diagnostics.lower_bound_key_comparisons =
                             diagnostics.lower_bound_key_comparisons.saturating_add(1);
+                        diagnostics.raw_lower_bound_key_comparisons = diagnostics
+                            .raw_lower_bound_key_comparisons
+                            .saturating_add(1);
                     });
                     if wire.cmp_owned(start).is_lt() {
                         low = middle.saturating_add(1);
@@ -1683,6 +1778,14 @@ fn visit_current_eavt_range(
                 slot = low;
             }
         }
+        #[cfg(feature = "bench-internals")]
+        update_leaf_read_diagnostics(|diagnostics| {
+            if let Some(started) = seek_started {
+                diagnostics.leaf_seek_elapsed_ns = diagnostics.leaf_seek_elapsed_ns.saturating_add(
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                );
+            }
+        });
         #[cfg(feature = "bench-internals")]
         update_leaf_read_diagnostics(|diagnostics| {
             diagnostics.leaf_entries_skipped = diagnostics
@@ -1700,6 +1803,13 @@ fn visit_current_eavt_range(
             slot = slot.saturating_add(1);
             let (wire, fact_ref) =
                 decode_projected_eavt(bytes, page_type == PAGE_TYPE_PREFIX_LEAF)?;
+            #[cfg(feature = "bench-internals")]
+            if leaf_id == start_leaf && page_type == PAGE_TYPE_PREFIX_LEAF {
+                update_leaf_read_diagnostics(|diagnostics| {
+                    diagnostics.prefix_linear_key_comparisons =
+                        diagnostics.prefix_linear_key_comparisons.saturating_add(1);
+                });
+            }
             if leaf_id == start_leaf && wire.cmp_owned(start).is_lt() {
                 #[cfg(feature = "bench-internals")]
                 update_leaf_read_diagnostics(|diagnostics| {
@@ -2863,6 +2973,11 @@ mod tests {
         backend.write_page(1, &raw_leaf_page(&serialized)).unwrap();
         let cache = PageCache::new(8);
         let mut seen = Vec::new();
+        #[cfg(feature = "bench-internals")]
+        {
+            reset_leaf_read_diagnostics();
+            set_leaf_read_diagnostics_enabled(true);
+        }
         let complete = visit_current_eavt_range(
             1,
             &expected[9].0,
@@ -2880,6 +2995,19 @@ mod tests {
         assert_eq!(seen[0].0, expected[9].0.entity);
         assert_eq!(seen[0].1, ":raw/eavt");
         assert_eq!(seen[2].2, expected[11].1);
+        #[cfg(feature = "bench-internals")]
+        {
+            let diagnostics = leaf_read_diagnostics();
+            set_leaf_read_diagnostics_enabled(false);
+            assert!(diagnostics.raw_lower_bound_key_comparisons > 0);
+            assert_eq!(
+                diagnostics.lower_bound_key_comparisons,
+                diagnostics.raw_lower_bound_key_comparisons
+            );
+            assert!(diagnostics.leaf_seek_elapsed_ns > 0);
+            assert_eq!(diagnostics.prefix_restart_key_comparisons, 0);
+            assert_eq!(diagnostics.prefix_linear_key_comparisons, 0);
+        }
     }
 
     #[test]

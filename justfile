@@ -40,6 +40,14 @@ storage-layout-smoke OUTPUT_DIR="target/storage-layout/smoke":
 storage-layout-full OUTPUT_DIR="target/storage-layout/full":
     ./scripts/run-storage-layout-bench.sh full "{{OUTPUT_DIR}}"
 
+# Attribute exact EAVT point-path work on 10K fill fixtures.
+point-path-density-smoke OUTPUT_DIR="target/point-path-density/smoke":
+    ./scripts/run-point-path-density-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Attribute exact EAVT point-path work on clean 1M/20-sample fill fixtures.
+point-path-density-full OUTPUT_DIR="target/point-path-density/full":
+    ./scripts/run-point-path-density-bench.sh full "{{OUTPUT_DIR}}"
+
 # Measure bounded checkpoint/recompact construction with a 10K base.
 checkpoint-construction-smoke OUTPUT_DIR="target/checkpoint-construction/smoke":
     ./scripts/run-checkpoint-construction-bench.sh smoke "{{OUTPUT_DIR}}"

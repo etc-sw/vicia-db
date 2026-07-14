@@ -265,12 +265,26 @@ impl<B: StorageBackend + 'static> crate::storage::CommittedFactReader
         &self,
         fact_ref: crate::storage::index::FactRef,
     ) -> anyhow::Result<crate::graph::types::Fact> {
+        #[cfg(feature = "bench-internals")]
+        let diagnostics_enabled = crate::storage::btree_v6::leaf_read_diagnostics_enabled();
+        #[cfg(feature = "bench-internals")]
+        let cache_hit = diagnostics_enabled && self.page_cache.contains_page(fact_ref.page_id);
+        #[cfg(feature = "bench-internals")]
+        let started = diagnostics_enabled.then(std::time::Instant::now);
         // backend_adapter is pre-built at construction time — no Arc::clone per call.
         // Backend mutex is only acquired inside adapter.read_page() on a cache miss.
         let page = self
             .page_cache
             .get_or_load(fact_ref.page_id, &self.backend_adapter)?;
-        crate::storage::packed_pages::read_slot(&page, fact_ref.slot_index).map_err(|error| {
+        let result = crate::storage::packed_pages::read_slot(&page, fact_ref.slot_index);
+        #[cfg(feature = "bench-internals")]
+        if let Some(started) = started {
+            crate::storage::btree_v6::note_exact_fact_resolution(
+                cache_hit,
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            );
+        }
+        result.map_err(|error| {
             crate::storage::mark_storage_failure(
                 error,
                 crate::storage::StorageFailureDisposition::Fatal,
