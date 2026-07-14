@@ -88,6 +88,14 @@ current-projection-smoke OUTPUT_DIR="target/current-projection/smoke":
 current-projection-full OUTPUT_DIR="target/current-projection/full":
     ./scripts/run-current-projection-bench.sh full "{{OUTPUT_DIR}}"
 
+# Run the R2-A temporal projection risk probe on a 10K fixture.
+temporal-projection-smoke OUTPUT_DIR="target/temporal-projection/smoke":
+    ./scripts/run-temporal-projection-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run the R2-A temporal projection admission gate on the exact 1M fixture.
+temporal-projection-full OUTPUT_DIR="target/temporal-projection/full":
+    ./scripts/run-temporal-projection-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser
