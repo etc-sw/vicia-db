@@ -44,6 +44,7 @@ current executable checklist.
 - [x] Binary-search internal separators. The repair preserves the first-separator-greater-than-key child rule and reduces full-receipt comparisons from 35/61/67/47/75 to 16/16/14/14/15 at fill 75/85/90/95/100. Point p50 becomes 0.00787/0.00776/0.00752/0.00739/0.00760 ms and candidate p95 is at most 0.01039 ms; all high fills pass the 20% relative gate with unchanged v12 bytes and exact result diagnostics.
 - [x] Rerun the complete v12 acceptance matrix from the binary-search source. Every fill passes point, aggregate, and RSS gates. Fill 85 passes checkpoint but misses the size gate; size-valid fills 90/95/100 fail only the checkpoint-tail gate. The mutation-audited variance report attributes the common tail to sync without fixed-position bias and admits no implementation. `selectedFillPercent` remains `null`, production remains at fill 75, and the Vetch browser package remains unchanged.
 - [x] Measure the exact fill frontier instead of rerunning the coarse matrix. The clean `vicia.storage-layout.v3` full receipt adds fill 86/87/88/89 under the same 20-run rotated contract and selects fill 87. Its 276.590 MiB image is 11.93% smaller than fill 75; checkpoint p50/p95 is 3,274.761/3,496.123 ms, point p95 is 0.01420 ms, aggregate p50/p95 is 283.743/304.362 ms, and query RSS p95 is 0.125 MiB. Receipt and variance mutation audits pass; this measurement leaves the current source default at fill 90 and does not replace the Vetch package.
+- [x] Close exact fill tuning with a direct fill-87/fill-90 risk probe. Forty alternating paired 1M runs preserve exact count/checksum in all 80 query samples. Fill 90 is smaller (269.586 versus 276.590 MiB), wins 28/40 paired checkpoints, and leads checkpoint p50/p95 (3,198.195/3,748.090 versus 3,248.581/4,090.620 ms), point p50/p95 (0.01112/0.01368 versus 0.01142/0.01431 ms), and aggregate p50/p95 (273.993/289.283 versus 275.595/294.044 ms). Retain production fill 90, reject the fill-87 promotion, and end fine fill search. Neither candidate proves the existing checkpoint-tail rollout gate, so the Vetch package remains unchanged.
 
 ## Regression gates
 
@@ -55,17 +56,35 @@ current executable checklist.
 
 ## Next task
 
-### Status: fill 87 is selected; production promotion is the next slice
+### Status: R0 is closed; R1 current-projection feasibility is next
 
-- Promote the B-tree bulk-build default from the current fill 90 to the
-  receipt-selected fill 87. This changes packing policy only; v12 bytes remain
-  readable by the existing raw/prefix readers and require no migration.
-- Run the full Rust suite, fmt, Clippy, WASM browser build, canonical receipt
-  validation/mutation audits, and the real-Chrome suite after the production
-  constant changes.
-- Replace the complete Vetch browser package only after those gates pass. Sync
-  JavaScript glue, typings, manifest, `.wasm`, and provenance together; do not
-  replace the `.wasm` alone.
-- Keep durability sync and the receipt-owned gates unchanged. The frontier
-  receipt admits fill 87; it does not admit checkpoint construction work for
-  the sync-owned tails of the other candidates.
+- Create `vicia/r1-current-projection-feasibility` in a fresh worktree. Keep the
+  proof behind `bench-internals`; do not change public APIs, persisted pages,
+  file-format versions, or production read routing.
+- Build a compact typed `CurrentProjectionCandidate` deterministically from the
+  existing exact current cursor. The append-only ledger remains authority; the
+  candidate must be discardable and exactly rebuildable.
+- Compare the existing current count/sum path and the candidate on the same 1M
+  fixture. Measure projection build time/bytes, aggregate p50/p95, incremental
+  update cost, and rebuild determinism.
+- Exercise incremental assert, scoped retract, unscoped retract, valid-window,
+  and `Value::Ref` changes, plus base+delta precedence, pending visibility, and
+  publication-generation invalidation. Cover Integer, Float, Boolean, Ref,
+  Keyword, String, and Null exactness.
+- Use Turso's incremental aggregate operator and Grafeo's layered compact graph
+  only as invariant references; add neither engine nor a general columnar
+  backend as a dependency.
+
+R2 is admitted only if the same-source receipt reaches aggregate p50
+`<= 150 ms` or improves at least 35%, keeps p95 within 115% of p50, keeps query
+RSS within baseline +2 MiB, limits projection bytes to 15% of the retained
+269.586 MiB fill-90 image, regresses foreground delta checkpoints by no more
+than 10%, and passes every semantic and deterministic-rebuild case. Delete the
+prototype and proceed to R3 on semantic mismatch, second-authority behavior,
+marginal latency improvement, or hidden foreground total-history work.
+
+Verification for this risk probe is targeted projection/update/invalidation
+tests, a smoke receipt, then a full receipt with validator and mutation audit.
+Run the full Rust/fmt/Clippy/WASM gates only if the slice unexpectedly requires
+production source changes; that requirement itself should trigger a scope
+review before implementation.

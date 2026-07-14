@@ -1,7 +1,6 @@
 # Vicia DB Performance Roadmap
 
-Status: proposed canonical high-level performance direction as of 2026-07-14;
-becomes active when this document is merged.
+Status: canonical high-level performance direction as of 2026-07-14.
 
 This document owns the whole performance shape, priority order, admission
 rules, and stop conditions. It does not replace the evidence or implementation
@@ -99,7 +98,7 @@ The completed line has already removed the largest avoidable costs:
 - pending indexes own each fact/value once and isolate unrelated attributes;
 - repeated 1M aggregates retain about 1.125 MiB with zero median growth.
 
-The latest clean storage-layout frontier receipt selects fill 87:
+The storage-layout frontier receipt selected fill 87 under its 20-run matrix:
 
 | 1M v12 fill-87 metric | Result |
 |---|---:|
@@ -110,12 +109,18 @@ The latest clean storage-layout frontier receipt selects fill 87:
 | Aggregate p50 / p95 | 283.743 / 304.362 ms |
 | Query RSS p95 | 0.125 MiB |
 
-That receipt admits promotion but does not itself change the current source
-default from fill 90 or replace the Vetch browser package. Different benchmark
-families use different workload contracts; their absolute numbers must not be
-mixed. The cross-engine v5 receipt, for example, records a 171.455/177.240 ms
-Vicia aggregate and a 29.530/32.769 ms SQLite aggregate under its own exact
-engine-aggregate contract.
+A subsequent 40-pair direct risk probe rejected that promotion. Fill 90 was
+smaller (269.586 versus 276.590 MiB), won 28 of 40 paired checkpoints, and was
+faster at checkpoint p50/p95 (3,198.195/3,748.090 versus
+3,248.581/4,090.620 ms), point p50/p95, and aggregate p50/p95. Production
+therefore retains fill 90 and exact fill tuning ends. Neither fill passed the
+existing checkpoint `p95 <= 115% of p50` rollout gate, so this decision does
+not authorize replacing the Vetch browser package.
+
+Different benchmark families use different workload contracts; their absolute
+numbers must not be mixed. The cross-engine v5 receipt, for example, records a
+171.455/177.240 ms Vicia aggregate and a 29.530/32.769 ms SQLite aggregate
+under its own exact engine-aggregate contract.
 
 ## 5. Execution Order
 
@@ -124,7 +129,7 @@ may proceed independently, but production changes advance only after the prior
 gate closes.
 
 ```text
-R0 v12 fill-87 promotion
+R0 close v12 fill policy (fill 90 retained)
   -> R1 current-projection feasibility
   -> R2 in-file current projection, if admitted
   -> R3 bounded-memory recompact
@@ -136,29 +141,30 @@ R0 v12 fill-87 promotion
 Benchmark infrastructure, browser parity, recovery testing, and package
 provenance run across every stage rather than appearing as a final cleanup.
 
-## R0. Promote the Accepted v12 Fill
+## R0. Close the v12 Fill Policy (Complete)
 
 ### Outcome
 
-Close the already-measured v12 rollout without adding another storage
-algorithm.
+End exact fill tuning with one direct comparison and leave production on the
+better supported packing policy.
 
 ### Slice
 
-- change the production bulk-build fill from 90 to receipt-selected 87;
-- preserve the v11/v12 encoding contracts and reader compatibility;
-- run the full Rust, formatting, Clippy, WASM, canonical receipt, mutation
-  audit, and real-Chrome gates;
-- replace the complete Vetch browser package only after all gates pass;
-- synchronize JavaScript glue, typings, manifest, `.wasm`, and provenance as
-  one package.
+- compare fill 87 and fill 90 over 40 alternating paired 1M runs with explicit
+  fill overrides;
+- retain production fill 90: it is smaller, wins 28/40 paired checkpoints, and
+  has better checkpoint, point, and aggregate medians;
+- preserve exact count/checksum `1,000,000/499,999,500,000` for every query
+  sample;
+- stop fine-grained fill search because it is no longer an admitted structural
+  optimization.
 
 ### Stop conditions
 
-- stop on semantic, corruption, point, aggregate, RSS, WASM, or Chrome failure;
+- do not merge the rejected fill-87 production change;
 - do not weaken sync or acceptance thresholds;
-- do not replace only the `.wasm` file;
-- do not continue directly into another file-format change.
+- do not treat a closed fill decision as v12/Vetch package authorization;
+- do not continue directly into another file-format packing change.
 
 ## R1. Current-Projection Feasibility Gate
 
@@ -556,15 +562,16 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-The only currently admitted production slice is R0:
+R0 is closed. The only active slice is R1 current-projection feasibility:
 
 ```text
-promote fill 90 -> 87
-run native/WASM/Chrome/package gates
-sync the complete browser package into Vetch only if green
+build an exact resident projection in bench-internals
+measure rebuild, incremental update, query, size, and invalidation behavior
+admit an in-file projection only if every R1 gate passes
 ```
 
-R1 may begin as an independent benchmark-design worktree, but it must not
-change production bytes or public APIs before R0 is closed. R3-R6 remain parked
-behind their measurement gates. This keeps one active implementation authority
-while preserving the larger performance direction.
+R1 is a direct risk probe into the intended rebuildable in-file projection. It
+must not change public APIs, persisted pages, file-format versions, or ledger
+authority. Delete the prototype and proceed to R3 if it misses the latency or
+correctness gate. R2 and R3-R6 remain parked behind their respective evidence
+gates.

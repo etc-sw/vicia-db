@@ -1,0 +1,174 @@
+{
+  "schema": "vicia.fill87-vs90-risk-probe.v1",
+  "host": "HAL7800",
+  "measuredSourceCommit": "a0d0036fa0e356bf545f60d207742c1d5c6ea3e3",
+  "measuredSourceTrackedClean": true,
+  "explicitFillOverrideMakesSourceDefaultIrrelevant": true,
+  "facts": 1000000,
+  "repetitions": 40,
+  "order": "alternating-first-position",
+  "rawEvidence": {
+    "checkpointSamples": {
+      "path": "checkpoint-samples.tsv",
+      "sha256": "a7cb986f7d1c886eb27b2eac2a0bfb0f4ed28fdea2ca2bf753f23351928656e8",
+      "rows": 80
+    },
+    "querySamples": {
+      "path": "query-samples.tsv",
+      "sha256": "7d59fb25954d1d5ad421af7964fed4316d1d1111db65280b5b1196a4ccad31ff",
+      "rows": 80
+    },
+    "iostat": {
+      "path": "iostat.log",
+      "sha256": "7a617fb1f4bdad422d86f4626fb7726f41b97b701d4223439d197e15b02755c1"
+    }
+  },
+  "candidates": [
+    {
+      "fillPercent": 87,
+      "graphBytes": 290025472,
+      "checkpointMs": {
+        "p50": 3248.5806140000004,
+        "p95": 4090.6202140000005,
+        "max": 4597.535799,
+        "mad": 83.49720400000069,
+        "p95ToP50": 1.2592023101939251
+      },
+      "syncMs": {
+        "p50": 167.692,
+        "p95": 885.801,
+        "max": 920.5,
+        "mad": 9.867999999999995,
+        "p95ToP50": 5.282309233594924
+      },
+      "controllableCheckpointMs": {
+        "p50": 3062.7861709999997,
+        "p95": 3351.8125760000003,
+        "max": 4427.463799,
+        "mad": 57.493281000000025,
+        "p95ToP50": 1.0943671509740536
+      },
+      "checkpointByOrderPosition": {
+        "first": {
+          "p50": 3248.5806140000004,
+          "p95": 3665.141228,
+          "max": 4597.535799,
+          "mad": 46.76777000000038,
+          "p95ToP50": 1.1282284983801234
+        },
+        "second": {
+          "p50": 3234.285328,
+          "p95": 4090.6202140000005,
+          "max": 4204.875576,
+          "mad": 86.61936999999989,
+          "p95ToP50": 1.264767885067684
+        }
+      },
+      "pointMs": {
+        "p50": 0.011416,
+        "p95": 0.014309,
+        "max": 0.020405,
+        "mad": 0.00025799999999999955,
+        "p95ToP50": 1.253416257883672
+      },
+      "aggregateMs": {
+        "p50": 275.59514,
+        "p95": 294.04414699999995,
+        "max": 296.725988,
+        "mad": 4.03245499999997,
+        "p95ToP50": 1.066942425036958
+      },
+      "queryRssDeltaBytes": {
+        "p50": 0,
+        "p95": 131072,
+        "max": 131072,
+        "mad": 0,
+        "p95ToP50": null
+      },
+      "exact": true
+    },
+    {
+      "fillPercent": 90,
+      "graphBytes": 282681344,
+      "checkpointMs": {
+        "p50": 3198.195013,
+        "p95": 3748.0901200000003,
+        "max": 4370.5397809999995,
+        "mad": 50.6977280000001,
+        "p95ToP50": 1.1719392046966464
+      },
+      "syncMs": {
+        "p50": 155.143,
+        "p95": 733.793,
+        "max": 1071.226,
+        "mad": 7.087999999999994,
+        "p95ToP50": 4.729784779203702
+      },
+      "controllableCheckpointMs": {
+        "p50": 3037.766086,
+        "p95": 3201.7230769999996,
+        "max": 3420.7347809999997,
+        "mad": 55.5786549999998,
+        "p95ToP50": 1.0539728821635148
+      },
+      "checkpointByOrderPosition": {
+        "first": {
+          "p50": 3197.053071,
+          "p95": 3748.0901200000003,
+          "max": 4021.810544,
+          "mad": 59.55324799999971,
+          "p95ToP50": 1.1723578047541272
+        },
+        "second": {
+          "p50": 3198.195013,
+          "p95": 3368.206077,
+          "max": 4370.5397809999995,
+          "mad": 43.16482700000006,
+          "p95ToP50": 1.0531584419677162
+        }
+      },
+      "pointMs": {
+        "p50": 0.011118,
+        "p95": 0.013677,
+        "max": 0.016312,
+        "mad": 0.0002249999999999995,
+        "p95ToP50": 1.2301672962763088
+      },
+      "aggregateMs": {
+        "p50": 273.993019,
+        "p95": 289.282608,
+        "max": 348.638981,
+        "mad": 3.42962,
+        "p95ToP50": 1.0558028414585263
+      },
+      "queryRssDeltaBytes": {
+        "p50": 0,
+        "p95": 131072,
+        "max": 131072,
+        "mad": 0,
+        "p95ToP50": null
+      },
+      "exact": true
+    }
+  ],
+  "pairedCheckpointDelta87Minus90Ms": {
+    "p50": 64.9490050000004,
+    "p95": 847.0240480000002,
+    "max": 1283.691342,
+    "mad": 98.06060800000068,
+    "p95ToP50": 13.041370656871418
+  },
+  "checkpointWins": {
+    "fill87": 12,
+    "fill90": 28,
+    "ties": 0
+  },
+  "verdict": {
+    "retainProductionFillPercent": 90,
+    "promoteFill87": false,
+    "continueFineFillSearch": false,
+    "rationale": "Fill 90 is smaller and wins checkpoint, controllable checkpoint, point, and aggregate medians; fill 87 wins only 12 of 40 paired checkpoints.",
+    "rolloutAuthorized": false,
+    "rolloutBlocker": "Neither candidate proves the existing checkpoint p95 <= 115% of p50 gate."
+  }
+}

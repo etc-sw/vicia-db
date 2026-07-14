@@ -1930,6 +1930,23 @@ change the current source default from fill 90 or replace the Vetch browser
 package. Canonical evidence is preserved under
 `benchmarks/baselines/storage-layout/2026-07-14-hal7800-v12-fill-frontier-full/`.
 
+A subsequent direct risk probe compared fill 87 and fill 90 over 40 alternating
+paired 1M runs. The benchmark uses an explicit fill override, so the measured
+source default does not affect either candidate. Fill 90 produces the smaller
+image (269.586 versus 276.590 MiB), wins 28 of 40 paired checkpoints, and
+records better checkpoint p50/p95 (3,198.195/3,748.090 versus
+3,248.581/4,090.620 ms). It also leads point p50/p95
+(0.01112/0.01368 versus 0.01142/0.01431 ms) and aggregate p50/p95
+(273.993/289.283 versus 275.595/294.044 ms). All 80 query samples preserve the
+exact count/checksum `1,000,000/499,999,500,000`.
+
+The risk probe rejects fill-87 promotion, retains production fill 90, and
+closes exact fill tuning. Neither candidate proves the existing checkpoint
+`p95 <= 115% of p50` rollout gate, so this closeout does not authorize a Vetch
+browser-package replacement. Raw samples, host I/O capture, hashes, and the
+derived receipt are preserved under
+`benchmarks/baselines/storage-layout/2026-07-14-hal7800-fill87-vs90-risk-probe/`.
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full
