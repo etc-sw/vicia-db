@@ -1,0 +1,522 @@
+{
+  "schema": "vicia.point-path-density-analysis.v1",
+  "source": {
+    "path": "benchmarks/baselines/point-path-density/2026-07-14-hal7800-internal-descent-full/receipt.json",
+    "sha256": "63e30fdf5325f804432786dc7c7d989710c49a5003228c73a721c1548eff6060",
+    "schema": "vicia.point-path-density.v1",
+    "sourceCommit": "1b4391db15013915d728a63054e0cc1294a03d33",
+    "trackedClean": true,
+    "profile": "full",
+    "facts": 1000000,
+    "repetitions": 20
+  },
+  "policy": {
+    "pointRegressionLimit": 1.2,
+    "ownerCorrelationMinimum": 0.8,
+    "ownerRequiresEverySystematicFillAboveBaseline": true,
+    "structuralFields": [
+      "internalPagesVisited",
+      "internalKeyComparisons",
+      "internalKeyBytesDecoded",
+      "leafEntriesAvailable",
+      "rawLowerBoundKeyComparisons",
+      "prefixRestartKeyComparisons",
+      "prefixLinearKeyComparisons",
+      "leafEntriesDecoded",
+      "exactFactResolutions",
+      "factPageCacheMisses"
+    ],
+    "phaseFields": [
+      "internalDescentElapsedNs",
+      "leafSeekElapsedNs",
+      "rawDecodeElapsedNs",
+      "prefixDecodeElapsedNs",
+      "exactFactResolutionElapsedNs"
+    ]
+  },
+  "candidates": [
+    {
+      "fillPercent": 75,
+      "graphBytes": 329318400,
+      "eavt": {
+        "height": 4,
+        "rawLeafPages": 24097,
+        "prefixLeafPages": 0,
+        "leafEntries": 1000000
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.010288,
+          "p95": 0.014716,
+          "max": 0.049617,
+          "mad": 0.00027899999999999973
+        },
+        "p50RatioToFill75": 1,
+        "p95RatioToFill75": 1
+      },
+      "diagnosticMedians": {
+        "internalPagesVisited": 3,
+        "internalKeyComparisons": 35,
+        "internalKeyBytesDecoded": 2309,
+        "leafEntriesAvailable": 42,
+        "rawLowerBoundKeyComparisons": 6,
+        "prefixRestartKeyComparisons": 0,
+        "prefixLinearKeyComparisons": 0,
+        "leafEntriesDecoded": 8,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 0,
+        "internalDescentElapsedNs": 5004,
+        "leafSeekElapsedNs": 1244,
+        "rawDecodeElapsedNs": 1100,
+        "prefixDecodeElapsedNs": 0,
+        "exactFactResolutionElapsedNs": 163
+      },
+      "diagnosticRatiosToFill75": {
+        "internalPagesVisited": 1,
+        "internalKeyComparisons": 1,
+        "internalKeyBytesDecoded": 1,
+        "leafEntriesAvailable": 1,
+        "rawLowerBoundKeyComparisons": 1,
+        "prefixRestartKeyComparisons": 1,
+        "prefixLinearKeyComparisons": 1,
+        "leafEntriesDecoded": 1,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 1,
+        "internalDescentElapsedNs": 1,
+        "leafSeekElapsedNs": 1,
+        "rawDecodeElapsedNs": 1,
+        "prefixDecodeElapsedNs": 1,
+        "exactFactResolutionElapsedNs": 1
+      }
+    },
+    {
+      "fillPercent": 85,
+      "graphBytes": 296554496,
+      "eavt": {
+        "height": 4,
+        "rawLeafPages": 21277,
+        "prefixLeafPages": 0,
+        "leafEntries": 1000000
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.014454,
+          "p95": 0.017827,
+          "max": 0.039378,
+          "mad": 0.0008830000000000001
+        },
+        "p50RatioToFill75": 1.4049377916018662,
+        "p95RatioToFill75": 1.211402555042131
+      },
+      "diagnosticMedians": {
+        "internalPagesVisited": 3,
+        "internalKeyComparisons": 61,
+        "internalKeyBytesDecoded": 4018,
+        "leafEntriesAvailable": 47,
+        "rawLowerBoundKeyComparisons": 6,
+        "prefixRestartKeyComparisons": 0,
+        "prefixLinearKeyComparisons": 0,
+        "leafEntriesDecoded": 8,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 0,
+        "internalDescentElapsedNs": 8548,
+        "leafSeekElapsedNs": 1253,
+        "rawDecodeElapsedNs": 1118,
+        "prefixDecodeElapsedNs": 0,
+        "exactFactResolutionElapsedNs": 180
+      },
+      "diagnosticRatiosToFill75": {
+        "internalPagesVisited": 1,
+        "internalKeyComparisons": 1.7428571428571429,
+        "internalKeyBytesDecoded": 1.740147249891728,
+        "leafEntriesAvailable": 1.119047619047619,
+        "rawLowerBoundKeyComparisons": 1,
+        "prefixRestartKeyComparisons": 1,
+        "prefixLinearKeyComparisons": 1,
+        "leafEntriesDecoded": 1,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 1,
+        "internalDescentElapsedNs": 1.7082334132693844,
+        "leafSeekElapsedNs": 1.007234726688103,
+        "rawDecodeElapsedNs": 1.0163636363636364,
+        "prefixDecodeElapsedNs": 1,
+        "exactFactResolutionElapsedNs": 1.1042944785276074
+      }
+    },
+    {
+      "fillPercent": 90,
+      "graphBytes": 282681344,
+      "eavt": {
+        "height": 4,
+        "rawLeafPages": 20000,
+        "prefixLeafPages": 0,
+        "leafEntries": 1000000
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.014364,
+          "p95": 0.018133,
+          "max": 0.019873,
+          "mad": 0.00017099999999999928
+        },
+        "p50RatioToFill75": 1.3961897356143078,
+        "p95RatioToFill75": 1.2321962489807012
+      },
+      "diagnosticMedians": {
+        "internalPagesVisited": 3,
+        "internalKeyComparisons": 67,
+        "internalKeyBytesDecoded": 4412,
+        "leafEntriesAvailable": 50,
+        "rawLowerBoundKeyComparisons": 6,
+        "prefixRestartKeyComparisons": 0,
+        "prefixLinearKeyComparisons": 0,
+        "leafEntriesDecoded": 8,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 0,
+        "internalDescentElapsedNs": 9198,
+        "leafSeekElapsedNs": 1199,
+        "rawDecodeElapsedNs": 1081,
+        "prefixDecodeElapsedNs": 0,
+        "exactFactResolutionElapsedNs": 171
+      },
+      "diagnosticRatiosToFill75": {
+        "internalPagesVisited": 1,
+        "internalKeyComparisons": 1.9142857142857144,
+        "internalKeyBytesDecoded": 1.9107838891294933,
+        "leafEntriesAvailable": 1.1904761904761905,
+        "rawLowerBoundKeyComparisons": 1,
+        "prefixRestartKeyComparisons": 1,
+        "prefixLinearKeyComparisons": 1,
+        "leafEntriesDecoded": 1,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 1,
+        "internalDescentElapsedNs": 1.8381294964028776,
+        "leafSeekElapsedNs": 0.9638263665594855,
+        "rawDecodeElapsedNs": 0.9827272727272728,
+        "prefixDecodeElapsedNs": 1,
+        "exactFactResolutionElapsedNs": 1.049079754601227
+      }
+    },
+    {
+      "fillPercent": 95,
+      "graphBytes": 270737408,
+      "eavt": {
+        "height": 4,
+        "rawLeafPages": 18868,
+        "prefixLeafPages": 0,
+        "leafEntries": 1000000
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.011921,
+          "p95": 0.015139,
+          "max": 0.015923999999999997,
+          "mad": 0.0003519999999999999
+        },
+        "p50RatioToFill75": 1.1587286158631414,
+        "p95RatioToFill75": 1.028744223973906
+      },
+      "diagnosticMedians": {
+        "internalPagesVisited": 3,
+        "internalKeyComparisons": 47,
+        "internalKeyBytesDecoded": 3093,
+        "leafEntriesAvailable": 53,
+        "rawLowerBoundKeyComparisons": 5,
+        "prefixRestartKeyComparisons": 0,
+        "prefixLinearKeyComparisons": 0,
+        "leafEntriesDecoded": 7,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 0,
+        "internalDescentElapsedNs": 6664,
+        "leafSeekElapsedNs": 1046,
+        "rawDecodeElapsedNs": 975,
+        "prefixDecodeElapsedNs": 0,
+        "exactFactResolutionElapsedNs": 163
+      },
+      "diagnosticRatiosToFill75": {
+        "internalPagesVisited": 1,
+        "internalKeyComparisons": 1.3428571428571427,
+        "internalKeyBytesDecoded": 1.339540926808142,
+        "leafEntriesAvailable": 1.2619047619047619,
+        "rawLowerBoundKeyComparisons": 0.8333333333333334,
+        "prefixRestartKeyComparisons": 1,
+        "prefixLinearKeyComparisons": 1,
+        "leafEntriesDecoded": 0.875,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 1,
+        "internalDescentElapsedNs": 1.3317346123101519,
+        "leafSeekElapsedNs": 0.8408360128617364,
+        "rawDecodeElapsedNs": 0.8863636363636364,
+        "prefixDecodeElapsedNs": 1,
+        "exactFactResolutionElapsedNs": 1
+      }
+    },
+    {
+      "fillPercent": 100,
+      "graphBytes": 260124672,
+      "eavt": {
+        "height": 4,
+        "rawLeafPages": 17875,
+        "prefixLeafPages": 0,
+        "leafEntries": 1000000
+      },
+      "point": {
+        "statsMs": {
+          "p50": 0.015654,
+          "p95": 0.036844,
+          "max": 0.051281,
+          "mad": 0.0005849999999999987
+        },
+        "p50RatioToFill75": 1.5215785381026439,
+        "p95RatioToFill75": 2.5036694754009243
+      },
+      "diagnosticMedians": {
+        "internalPagesVisited": 3,
+        "internalKeyComparisons": 75,
+        "internalKeyBytesDecoded": 4943,
+        "leafEntriesAvailable": 56,
+        "rawLowerBoundKeyComparisons": 6,
+        "prefixRestartKeyComparisons": 0,
+        "prefixLinearKeyComparisons": 0,
+        "leafEntriesDecoded": 8,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 0,
+        "internalDescentElapsedNs": 10387,
+        "leafSeekElapsedNs": 1226,
+        "rawDecodeElapsedNs": 1092,
+        "prefixDecodeElapsedNs": 0,
+        "exactFactResolutionElapsedNs": 171
+      },
+      "diagnosticRatiosToFill75": {
+        "internalPagesVisited": 1,
+        "internalKeyComparisons": 2.142857142857143,
+        "internalKeyBytesDecoded": 2.140753572975314,
+        "leafEntriesAvailable": 1.3333333333333333,
+        "rawLowerBoundKeyComparisons": 1,
+        "prefixRestartKeyComparisons": 1,
+        "prefixLinearKeyComparisons": 1,
+        "leafEntriesDecoded": 1,
+        "exactFactResolutions": 1,
+        "factPageCacheMisses": 1,
+        "internalDescentElapsedNs": 2.0757394084732215,
+        "leafSeekElapsedNs": 0.9855305466237942,
+        "rawDecodeElapsedNs": 0.9927272727272727,
+        "prefixDecodeElapsedNs": 1,
+        "exactFactResolutionElapsedNs": 1.049079754601227
+      }
+    }
+  ],
+  "fieldEvidence": {
+    "internalPagesVisited": {
+      "kind": "structural",
+      "medians": {
+        "75": 3,
+        "85": 3,
+        "90": 3,
+        "95": 3,
+        "100": 3
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0,
+      "admittedOwner": false
+    },
+    "internalKeyComparisons": {
+      "kind": "structural",
+      "medians": {
+        "75": 35,
+        "85": 61,
+        "90": 67,
+        "95": 47,
+        "100": 75
+      },
+      "allSystematicAboveBaseline": true,
+      "correlationWithPointP50": 0.9877942644989756,
+      "admittedOwner": true
+    },
+    "internalKeyBytesDecoded": {
+      "kind": "structural",
+      "medians": {
+        "75": 2309,
+        "85": 4018,
+        "90": 4412,
+        "95": 3093,
+        "100": 4943
+      },
+      "allSystematicAboveBaseline": true,
+      "correlationWithPointP50": 0.9877877990504889,
+      "admittedOwner": true
+    },
+    "leafEntriesAvailable": {
+      "kind": "structural",
+      "medians": {
+        "75": 42,
+        "85": 47,
+        "90": 50,
+        "95": 53,
+        "100": 56
+      },
+      "allSystematicAboveBaseline": true,
+      "correlationWithPointP50": 0.6509093436928468,
+      "admittedOwner": false
+    },
+    "rawLowerBoundKeyComparisons": {
+      "kind": "structural",
+      "medians": {
+        "75": 6,
+        "85": 6,
+        "90": 6,
+        "95": 5,
+        "100": 6
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0.3632554500205944,
+      "admittedOwner": false
+    },
+    "prefixRestartKeyComparisons": {
+      "kind": "structural",
+      "medians": {
+        "75": 0,
+        "85": 0,
+        "90": 0,
+        "95": 0,
+        "100": 0
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0,
+      "admittedOwner": false
+    },
+    "prefixLinearKeyComparisons": {
+      "kind": "structural",
+      "medians": {
+        "75": 0,
+        "85": 0,
+        "90": 0,
+        "95": 0,
+        "100": 0
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0,
+      "admittedOwner": false
+    },
+    "leafEntriesDecoded": {
+      "kind": "structural",
+      "medians": {
+        "75": 8,
+        "85": 8,
+        "90": 8,
+        "95": 7,
+        "100": 8
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0.3632554500205944,
+      "admittedOwner": false
+    },
+    "exactFactResolutions": {
+      "kind": "structural",
+      "medians": {
+        "75": 1,
+        "85": 1,
+        "90": 1,
+        "95": 1,
+        "100": 1
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0,
+      "admittedOwner": false
+    },
+    "factPageCacheMisses": {
+      "kind": "structural",
+      "medians": {
+        "75": 0,
+        "85": 0,
+        "90": 0,
+        "95": 0,
+        "100": 0
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0,
+      "admittedOwner": false
+    },
+    "internalDescentElapsedNs": {
+      "kind": "phase",
+      "medians": {
+        "75": 5004,
+        "85": 8548,
+        "90": 9198,
+        "95": 6664,
+        "100": 10387
+      },
+      "allSystematicAboveBaseline": true,
+      "correlationWithPointP50": 0.9905467778563377,
+      "admittedOwner": true
+    },
+    "leafSeekElapsedNs": {
+      "kind": "phase",
+      "medians": {
+        "75": 1244,
+        "85": 1253,
+        "90": 1199,
+        "95": 1046,
+        "100": 1226
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0.27304455843423225,
+      "admittedOwner": false
+    },
+    "rawDecodeElapsedNs": {
+      "kind": "phase",
+      "medians": {
+        "75": 1100,
+        "85": 1118,
+        "90": 1081,
+        "95": 975,
+        "100": 1092
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0.32276490092204174,
+      "admittedOwner": false
+    },
+    "prefixDecodeElapsedNs": {
+      "kind": "phase",
+      "medians": {
+        "75": 0,
+        "85": 0,
+        "90": 0,
+        "95": 0,
+        "100": 0
+      },
+      "allSystematicAboveBaseline": false,
+      "correlationWithPointP50": 0,
+      "admittedOwner": false
+    },
+    "exactFactResolutionElapsedNs": {
+      "kind": "phase",
+      "medians": {
+        "75": 163,
+        "85": 180,
+        "90": 171,
+        "95": 163,
+        "100": 171
+      },
+      "allSystematicAboveBaseline": true,
+      "correlationWithPointP50": 0.7444763170126738,
+      "admittedOwner": false
+    }
+  },
+  "verdict": {
+    "systematicFills": [
+      85,
+      90,
+      100
+    ],
+    "tailOnlyFills": [],
+    "admittedOwners": [
+      "internalKeyComparisons",
+      "internalKeyBytesDecoded",
+      "internalDescentElapsedNs"
+    ],
+    "classification": "production-owner-identified",
+    "implementationAdmitted": true,
+    "rolloutAuthorized": false
+  }
+}

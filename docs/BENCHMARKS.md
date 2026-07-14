@@ -1811,6 +1811,27 @@ node scripts/audit-storage-layout-variance-validator.mjs \
   benchmarks/baselines/storage-layout/2026-07-14-hal7800-inline-reducer-full/variance.json
 ```
 
+The clean `vicia.point-path-density.v1` follow-up builds one equivalent 1M
+fixture per fill and runs 20 rotated exact EAVT point samples. Diagnostic
+queries are separate from the timed samples. All candidates retain height 4,
+one raw EAVT leaf visit, 5–6 leaf lower-bound comparisons, 7–8 projected
+decodes, one cached fact resolution, zero prefix reconstruction, zero owned
+EAVT decode, and zero full-leaf materialization.
+
+The varying work is internal separator descent. Fill 75/85/90/95/100 performs
+35/61/67/47/75 separator comparisons and decodes
+2,309/4,018/4,412/3,093/4,943 separator bytes. Median descent time is
+5.004/8.548/9.198/6.664/10.387 microseconds, while point p50 is
+0.01029/0.01445/0.01436/0.01192/0.01565 ms. Comparison count and descent time
+correlate with point p50 at 0.988 and 0.991 respectively. This admits one
+production repair: replace the internal page's linear separator scan with a
+binary search for the first separator greater than the requested key. It does
+not admit leaf, cache, fact-resolution, format, or API work.
+
+The clean receipt and mutation-audited analysis are preserved under
+`benchmarks/baselines/point-path-density/2026-07-14-hal7800-internal-descent-full/`
+from source `1b4391d`.
+
 ```bash
 just leaf-read-path-smoke
 just leaf-read-path-full
