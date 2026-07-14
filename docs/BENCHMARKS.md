@@ -2087,6 +2087,52 @@ just temporal-projection-smoke
 just temporal-projection-full
 ```
 
+### R2-B detached projection page image
+
+`vicia.current-projection-page-image.v1` encodes the admitted R2-A columns as
+one deterministic 4 KiB-aligned image. Page 0 carries the exact base and
+selected-manifest generations, transaction watermark, attribute bytes,
+valid-time floor, row count, column ranges, fingerprint, and separate header
+and payload checksums. The six column ranges begin on page boundaries and all
+unused bytes must be zero. The decoder validates identity, ranges, canonical
+values, temporal streams, and checksums before allocating candidate columns.
+
+| 1M page-image metric | Result |
+|---|---:|
+| Logical / padded bytes | 33,019,889 / 33,038,336 B |
+| Graph-image ratio | 13.35% |
+| Pages / alignment padding | 8,066 / 18,447 B |
+| Encode p50/p95 | 317.281 / 347.397 ms |
+| Decode p50/p95 | 71.530 / 78.652 ms |
+| Codec high-water RSS delta | 108.85 MiB |
+| Decoded-query RSS delta | 0.125 MiB |
+
+Base-only, base-plus-overlay flattening, same-ledger byte rebuild, reopen,
+older-manifest rejection, every value type including Ref, and corruption
+mutations all pass. Every decoded probe also matches the ledger exactly:
+`500,000/249,999,500,000`, `750,000/374,999,500,000`, and
+`500,000/249,999,250,000`.
+
+R2-B is not yet admitted to publication. The pinned full candidate records
+projected p50/p95 of 9.199/9.592 ms before the boundary, 9.572/11.848 ms at the
+boundary, and 9.306/9.704 ms after it. The at-boundary ratio is 123.77%, above
+the 115% gate. A same-source R2-A control also misses the tail gate at one
+probe (9.124/10.645 ms, 116.67%), so current evidence does not isolate a page
+decode regression. The detached codec remains a durable result, while root
+publication stays blocked pending a paired tail-attribution receipt.
+
+The benchmark helper now uses nearest-rank percentiles; with twenty sorted
+samples p95 is the nineteenth observation rather than the maximum. The clean
+candidate and control receipts from source `570204a` are preserved under
+`benchmarks/baselines/projection-page-image/2026-07-14-hal7800-r2b-candidate/`.
+Their SHA-256 values are `3f2444f30706f5c252f34c30f3be238ba35e9309010fdfb9b1318b73c2453a0d`
+and `f32394c05b63644a85379ede51752686f3a06592c0919fe41ed1b20945cf0943`.
+
+```bash
+just projection-page-image-smoke
+just projection-page-image-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a

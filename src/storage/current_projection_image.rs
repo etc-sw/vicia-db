@@ -744,6 +744,10 @@ mod tests {
     #[test]
     fn corruption_and_identity_mismatch_fail_closed() {
         let image = encode(&candidate(), identity()).unwrap();
+        let mut unknown_version = image.as_bytes().to_vec();
+        unknown_version[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        assert!(decode(&unknown_version, identity(), ":상태/value", -10, 99).is_err());
+
         let mut corrupt = image.as_bytes().to_vec();
         corrupt[4096] ^= 1;
         assert!(decode(&corrupt, identity(), ":상태/value", -10, 99).is_err());
@@ -786,11 +790,29 @@ mod tests {
         reseal(&mut header_reserved);
         assert!(decode(&header_reserved, identity(), ":상태/value", -10, 99).is_err());
 
+        let mut unknown_section = image.as_bytes().to_vec();
+        unknown_section[128..132].copy_from_slice(&99_u32.to_le_bytes());
+        reseal(&mut unknown_section);
+        assert!(decode(&unknown_section, identity(), ":상태/value", -10, 99).is_err());
+
+        let mut nonzero_padding = image.as_bytes().to_vec();
+        let attribute_offset = usize::try_from(read_u64(&nonzero_padding, 136).unwrap()).unwrap();
+        let attribute_len = usize::try_from(read_u64(&nonzero_padding, 144).unwrap()).unwrap();
+        nonzero_padding[attribute_offset + attribute_len] = 1;
+        reseal(&mut nonzero_padding);
+        assert!(decode(&nonzero_padding, identity(), ":상태/value", -10, 99).is_err());
+
         let mut malformed_value = image.as_bytes().to_vec();
         let value_offset = usize::try_from(read_u64(&malformed_value, 208).unwrap()).unwrap();
         malformed_value[value_offset] = 0xff;
         reseal(&mut malformed_value);
         assert!(decode(&malformed_value, identity(), ":상태/value", -10, 99).is_err());
+
+        let mut malformed_temporal = image.as_bytes().to_vec();
+        let temporal_offset = usize::try_from(read_u64(&malformed_temporal, 232).unwrap()).unwrap();
+        malformed_temporal[temporal_offset] = 8;
+        reseal(&mut malformed_temporal);
+        assert!(decode(&malformed_temporal, identity(), ":상태/value", -10, 99).is_err());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

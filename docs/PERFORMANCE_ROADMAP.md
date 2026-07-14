@@ -294,6 +294,28 @@ all value types including Ref, scoped/unscoped retract, checkpoint
 invalidation, and deterministic rebuild pass. R2-B page-layout work is
 admitted, but no production root or format change is implied.
 
+### R2-B measured candidate outcome
+
+R2-B now defines the detached bytes that a later publication would reference.
+The codec uses a checksummed metadata page plus six page-aligned ranges for the
+attribute, entities, value offsets, canonical values, valid-from, and valid-to.
+Its persistent identity is the selected base generation, manifest generation,
+and transaction watermark; the process-local publication counter remains only
+a runtime stale-candidate guard.
+
+The 1M image is byte-identical across rebuilds and overlay flattening. It is
+33,038,336 bytes, or 13.35% of the selected graph, with 18,447 bytes of page
+padding. Encode p50/p95 is 317.281/347.397 ms, decode is 71.530/78.652 ms,
+codec high-water RSS grows by 108.85 MiB, and decoded-query RSS grows by
+0.125 MiB. Corruption, truncation, overlap, trailing pages, unknown layout,
+identity mismatch, malformed values, and invalid temporal columns fail closed.
+
+Publication is still blocked by the strict query-tail gate. The pinned decoded
+candidate misses at one probe with 9.572/11.848 ms (123.77%). A same-source
+R2-A control also misses one probe at 116.67%, so the failure is not yet
+attributable to the page codec. Keep these durable bytes and run one paired,
+rotated source-versus-decoded tail receipt before assigning a root.
+
 ### Storage boundary
 
 - projection pages live inside the logical `.graph` image;
@@ -623,18 +645,18 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0, R1, and R2-A are closed. The only active slice is R2-B
-generation-bound projection page image:
+R0, R1, and R2-A are closed. R2-B's codec, identity, corruption, size,
+encode/decode, RSS, and semantic gates pass; its query-tail admission remains
+open. The only active slice is the R2-B paired tail-attribution receipt:
 
 ```text
-encode the admitted compact columns into deterministic page-aligned bytes
-bind the image to ledger generation, tx watermark, attribute, and time floor
-reject corruption and prove exact rebuild before adding a published root
+build source and decoded candidates from the same selected ledger state
+rotate their measurement order across repeated fresh processes
+admit R2-C only if decoded p95/p50 is <= 115% and does not regress the source
 ```
 
-R2-B is a durable format probe inside the admitted in-file projection shape.
-It should define the page codec, bounds, checksum, generation identity, and
-corruption behavior in detached benchmark/test bytes first. Do not assign a
-header root, publish pages, retire WAL state, change the public format version,
-or route production queries until that codec is deterministic and rebuildable.
-R3-R6 remain parked behind their respective evidence gates.
+Do not tune the codec or relax the tail threshold unless paired evidence
+isolates an actual decoded-layout cause. Do not assign a header root, publish
+pages, retire WAL state, change the public format version, or route production
+queries while the tail gate is open. R3-R6 remain parked behind their
+respective evidence gates.

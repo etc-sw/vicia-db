@@ -58,22 +58,27 @@ current executable checklist.
 
 ## Next task
 
-### Status: R2-A passes; R2-B projection page image is next
+### Status: R2-B page image is structurally green; paired tail gate is next
 
-- Add a deterministic, page-aligned codec for the admitted entity, value, and
-  temporal columns. Keep it behind `bench-internals` and tests.
-- Bind the image header to exact attribute bytes, valid-time floor, ledger
-  publication generation, tx watermark, row count, column ranges, and checksum.
-- Decode with bounded range checks and reject truncation, overlap, trailing
-  bytes, unknown codec version, checksum mismatch, and generation mismatch.
-- Round-trip base-only and base+overlay candidates, then prove byte-identical
-  rebuild from the same ledger state and semantic equality at all three time
-  probes.
-- Measure page padding, encoded size, encode/decode time, and peak RSS against
-  the R2-A receipt. The encoded page image must remain within the same 15%
-  graph-image budget.
+- [x] Add a deterministic, page-aligned codec for entity, value, and temporal
+  columns behind `bench-internals` and tests.
+- [x] Bind exact attribute bytes, valid-time floor, base/manifest generations,
+  tx watermark, row count, column ranges, fingerprint, and checksums.
+- [x] Reject truncation, overlap, trailing pages, unknown codec, checksum and
+  identity mismatch, malformed values, and invalid temporal streams before
+  candidate allocation.
+- [x] Round-trip base-only and base+overlay candidates, prove byte-identical
+  rebuild, reopen identity, stale-manifest rejection, and three-probe semantic
+  equality.
+- [x] Stay inside the 15% image and 128 MiB codec RSS budgets. The 1M candidate
+  is 33,038,336 bytes (13.35%), encodes at 317.281/347.397 ms p50/p95, and
+  decodes at 71.530/78.652 ms.
+- [ ] Close query-tail admission with a paired, rotated source-versus-decoded
+  receipt. The pinned decoded run reaches 123.77% at one probe, while the
+  same-source R2-A control independently reaches 116.67%; do not attribute the
+  tail to serialization without paired evidence.
 
 Do not add a page-0/header root, publish protocol, fallback selection, WAL
 retirement coupling, public API, or production query routing in R2-B. Those
 belong to a later publication slice only after the detached page image is
-corruption-safe and exactly rebuildable.
+corruption-safe, exactly rebuildable, and inside the query-tail gate.
