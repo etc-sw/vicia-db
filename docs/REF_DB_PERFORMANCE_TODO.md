@@ -58,7 +58,7 @@ current executable checklist.
 
 ## Next task
 
-### Status: R2-B page image is structurally green; paired tail gate is next
+### Status: R2-B page image is structurally green; R2-C is not admitted
 
 - [x] Add a deterministic, page-aligned codec for entity, value, and temporal
   columns behind `bench-internals` and tests.
@@ -73,12 +73,22 @@ current executable checklist.
 - [x] Stay inside the 15% image and 128 MiB codec RSS budgets. The 1M candidate
   is 33,038,336 bytes (13.35%), encodes at 317.281/347.397 ms p50/p95, and
   decodes at 71.530/78.652 ms.
-- [ ] Close query-tail admission with a paired, rotated source-versus-decoded
-  receipt. The pinned decoded run reaches 123.77% at one probe, while the
-  same-source R2-A control independently reaches 116.67%; do not attribute the
-  tail to serialization without paired evidence.
+- [x] Close query-tail admission with a paired, rotated source-versus-decoded
+  receipt. Twenty fresh 1M children preserve exact results and one projection
+  identity while balancing candidate-first order 10/10 at every probe. Decoded
+  p50 remains within 1.5% of source and wins 14/12/10 pairs, but decoded
+  p95/p50 is 124.16%/117.82%/130.64%; before-boundary decoded p95 is 114.86%
+  of source p95 and fails the 110% relative gate. The two dominant decoded
+  before-boundary outliers both occur with decoded second, while source owns
+  the tail in the inverse order. Retain the codec, do not admit R2-C, and do
+  not relax the tail threshold.
 
 Do not add a page-0/header root, publish protocol, fallback selection, WAL
 retirement coupling, public API, or production query routing in R2-B. Those
 belong to a later publication slice only after the detached page image is
 corruption-safe, exactly rebuildable, and inside the query-tail gate.
+
+The next R2 risk probe, if projection publication remains the priority, is
+execution-position attribution with source-only and decoded-only fresh
+children. It must test whether the second measured candidate owns the tail
+before changing the codec or scan layout.

@@ -310,11 +310,20 @@ codec high-water RSS grows by 108.85 MiB, and decoded-query RSS grows by
 0.125 MiB. Corruption, truncation, overlap, trailing pages, unknown layout,
 identity mismatch, malformed values, and invalid temporal columns fail closed.
 
-Publication is still blocked by the strict query-tail gate. The pinned decoded
-candidate misses at one probe with 9.572/11.848 ms (123.77%). A same-source
-R2-A control also misses one probe at 116.67%, so the failure is not yet
-attributable to the page codec. Keep these durable bytes and run one paired,
-rotated source-versus-decoded tail receipt before assigning a root.
+Publication remains blocked by the strict query-tail gate. The follow-up uses
+twenty fresh 1M children, builds source and decoded candidates from the same
+ledger state, rotates all three probes, and balances candidate-first order
+10/10 per probe. Decoded p50 is 8.802/9.184/9.039 ms versus source
+8.933/9.208/9.106 ms and wins 14/12/10 pairs. It nevertheless misses the 115%
+tail gate at all three probes: decoded p95/p50 is
+124.16%/117.82%/130.64%. Before-boundary decoded p95 is 10.929 ms versus
+source 9.515 ms, or 114.86%, and also misses the 110% relative gate.
+
+The paired samples do not establish a stable decoded throughput regression.
+Both dominant decoded before-boundary outliers occur when decoded runs second;
+the inverse order puts the largest samples on source. Keep the deterministic
+page bytes, leave R2-C unadmitted, and isolate execution-position tail before
+changing the codec or assigning a root.
 
 ### Storage boundary
 
@@ -646,17 +655,17 @@ the same inspected commit in both locations.
 ## Immediate Next Slice
 
 R0, R1, and R2-A are closed. R2-B's codec, identity, corruption, size,
-encode/decode, RSS, and semantic gates pass; its query-tail admission remains
-open. The only active slice is the R2-B paired tail-attribution receipt:
+encode/decode, RSS, and semantic gates pass, but the paired query-tail gate
+fails and R2-C is not admitted. The only remaining R2 measurement justified by
+the receipt is execution-position attribution:
 
 ```text
-build source and decoded candidates from the same selected ledger state
-rotate their measurement order across repeated fresh processes
-admit R2-C only if decoded p95/p50 is <= 115% and does not regress the source
+run source-only and decoded-only measurements in separate fresh children
+keep the same fixture, projection identity, probe rotation, and 20 observations
+decide whether the tail follows decoded layout or second-position scheduling
 ```
 
-Do not tune the codec or relax the tail threshold unless paired evidence
-isolates an actual decoded-layout cause. Do not assign a header root, publish
-pages, retire WAL state, change the public format version, or route production
-queries while the tail gate is open. R3-R6 remain parked behind their
-respective evidence gates.
+Do not rerun the paired receipt to select a favorable sample, tune the codec,
+or relax the tail threshold. No header root, publish pages, WAL coupling,
+format-version change, production query routing, or Vetch package sync is
+admitted. R3-R6 remain parked until this R2 decision is explicitly closed.

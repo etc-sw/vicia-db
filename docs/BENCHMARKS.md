@@ -2133,6 +2133,46 @@ just projection-page-image-smoke
 just projection-page-image-full
 ```
 
+### R2-B paired projection query-tail attribution
+
+`vicia.current-projection-tail.v1` replaces independent sequential query
+samples with twenty fresh 1M child processes. Every child opens the same
+247,562,240-byte fill-90 temporal fixture, builds one source candidate, encodes
+and decodes it under ledger identity `base=1/manifest=0/tx=1000`, and measures
+both candidates at the before/at/after boundary probes. Probe order rotates and
+candidate-first order is balanced 10/10 for every probe. Every sample preserves
+the exact expected count/checksum and the same `37a7869900e4b1b4`
+fingerprint.
+
+| Probe | Source p50/p95 ms | Decoded p50/p95 ms | Decoded p95/p50 | Decoded/source p95 | Decoded wins |
+|---|---:|---:|---:|---:|---:|
+| Before boundary | 8.933 / 9.515 | 8.802 / 10.929 | 124.16% | 114.86% | 14/20 |
+| At boundary | 9.208 / 10.983 | 9.184 / 10.820 | 117.82% | 98.51% | 12/20 |
+| After boundary | 9.106 / 11.653 | 9.039 / 11.809 | 130.64% | 101.34% | 10/20 |
+
+The decoded p50 is never slower than source, but all three decoded tails exceed
+the 115% gate and before-boundary decoded p95 exceeds the source-relative 110%
+gate. Its two dominant decoded outliers, 10.929 and 13.889 ms, both occur when
+decoded runs second. With the inverse order the largest before-boundary source
+samples occur second instead. The receipt therefore blocks R2-C without
+establishing a stable codec-throughput regression. Thresholds and production
+routing remain unchanged; the next admissible risk probe must isolate
+execution position before modifying the page layout.
+
+The clean source `12a9c07d83fc29ce8ca7822e5c8a1acd74d75eaa` receipt is
+preserved at
+`benchmarks/baselines/projection-page-tail/2026-07-15-hal7800-r2b-paired-full/receipt.json`
+with SHA-256
+`623f8c53a0aa86bc823aef19899cb1daa04b22f00b2ae12efa01d5c43ac3daa0`.
+The validator recomputes every summary from raw trials and its mutation audit
+rejects provenance, rotation, identity, exactness, tail, relative-regression,
+verdict, and scope corruption.
+
+```bash
+just projection-page-tail-smoke
+just projection-page-tail-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a
