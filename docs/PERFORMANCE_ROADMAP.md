@@ -682,7 +682,7 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 through R2-C3 are closed. Maintenance-owned native and browser projection
+R0 through R2-C4 are closed. Maintenance-owned native and browser projection
 publication plus the narrow exact-watermark aggregate route are admitted:
 
 ```text
@@ -715,10 +715,22 @@ count/checksum, structural diagnostics, real-Chrome paging, corruption fallback,
 and validator mutation audit pass. Arbitrary Datalog, historical, recursive,
 grouped, distinct, window, and UDF queries stay on the existing executor.
 
-The next durable slice is R2-C4: add a bounded resident-tail overlay above the
-same generation-pinned reader so small post-publication writes do not force an
-immediate ledger fallback. The overlay must preserve exact tx/valid-time and
-retract semantics, stay within foreground memory/work limits, and fall back to
-the ledger before it can become a second authority. It must not broaden query
-eligibility or publish a Vetch package until native and real-Chrome
-differentials pass.
+R2-C4 keeps that route live across a bounded post-publication tail. It replaces
+only touched entities with complete intervals rebuilt by the existing current
+reducer, and abandons the candidate before installation when the tail exceeds
+65,536 facts, 65,536 history entries, or 8 MiB. The clean 1M receipt adds 1,024
+entities with exact `501,024/251,023,773,776` count/checksum. Initial refresh is
+128.586 ms; the cached p50/p95 is 120.685/130.062 ms versus 116.308/118.593 ms
+without a tail. Both paths read 4,036 projection pages, decode no full image,
+add zero measured query RSS, and avoid ledger fallback. Native retract,
+valid-window, unrelated-write, and over-budget tests plus the real-Chrome
+77-test suite and validator mutation audit pass.
+
+The next durable slice is R2-C5: stage the complete v13 browser package from
+this source commit into Vetch, rerun the package provenance and consumer
+differentials, and publish the package only when its JS glue, typings,
+manifest, WASM bytes, and source identity move together. This is rollout of the
+already admitted storage/read boundary, not a wider query feature. If the clean
+Vetch build or real browser persistence surface regresses, keep the package
+unpublished and repair the consumer seam before beginning R3 bounded-memory
+recompact work.

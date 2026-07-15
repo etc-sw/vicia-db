@@ -127,7 +127,13 @@ current executable checklist.
   image, adds zero measured query RSS, and passes its mutation audit. Default
   writes remain v12; arbitrary Datalog and stale/pending views remain on the
   ledger; Vetch publication remains separate.
-- [ ] Add an authority-bounded resident tail overlay so small writes after an
-  R2-C3 publication can merge without immediately returning to the full ledger
-  fold. Preserve exact retract/valid-window semantics and enforce a measured
-  fallback threshold before the overlay can become an unbounded second store.
+- [x] Add an authority-bounded resident tail overlay so small writes after an
+  R2-C3 publication merge without immediately returning to the full ledger
+  fold. The overlay rebuilds complete touched-entity intervals through the
+  authoritative current reducer, caps tail facts and history at 65,536 entries
+  each and resident bytes at 8 MiB, and rejects over-budget state before cache
+  installation. The clean 1M receipt adds 1,024 entities exactly, refreshes in
+  128.586 ms, then serves cached p50/p95 at 120.685/130.062 ms versus a
+  116.308/118.593 ms no-tail projection. It reads the same 4,036 base pages,
+  decodes no full image, adds zero measured query RSS, and passes native,
+  real-Chrome, fallback, provenance, and validator mutation gates.
