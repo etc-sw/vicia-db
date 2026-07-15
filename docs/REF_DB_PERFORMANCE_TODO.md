@@ -58,7 +58,7 @@ current executable checklist.
 
 ## Next task
 
-### Status: R2-B page image is structurally green; R2-C is not admitted
+### Status: R2-B is admitted; R2-C publication authority is next
 
 - [x] Add a deterministic, page-aligned codec for entity, value, and temporal
   columns behind `bench-internals` and tests.
@@ -79,15 +79,16 @@ current executable checklist.
   authority binds the actual fill-90 fixture to its graph hash and derives
   exactness from raw count/checksum observations. Decoded p95/p50 now passes at
   103.34%/104.47%/114.99%; after-boundary decoded p95 is 110.034% of source
-  p95 and is the only remaining strict-gate miss. Retain the codec, do not
-  admit R2-C, and do not relax the threshold from one near-boundary rerun.
+  p95 and is the only paired strict-gate miss.
+- [x] Attribute the paired miss with one candidate/probe per fresh child.
+  Forty observations for each of six cells preserve exact identity across 240
+  1M children. Decoded p95/p50 is 112.85%/108.61%/111.54%, while
+  decoded/source p95 is 103.14%/79.26%/102.55%; every gate passes. Admit R2-B
+  without changing the codec, threshold, persisted bytes, or production route.
 
-Do not add a page-0/header root, publish protocol, fallback selection, WAL
-retirement coupling, public API, or production query routing in R2-B. Those
-belong to a later publication slice only after the detached page image is
-corruption-safe, exactly rebuildable, and inside the query-tail gate.
-
-The next R2 risk probe, if projection publication remains the priority, is
-execution-position attribution with source-only and decoded-only fresh
-children. It must test whether the second measured candidate owns the tail
-before changing the codec or scan layout.
+The next slice is R2-C persisted projection selection and recovery. Add no
+public projection API or production query routing in its first slice. Start
+with an in-file generation-bound descriptor, write-pages-before-publish
+ordering, matching-ledger selection, verified predecessor fallback, and
+fail-closed corruption tests. Projection publication must not own or advance
+WAL retirement.

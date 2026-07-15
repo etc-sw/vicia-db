@@ -2178,6 +2178,47 @@ just projection-page-tail-smoke
 just projection-page-tail-full
 ```
 
+### R2-B isolated projection query-tail attribution
+
+`vicia.current-projection-isolated-tail.v1` removes both earlier timed
+candidate work and temporal-probe position from the measurement child. Every
+fresh child still builds the same source candidate and page-image round trip,
+but warms and times exactly one source/decoded candidate at exactly one
+before/at/after probe. Forty observations per candidate/probe cell produce 240
+fresh 1M children. The six cells rotate across all launch positions, preserve
+one projection identity, and return the exact expected count/checksum in every
+sample.
+
+| Probe | Source p50/p95 ms | Decoded p50/p95 ms | Decoded p95/p50 | Decoded/source p50 | Decoded/source p95 |
+|---|---:|---:|---:|---:|---:|
+| Before boundary | 9.170 / 10.033 | 9.170 / 10.348 | 112.85% | 100.00% | 103.14% |
+| At boundary | 9.744 / 13.130 | 9.582 / 10.407 | 108.61% | 98.34% | 79.26% |
+| After boundary | 9.333 / 10.133 | 9.316 / 10.391 | 111.54% | 99.82% | 102.55% |
+
+Every isolated gate passes: decoded p50 remains below 150 ms, all decoded
+p95/p50 tails remain below 115%, and decoded p50/p95 remain below 110% of the
+corresponding source distribution. In particular, the paired after-boundary
+110.034% miss falls to 102.55% when only one candidate/probe is measured per
+child. The earlier miss is therefore attributed to multi-measurement scheduling
+interference rather than stable decoded-layout cost. R2-B is admitted and R2-C
+may design publication authority; this receipt does not itself change file
+bytes, public API, or production query routing.
+
+The clean source `55f1dd95641899afde9bfda158f4e61da8e76f5b` receipt is
+preserved at
+`benchmarks/baselines/projection-isolated-tail/2026-07-15-hal7800-r2b-isolated-full/receipt.json`
+with SHA-256
+`3b43392168a341df8d361659b72c1d76a16bb9f1fe21a6ed1dbf1fdfafc77e1d`.
+The validator derives the schedule, identity, summaries, exactness, gates, and
+verdict from raw samples. Its mutation audit rejects provenance, sample count,
+launch/trial position, candidate/probe identity, projection identity,
+exactness, percentile, verdict, and scope corruption.
+
+```bash
+just projection-isolated-tail-smoke
+just projection-isolated-tail-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a

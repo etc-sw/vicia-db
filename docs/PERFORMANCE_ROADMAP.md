@@ -310,7 +310,7 @@ codec high-water RSS grows by 108.85 MiB, and decoded-query RSS grows by
 0.125 MiB. Corruption, truncation, overlap, trailing pages, unknown layout,
 identity mismatch, malformed values, and invalid temporal columns fail closed.
 
-Publication remains blocked by the strict query-tail gate. The follow-up uses
+The paired query-tail follow-up uses
 twenty fresh 1M children, builds source and decoded candidates from the same
 ledger state, rotates all three probes, and balances candidate-first order
 10/10 per probe. Its v2 fixture provenance binds the actual fill-90 build to
@@ -321,11 +321,14 @@ count/checksum observations. Decoded p50 is 9.340/9.758/9.689 ms versus source
 limits; after-boundary decoded p95 is 11.141 ms versus source 10.125 ms, or
 110.034%, and narrowly misses the strict 110% gate.
 
-The authoritative rerun does not reproduce the earlier before-boundary tail,
-so the paired samples still do not establish a stable decoded throughput
-regression. Keep the deterministic page bytes, leave R2-C unadmitted, and
-isolate execution-position tail before changing the codec, relaxing a gate, or
-assigning a root.
+The authoritative paired rerun does not reproduce the earlier before-boundary
+tail, so it does not establish a stable decoded throughput regression. A final
+isolated receipt removes earlier timed-candidate and probe-position work by
+measuring one candidate/probe in each of 240 fresh children. Decoded p95/p50 is
+112.85%/108.61%/111.54%, and decoded/source p95 is
+103.14%/79.26%/102.55%. All exact, latency, tail, and relative gates pass.
+R2-B is therefore admitted; the paired miss is scheduling interference rather
+than stable decoded-layout cost.
 
 ### Storage boundary
 
@@ -656,18 +659,21 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0, R1, and R2-A are closed. R2-B's codec, identity, corruption, size,
-encode/decode, RSS, and semantic gates pass, but the paired query-tail gate
-fails and R2-C is not admitted. The only remaining R2 measurement justified by
-the receipt is execution-position attribution:
+R0 through R2-B are closed. The next slice is R2-C projection publication
+authority, beginning with persisted selection and recovery rather than
+production query routing:
 
 ```text
-run source-only and decoded-only measurements in separate fresh children
-keep the same fixture, projection identity, probe rotation, and 20 observations
-decide whether the tail follows decoded layout or second-position scheduling
+append the admitted deterministic projection page image inside the logical graph
+publish a generation-bound descriptor only after page integrity is durable
+select only a descriptor matching the chosen ledger base/manifest/tx watermark
+fall back to the last matching projection or rebuild without hiding ledger data
 ```
 
-Do not rerun the paired receipt to select a favorable sample, tune the codec,
-or relax the tail threshold. No header root, publish pages, WAL coupling,
-format-version change, production query routing, or Vetch package sync is
-admitted. R3-R6 remain parked until this R2 decision is explicitly closed.
+The first R2-C slice must state crash behavior before changing bytes: failure
+before descriptor publication leaves the previous descriptor authoritative;
+corrupt or incomplete newer projection state falls back only to a verified
+matching predecessor; a selected corrupt state must fail closed rather than
+silently change query results. WAL retirement remains owned by durable ledger
+publication. Keep production query routing and the Vetch package unchanged
+until reopen, corruption, fallback, and real-Chrome parity gates pass.
