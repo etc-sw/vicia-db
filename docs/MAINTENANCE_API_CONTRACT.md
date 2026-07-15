@@ -45,8 +45,9 @@ The maintenance hook must not:
   fact buffer
 - reclaim old ignored pages on the native file backend; native file-space
   reclamation remains a separate future phase
-- route ordinary reads through a derived projection; the R2-C2 reader remains
-  the full-history ledger until the later differential rollout gate
+- broaden the admitted R2-C3 projection route beyond exact-watermark,
+  single-attribute, ungrouped `count`/`sum`; every other query shape remains on
+  the full-history ledger
 
 Browser maintenance intentionally does reclaim obsolete IndexedDB records.
 Native copy-on-write recompact cannot do this because it appends its new base

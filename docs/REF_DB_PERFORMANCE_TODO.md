@@ -117,3 +117,17 @@ current executable checklist.
   tests, three authority smoke surfaces, canvas persistence concurrency,
   TypeScript checking, and the production build. This admits R2-C2 without
   publishing the package or changing production query routing.
+- [x] Route exact-watermark, single-attribute, ungrouped `count`/`sum` through
+  the persisted projection from native and browser read views. The scanner
+  borrows ordinary value bytes from an eight-page cache, uses stack buffers for
+  fixed-width fields, resumes browser work every 4,096 rows, and discards a
+  partial candidate before predecessor/ledger fallback on corruption. The clean
+  1M receipt preserves exact `500,000/249,999,250,000`, reduces p50/p95 from
+  239.658/244.091 ms to 115.060/119.899 ms, reads 4,036 pages, decodes no full
+  image, adds zero measured query RSS, and passes its mutation audit. Default
+  writes remain v12; arbitrary Datalog and stale/pending views remain on the
+  ledger; Vetch publication remains separate.
+- [ ] Add an authority-bounded resident tail overlay so small writes after an
+  R2-C3 publication can merge without immediately returning to the full ledger
+  fold. Preserve exact retract/valid-window semantics and enforce a measured
+  fallback threshold before the overlay can become an unbounded second store.

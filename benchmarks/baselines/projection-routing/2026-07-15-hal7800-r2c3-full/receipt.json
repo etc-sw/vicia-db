@@ -1,0 +1,82 @@
+{
+  "schema": "vicia.projection-routing.v1",
+  "profile": "full",
+  "facts": 1000000,
+  "trials": 10,
+  "admissionEligible": true,
+  "sourceCommit": "65fd083cf2c01ce3523d30dd7761d179efe1a89b",
+  "trackedClean": true,
+  "fixture": {
+    "schema": "vicia.temporal-projection-fixture.v1",
+    "facts": 1000000,
+    "fillPercent": 90,
+    "bytes": 247562240,
+    "sha256": "b1d8196836a03ff381e56820ecbcb6c7499bfc9cca83f387e16ee0d1d7369910",
+    "formatVersion": 12,
+    "builderSourceCommit": "65fd083cf2c01ce3523d30dd7761d179efe1a89b",
+    "builderTrackedClean": true
+  },
+  "expectedCount": 500000,
+  "expectedChecksum": 249999250000,
+  "ledgerCount": 500000,
+  "ledgerChecksum": 249999250000,
+  "projectedCount": 500000,
+  "projectedChecksum": 249999250000,
+  "maintenanceElapsedMs": 690.1344280000001,
+  "ledger": {
+    "samplesMs": [
+      234.618212,
+      235.91714199999998,
+      236.927504,
+      237.419682,
+      238.521319,
+      239.658318,
+      240.41673,
+      241.115461,
+      243.452405,
+      244.090947
+    ],
+    "p50Ms": 239.658318,
+    "p95Ms": 244.090947
+  },
+  "projected": {
+    "samplesMs": [
+      114.06081999999999,
+      114.13038,
+      114.527456,
+      114.627278,
+      114.792458,
+      115.060073,
+      115.373744,
+      115.464034,
+      119.197787,
+      119.89859999999999
+    ],
+    "p50Ms": 115.060073,
+    "p95Ms": 119.89859999999999
+  },
+  "projectionDiagnostics": {
+    "routeAttempts": 1,
+    "completedScans": 1,
+    "corruptCandidates": 0,
+    "ledgerFallbacks": 0,
+    "pagesRead": 4036,
+    "rowsScanned": 500000,
+    "rowsEmitted": 500000,
+    "fullImageDecodes": 0
+  },
+  "baselineRssBytes": 21282816,
+  "peakQueryRssDeltaBytes": 0,
+  "gates": {
+    "exact": true,
+    "routed": true,
+    "pageBacked": true,
+    "routeP50": true,
+    "improvement": true,
+    "tail": true,
+    "queryRss": true
+  },
+  "admitted": true,
+  "defaultWriteFormatChanged": false,
+  "arbitraryDatalogRoutingChanged": false
+}

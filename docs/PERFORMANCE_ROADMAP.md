@@ -682,14 +682,15 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 through R2-C2 are closed. Maintenance-owned native and browser projection
-publication is admitted, still before production query routing:
+R0 through R2-C3 are closed. Maintenance-owned native and browser projection
+publication plus the narrow exact-watermark aggregate route are admitted:
 
 ```text
 expose projection rebuild only through the maintenance capability
 publish and reopen the same v13 catalog through native and browser storage
 prove interruption/fallback/import/export behavior in real Chrome
-keep foreground reads on the ledger until a separately admitted routing slice
+route only exact single-attribute ungrouped count/sum from pinned read views
+keep every other foreground read on the ledger
 ```
 
 The rebuild API is limited to 1–32 explicit stored attributes and captures one
@@ -704,11 +705,20 @@ with a 485.40 MiB sampled PSS delta, exact v12-to-v13 page authority, and worker
 termination. The clean staged package then passes the 77-test browser matrix,
 three Vetch authority smoke surfaces, canvas persistence concurrency, TypeScript
 checking, and the Vetch production build against clean Vetch `9634ba0`. No
-package was published and production reads remain on the ledger.
+package was published; the later R2-C3 route below remains narrower than that
+staged package surface.
 
-The next durable slice is R2-C3: route only exact current selectors supported by
-the catalog through a generation-pinned projection reader, retain the ledger as
-the semantic oracle and fallback, and prove base/delta/retract/valid-window and
-corruption differentials before any Vetch package publication. Arbitrary
-Datalog, historical, recursive, grouped, distinct, window, and UDF queries stay
-on the existing executor.
+R2-C3's clean 1M receipt routes 500,000 exact current rows from 4,036 projection
+pages with zero full-image decodes or measured query RSS growth. Aggregate
+p50/p95 falls from 239.658/244.091 ms on the ledger to 115.060/119.899 ms; exact
+count/checksum, structural diagnostics, real-Chrome paging, corruption fallback,
+and validator mutation audit pass. Arbitrary Datalog, historical, recursive,
+grouped, distinct, window, and UDF queries stay on the existing executor.
+
+The next durable slice is R2-C4: add a bounded resident-tail overlay above the
+same generation-pinned reader so small post-publication writes do not force an
+immediate ledger fallback. The overlay must preserve exact tx/valid-time and
+retract semantics, stay within foreground memory/work limits, and fall back to
+the ledger before it can become a second authority. It must not broaden query
+eligibility or publish a Vetch package until native and real-Chrome
+differentials pass.

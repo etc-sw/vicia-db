@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- Admit R2-C3 exact-watermark current-aggregate routing. Native `ReadView::query` and browser `BrowserReadView.query()` now select persisted v13 projections only for one exact attribute pattern with ungrouped `count`/`sum`; arbitrary Datalog, history, grouping, distinct, windows, UDFs, raw compatibility APIs, stale watermarks, and pending writes remain on the ledger. The allocation-free page-backed scanner validates identity, layout, values, temporal streams, ordering, and the logical fingerprint while retaining only eight pages; corrupt candidates fall through predecessor copies and then the ledger. The clean 1M receipt reduces aggregate p50/p95 from 239.658/244.091 ms to 115.060/119.899 ms, reads 4,036 pages for 500,000 exact rows, performs zero full-image decodes, adds zero measured query RSS, and passes the receipt mutation audit. Browser scan work yields every 4,096 rows and preserves completed-row budget accounting across IndexedDB page faults. Default writes remain v12 and no Vetch package is published by this slice.
+
 ### Added
 
 - Close R2-C2 with clean native and Chrome 1M maintenance receipts plus a staged Vetch package differential. The public maintenance capabilities rebuild 1–32 explicit current attributes, publish the derived v13 catalog atomically, reuse the inactive catalog arena, and leave ordinary v12 writes and ledger query routing unchanged. The staged package passes 77 browser tests, authority/lifecycle/canvas smoke coverage, TypeScript checking, and the Vetch production build without publishing into Vetch.

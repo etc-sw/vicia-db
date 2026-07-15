@@ -2303,6 +2303,45 @@ just projection-maintenance-smoke
 just projection-maintenance-full
 ```
 
+### R2-C3 exact-watermark projection routing
+
+`vicia.projection-routing.v1` measures the production `ReadView::query` route,
+not a detached codec helper. It runs the same exact single-attribute ungrouped
+`count`/`sum` query against the v12 ledger, publishes the attribute through the
+maintenance capability, reopens v13, and repeats the query through the
+generation-pinned page reader. The validator derives count/checksum and every
+gate from raw receipt fields; its mutation audit rejects altered exactness,
+routing evidence, full-image decode counts, and stored verdicts.
+
+The clean HAL7800 1M run at source `65fd083` passes every gate:
+
+| 1M current aggregate | p50 | p95 |
+|---|---:|---:|
+| Full-history ledger | 239.658 ms | 244.091 ms |
+| Persisted projection route | 115.060 ms | 119.899 ms |
+
+The route scans and emits exactly 500,000 rows from 4,036 pages, returns
+`500,000/249,999,250,000`, performs zero full-image decodes, and adds zero
+measured peak query RSS. Its p95/p50 ratio is 104.21%, and p50 improves 52.0%
+over the same-process ledger control. The scanner retains at most eight pages;
+fixed-width fields use stack buffers and ordinary encoded values are borrowed
+from the resident page. Native corruption tests prove predecessor then ledger
+fallback, while the 77-test real-Chrome suite proves IndexedDB page demand,
+4,096-row yielding, and exact completion.
+
+The authoritative receipt is preserved at
+`benchmarks/baselines/projection-routing/2026-07-15-hal7800-r2c3-full/receipt.json`
+with SHA-256
+`f1f2298bab9333214b996da924f312ef49ec5276bfc8578be481a9147771753d`.
+Default writes remain v12. Raw compatibility queries, arbitrary Datalog,
+history, grouping, distinct, windows, UDFs, stale watermarks, and pending writes
+remain on the ledger.
+
+```bash
+just projection-routing-smoke
+just projection-routing-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a
