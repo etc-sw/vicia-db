@@ -75,13 +75,12 @@ current executable checklist.
   decodes at 71.530/78.652 ms.
 - [x] Close query-tail admission with a paired, rotated source-versus-decoded
   receipt. Twenty fresh 1M children preserve exact results and one projection
-  identity while balancing candidate-first order 10/10 at every probe. Decoded
-  p50 remains within 1.5% of source and wins 14/12/10 pairs, but decoded
-  p95/p50 is 124.16%/117.82%/130.64%; before-boundary decoded p95 is 114.86%
-  of source p95 and fails the 110% relative gate. The two dominant decoded
-  before-boundary outliers both occur with decoded second, while source owns
-  the tail in the inverse order. Retain the codec, do not admit R2-C, and do
-  not relax the tail threshold.
+  identity while balancing candidate-first order 10/10 at every probe. The v2
+  authority binds the actual fill-90 fixture to its graph hash and derives
+  exactness from raw count/checksum observations. Decoded p95/p50 now passes at
+  103.34%/104.47%/114.99%; after-boundary decoded p95 is 110.034% of source
+  p95 and is the only remaining strict-gate miss. Retain the codec, do not
+  admit R2-C, and do not relax the threshold from one near-boundary rerun.
 
 Do not add a page-0/header root, publish protocol, fallback selection, WAL
 retirement coupling, public API, or production query routing in R2-B. Those

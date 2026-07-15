@@ -2135,38 +2135,43 @@ just projection-page-image-full
 
 ### R2-B paired projection query-tail attribution
 
-`vicia.current-projection-tail.v1` replaces independent sequential query
+`vicia.current-projection-tail.v2` replaces independent sequential query
 samples with twenty fresh 1M child processes. Every child opens the same
 247,562,240-byte fill-90 temporal fixture, builds one source candidate, encodes
 and decodes it under ledger identity `base=1/manifest=0/tx=1000`, and measures
 both candidates at the before/at/after boundary probes. Probe order rotates and
 candidate-first order is balanced 10/10 for every probe. Every sample preserves
 the exact expected count/checksum and the same `37a7869900e4b1b4`
-fingerprint.
+fingerprint. The fixture builder records the configured fill with the graph
+SHA-256, byte length, format, fact count, and clean source commit; the runner
+checks that metadata against the graph before starting any trial.
 
 | Probe | Source p50/p95 ms | Decoded p50/p95 ms | Decoded p95/p50 | Decoded/source p95 | Decoded wins |
 |---|---:|---:|---:|---:|---:|
-| Before boundary | 8.933 / 9.515 | 8.802 / 10.929 | 124.16% | 114.86% | 14/20 |
-| At boundary | 9.208 / 10.983 | 9.184 / 10.820 | 117.82% | 98.51% | 12/20 |
-| After boundary | 9.106 / 11.653 | 9.039 / 11.809 | 130.64% | 101.34% | 10/20 |
+| Before boundary | 9.444 / 10.182 | 9.340 / 9.652 | 103.34% | 94.80% | 12/20 |
+| At boundary | 9.826 / 10.372 | 9.758 / 10.194 | 104.47% | 98.29% | 10/20 |
+| After boundary | 9.407 / 10.125 | 9.689 / 11.141 | 114.99% | 110.03% | 5/20 |
 
-The decoded p50 is never slower than source, but all three decoded tails exceed
-the 115% gate and before-boundary decoded p95 exceeds the source-relative 110%
-gate. Its two dominant decoded outliers, 10.929 and 13.889 ms, both occur when
-decoded runs second. With the inverse order the largest before-boundary source
-samples occur second instead. The receipt therefore blocks R2-C without
-establishing a stable codec-throughput regression. Thresholds and production
-routing remain unchanged; the next admissible risk probe must isolate
-execution position before modifying the page layout.
+All three decoded p95/p50 tails now pass the 115% gate. Before and at boundary
+also pass both source-relative gates. After boundary remains the sole blocker:
+decoded p95 is 11.141 ms against source p95 10.125 ms, or 110.034%, narrowly
+over the strict 110% limit. This second clean run does not reproduce the v1
+before-boundary outliers, so it still does not establish a stable
+codec-throughput regression. Thresholds and production routing remain
+unchanged; the next admissible risk probe must isolate execution position
+before modifying the page layout or reconsidering admission.
 
-The clean source `12a9c07d83fc29ce8ca7822e5c8a1acd74d75eaa` receipt is
+The authoritative clean source
+`fbde6a560995badd287ee537a45e2fea9bec73c1` receipt is
 preserved at
-`benchmarks/baselines/projection-page-tail/2026-07-15-hal7800-r2b-paired-full/receipt.json`
+`benchmarks/baselines/projection-page-tail/2026-07-15-hal7800-r2b-paired-full-v2/receipt.json`
 with SHA-256
-`623f8c53a0aa86bc823aef19899cb1daa04b22f00b2ae12efa01d5c43ac3daa0`.
-The validator recomputes every summary from raw trials and its mutation audit
-rejects provenance, rotation, identity, exactness, tail, relative-regression,
-verdict, and scope corruption.
+`f559ed6f4e7d26212b508d9ec4a9fdf5601ac8aa59313c77897aa1c33b9c4d56`.
+The validator derives exactness and every summary from raw trials. Its mutation
+audit rejects fixture provenance, rotation, identity, raw-result and stored
+exactness disagreement, tail, relative-regression, verdict, and scope
+corruption. The adjacent v1 receipt remains historical evidence but is
+superseded for admission decisions.
 
 ```bash
 just projection-page-tail-smoke

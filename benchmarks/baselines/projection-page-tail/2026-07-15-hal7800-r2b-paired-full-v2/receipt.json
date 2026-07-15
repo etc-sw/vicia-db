@@ -1,0 +1,1767 @@
+{
+  "schema": "vicia.current-projection-tail.v2",
+  "profile": "full",
+  "facts": 1000000,
+  "trials": 20,
+  "admissionEligible": true,
+  "sourceCommit": "fbde6a560995badd287ee537a45e2fea9bec73c1",
+  "trackedClean": true,
+  "host": "HAL7800",
+  "fixture": {
+    "schema": "vicia.temporal-projection-fixture.v1",
+    "facts": 1000000,
+    "fillPercent": 90,
+    "bytes": 247562240,
+    "sha256": "f50b84ebfb47a18896d83c56613f6953cf06561b8d4c4dcdc46a1748652befce",
+    "formatVersion": 12,
+    "builderSourceCommit": "fbde6a560995badd287ee537a45e2fea9bec73c1",
+    "builderTrackedClean": true
+  },
+  "projectionIdentity": {
+    "baseGeneration": 1,
+    "manifestGeneration": 0,
+    "txCount": 1000,
+    "fingerprint": "37a7869900e4b1b4",
+    "rowCount": 1000000,
+    "paddedBytes": 33038336
+  },
+  "measurements": [
+    {
+      "trialIndex": 0,
+      "probeOrder": [
+        "beforeBoundary",
+        "atBoundary",
+        "afterBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 10.181605,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.230947,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.934436,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 10.194142,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.526422,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.335688,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 1,
+      "probeOrder": [
+        "atBoundary",
+        "afterBoundary",
+        "beforeBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 13.679316,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.813587,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.650681,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.558896,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.374857,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.303586,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 2,
+      "probeOrder": [
+        "afterBoundary",
+        "beforeBoundary",
+        "atBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.537895,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.627925,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 14.376926,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 10.375169,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.899827,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.931102,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 3,
+      "probeOrder": [
+        "beforeBoundary",
+        "atBoundary",
+        "afterBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.278638,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.184397,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 10.009992,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 10.173715,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 11.36855,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.80905,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 4,
+      "probeOrder": [
+        "atBoundary",
+        "afterBoundary",
+        "beforeBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.774954,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.798935,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.406823,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.471346,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.31677,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.213477,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 5,
+      "probeOrder": [
+        "afterBoundary",
+        "beforeBoundary",
+        "atBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.274991,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.43348,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.294849,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.331312,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.71797,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.599027,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 6,
+      "probeOrder": [
+        "beforeBoundary",
+        "atBoundary",
+        "afterBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.528348,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.567357,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.658698,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.824596,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.403309,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.688634,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 7,
+      "probeOrder": [
+        "atBoundary",
+        "afterBoundary",
+        "beforeBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.61672,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 10.139365,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.799637,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 11.141305,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.335212,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.359232,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 8,
+      "probeOrder": [
+        "afterBoundary",
+        "beforeBoundary",
+        "atBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.496477,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.982982,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.666676,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.506431,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.865416,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.75766,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 9,
+      "probeOrder": [
+        "beforeBoundary",
+        "atBoundary",
+        "afterBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.383459,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.456141,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.590983,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.577754,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.989041,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.818918,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 10,
+      "probeOrder": [
+        "atBoundary",
+        "afterBoundary",
+        "beforeBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 10.078761,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.686711,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.934691,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 10.775489,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.389696,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.340255,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 11,
+      "probeOrder": [
+        "afterBoundary",
+        "beforeBoundary",
+        "atBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.346186,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.550847,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.752002,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.195168,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.713451,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.823382,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 12,
+      "probeOrder": [
+        "beforeBoundary",
+        "atBoundary",
+        "afterBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.578916,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.563043,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.956119,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.609166,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.272156,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.348007,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 13,
+      "probeOrder": [
+        "atBoundary",
+        "afterBoundary",
+        "beforeBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.515332,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.717637,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.361882,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.448171,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.507293,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.54726,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 14,
+      "probeOrder": [
+        "afterBoundary",
+        "beforeBoundary",
+        "atBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.272269,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.885773,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.201042,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.308622000000002,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 10.018125,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.720774,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 15,
+      "probeOrder": [
+        "beforeBoundary",
+        "atBoundary",
+        "afterBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.326559,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.092318,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.858499,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.738727,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 10.017652,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 10.190499,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 16,
+      "probeOrder": [
+        "atBoundary",
+        "afterBoundary",
+        "beforeBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.809483,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.69599,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.308021,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.983388,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.444086,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.454213,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 17,
+      "probeOrder": [
+        "afterBoundary",
+        "beforeBoundary",
+        "atBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.341022,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 12.113718,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.893617,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.65226,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 10.371643,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 11.221953,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 18,
+      "probeOrder": [
+        "beforeBoundary",
+        "atBoundary",
+        "afterBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.451996,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.466104,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        },
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.825665,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.672219,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 10.125287,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.776471,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        }
+      ]
+    },
+    {
+      "trialIndex": 19,
+      "probeOrder": [
+        "atBoundary",
+        "afterBoundary",
+        "beforeBoundary"
+      ],
+      "image": {
+        "baseGeneration": 1,
+        "manifestGeneration": 0,
+        "txCount": 1000,
+        "fingerprint": "37a7869900e4b1b4",
+        "rowCount": 1000000,
+        "paddedBytes": 33038336
+      },
+      "probes": [
+        {
+          "name": "atBoundary",
+          "validAt": 1735689600000,
+          "order": [
+            "source",
+            "decoded"
+          ],
+          "source": {
+            "elapsedMs": 9.696207,
+            "count": 750000,
+            "checksum": 374999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.830706,
+            "count": 750000,
+            "checksum": 374999500000
+          }
+        },
+        {
+          "name": "afterBoundary",
+          "validAt": 1735689600002,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.301502,
+            "count": 500000,
+            "checksum": 249999250000
+          },
+          "decoded": {
+            "elapsedMs": 9.591631,
+            "count": 500000,
+            "checksum": 249999250000
+          }
+        },
+        {
+          "name": "beforeBoundary",
+          "validAt": 1735689599999,
+          "order": [
+            "decoded",
+            "source"
+          ],
+          "source": {
+            "elapsedMs": 9.464091000000002,
+            "count": 500000,
+            "checksum": 249999500000
+          },
+          "decoded": {
+            "elapsedMs": 9.117858,
+            "count": 500000,
+            "checksum": 249999500000
+          }
+        }
+      ]
+    }
+  ],
+  "probes": [
+    {
+      "name": "beforeBoundary",
+      "validAt": 1735689599999,
+      "sourceMs": {
+        "samples": [
+          9.201042,
+          9.278638,
+          9.294849,
+          9.31677,
+          9.326559,
+          9.335212,
+          9.374857,
+          9.383459,
+          9.389696,
+          9.444086,
+          9.451996,
+          9.464091000000002,
+          9.507293,
+          9.528348,
+          9.578916,
+          9.666676,
+          9.752002,
+          9.893617,
+          10.181605,
+          14.376926
+        ],
+        "p50": 9.444086,
+        "p95": 10.181605,
+        "max": 14.376926,
+        "mad": 0.11752700000000083
+      },
+      "decodedMs": {
+        "samples": [
+          9.092318,
+          9.117858,
+          9.184397,
+          9.195168,
+          9.213477,
+          9.230947,
+          9.303586,
+          9.308622000000002,
+          9.331312,
+          9.340255,
+          9.359232,
+          9.454213,
+          9.456141,
+          9.466104,
+          9.506431,
+          9.54726,
+          9.563043,
+          9.567357,
+          9.65226,
+          10.375169
+        ],
+        "p50": 9.340255,
+        "p95": 9.65226,
+        "max": 10.375169,
+        "mad": 0.1267780000000016
+      },
+      "decodedSourceRatio": {
+        "samples": [
+          0.7216541978445183,
+          0.9066298486338844,
+          0.9429005449342608,
+          0.9634161379048446,
+          0.9748845206468968,
+          0.9756047762916231,
+          0.9834229470399131,
+          0.9889132177782642,
+          0.9898432291463467,
+          0.9923976440387303,
+          0.9947345473165479,
+          0.9983429231449572,
+          1.0010723112856024,
+          1.0014925947916187,
+          1.0025730535096578,
+          1.0039229254827056,
+          1.0040939940480764,
+          1.0042038254211791,
+          1.0077457577211133,
+          1.011692153997341
+        ],
+        "p50": 0.9923976440387303,
+        "p95": 1.0077457577211133,
+        "max": 1.011692153997341,
+        "mad": 0.011525281443975244
+      },
+      "decodedWins": 12,
+      "gates": {
+        "exact": true,
+        "decodedLatency": true,
+        "decodedTail": true,
+        "decodedP50Relative": true,
+        "decodedP95Relative": true,
+        "admitted": true
+      }
+    },
+    {
+      "name": "atBoundary",
+      "validAt": 1735689600000,
+      "sourceMs": {
+        "samples": [
+          9.515332,
+          9.590983,
+          9.61672,
+          9.658698,
+          9.696207,
+          9.713451,
+          9.71797,
+          9.774954,
+          9.809483,
+          9.825665,
+          9.858499,
+          9.865416,
+          9.899827,
+          9.934436,
+          9.956119,
+          10.009992,
+          10.018125,
+          10.078761,
+          10.371643,
+          13.679316
+        ],
+        "p50": 9.825665,
+        "p95": 10.371643,
+        "max": 13.679316,
+        "mad": 0.1294580000000014
+      },
+      "decodedMs": {
+        "samples": [
+          9.577754,
+          9.599027,
+          9.609166,
+          9.672219,
+          9.686711,
+          9.69599,
+          9.717637,
+          9.720774,
+          9.738727,
+          9.75766,
+          9.798935,
+          9.813587,
+          9.823382,
+          9.824596,
+          9.830706,
+          9.931102,
+          10.139365,
+          10.173715,
+          10.194142,
+          11.221953
+        ],
+        "p50": 9.75766,
+        "p95": 10.194142,
+        "max": 11.221953,
+        "mad": 0.07094899999999882
+      },
+      "decodedSourceRatio": {
+        "samples": [
+          0.7174033409272803,
+          0.9611013695036523,
+          0.9651517825369504,
+          0.9703186973610333,
+          0.9843831435327787,
+          0.9877605096537652,
+          0.9878508888624933,
+          0.9884302771104246,
+          0.9890773992703399,
+          0.9986206836150164,
+          1.0024533107777285,
+          1.0031591461143714,
+          1.011317398934735,
+          1.013871300396124,
+          1.016355957127638,
+          1.0171760210330627,
+          1.0212609502222307,
+          1.026141997391699,
+          1.054347532214726,
+          1.08198411765619
+        ],
+        "p50": 0.9986206836150164,
+        "p95": 1.054347532214726,
+        "max": 1.08198411765619,
+        "mad": 0.015250616781107507
+      },
+      "decodedWins": 10,
+      "gates": {
+        "exact": true,
+        "decodedLatency": true,
+        "decodedTail": true,
+        "decodedP50Relative": true,
+        "decodedP95Relative": true,
+        "admitted": true
+      }
+    },
+    {
+      "name": "afterBoundary",
+      "validAt": 1735689600002,
+      "sourceMs": {
+        "samples": [
+          9.272156,
+          9.272269,
+          9.274991,
+          9.301502,
+          9.308021,
+          9.341022,
+          9.346186,
+          9.361882,
+          9.403309,
+          9.406823,
+          9.496477,
+          9.526422,
+          9.537895,
+          9.650681,
+          9.799637,
+          9.934691,
+          9.989041,
+          10.017652,
+          10.125287,
+          11.36855
+        ],
+        "p50": 9.406823,
+        "p95": 10.125287,
+        "max": 11.36855,
+        "mad": 0.1310720000000014
+      },
+      "decodedMs": {
+        "samples": [
+          9.335688,
+          9.348007,
+          9.43348,
+          9.448171,
+          9.471346,
+          9.550847,
+          9.558896,
+          9.591631,
+          9.627925,
+          9.688634,
+          9.776471,
+          9.80905,
+          9.818918,
+          9.885773,
+          9.982982,
+          9.983388,
+          10.190499,
+          10.775489,
+          11.141305,
+          12.113718
+        ],
+        "p50": 9.688634,
+        "p95": 11.141305,
+        "max": 12.113718,
+        "mad": 0.21728799999999993
+      },
+      "decodedSourceRatio": {
+        "samples": [
+          0.8628233151985081,
+          0.9655500135452951,
+          0.9799784221190284,
+          0.9829690357662962,
+          0.990489272207837,
+          1.0068591702001835,
+          1.0081805137877318,
+          1.0092170569977277,
+          1.009439189674451,
+          1.017087779384368,
+          1.0172542428105908,
+          1.021897809437989,
+          1.0303430420078719,
+          1.031191629050878,
+          1.0512300508915042,
+          1.066165466079554,
+          1.0725575286089277,
+          1.0846325265677614,
+          1.1369099692162066,
+          1.2968300470762193
+        ],
+        "p50": 1.017087779384368,
+        "p95": 1.1369099692162066,
+        "max": 1.2968300470762193,
+        "mad": 0.026598507176531005
+      },
+      "decodedWins": 5,
+      "gates": {
+        "exact": true,
+        "decodedLatency": true,
+        "decodedTail": true,
+        "decodedP50Relative": true,
+        "decodedP95Relative": false,
+        "admitted": false
+      }
+    }
+  ],
+  "admitted": false,
+  "productionQueryRoutingChanged": false,
+  "publicApiChanged": false,
+  "fileFormatChanged": false
+}

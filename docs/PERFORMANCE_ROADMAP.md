@@ -313,17 +313,19 @@ identity mismatch, malformed values, and invalid temporal columns fail closed.
 Publication remains blocked by the strict query-tail gate. The follow-up uses
 twenty fresh 1M children, builds source and decoded candidates from the same
 ledger state, rotates all three probes, and balances candidate-first order
-10/10 per probe. Decoded p50 is 8.802/9.184/9.039 ms versus source
-8.933/9.208/9.106 ms and wins 14/12/10 pairs. It nevertheless misses the 115%
-tail gate at all three probes: decoded p95/p50 is
-124.16%/117.82%/130.64%. Before-boundary decoded p95 is 10.929 ms versus
-source 9.515 ms, or 114.86%, and also misses the 110% relative gate.
+10/10 per probe. Its v2 fixture provenance binds the actual fill-90 build to
+the graph SHA-256 and clean source commit, while exactness is derived from raw
+count/checksum observations. Decoded p50 is 9.340/9.758/9.689 ms versus source
+9.444/9.826/9.407 ms and wins 12/10/5 pairs. All decoded p95/p50 tails pass at
+103.34%/104.47%/114.99%. Before and at boundary pass the source-relative
+limits; after-boundary decoded p95 is 11.141 ms versus source 10.125 ms, or
+110.034%, and narrowly misses the strict 110% gate.
 
-The paired samples do not establish a stable decoded throughput regression.
-Both dominant decoded before-boundary outliers occur when decoded runs second;
-the inverse order puts the largest samples on source. Keep the deterministic
-page bytes, leave R2-C unadmitted, and isolate execution-position tail before
-changing the codec or assigning a root.
+The authoritative rerun does not reproduce the earlier before-boundary tail,
+so the paired samples still do not establish a stable decoded throughput
+regression. Keep the deterministic page bytes, leave R2-C unadmitted, and
+isolate execution-position tail before changing the codec, relaxing a gate, or
+assigning a root.
 
 ### Storage boundary
 
