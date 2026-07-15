@@ -15,13 +15,17 @@ const probes = [
   ["afterBoundary", boundary + 2],
 ];
 
-if (receipt.schema !== "vicia.current-projection-tail.v1") fail("schema");
+if (receipt.schema !== "vicia.current-projection-tail.v2") fail("schema");
 if (receipt.profile !== profile || receipt.facts !== shape.facts || receipt.trials !== shape.trials) fail("shape");
 if (receipt.admissionEligible !== shape.eligible) fail("admission eligibility");
 if (!/^[0-9a-f]{40}$/.test(receipt.sourceCommit ?? "")) fail("source commit");
 if (profile === "full" && receipt.trackedClean !== true) fail("full source must be clean");
-if (!receipt.fixture || receipt.fixture.bytes <= 0 || !/^[0-9a-f]{64}$/.test(receipt.fixture.sha256 ?? "")
-  || receipt.fixture.formatVersion !== 12 || receipt.fixture.fillPercent !== 90) fail("fixture");
+if (!receipt.fixture || receipt.fixture.schema !== "vicia.temporal-projection-fixture.v1"
+  || receipt.fixture.facts !== shape.facts || receipt.fixture.fillPercent !== 90
+  || receipt.fixture.bytes <= 0 || !/^[0-9a-f]{64}$/.test(receipt.fixture.sha256 ?? "")
+  || receipt.fixture.formatVersion !== 12
+  || receipt.fixture.builderSourceCommit !== receipt.sourceCommit
+  || receipt.fixture.builderTrackedClean !== receipt.trackedClean) fail("fixture");
 validateIdentity(receipt.projectionIdentity, shape.facts);
 
 if (!Array.isArray(receipt.measurements) || receipt.measurements.length !== shape.trials) fail("trial count");
@@ -71,13 +75,16 @@ for (const [name, validAt] of probes) {
   if (summary.decodedWins !== decodedWins) fail("decoded wins derivation");
   if (!Number.isInteger(summary.decodedWins) || summary.decodedWins < 0 || summary.decodedWins > shape.trials) fail("decoded wins");
   const gates = summary.gates ?? {};
-  const exact = gates.exact === true;
+  const expected = expectedPair(shape.facts, validAt);
+  const exact = raw.every((probe) =>
+    probe.source.count === expected[0] && probe.source.checksum === expected[1]
+      && probe.decoded.count === expected[0] && probe.decoded.checksum === expected[1]);
   const decodedLatency = summary.decodedMs.p50 <= 150;
   const decodedTail = summary.decodedMs.p95 <= summary.decodedMs.p50 * 1.15;
   const p50Relative = summary.decodedMs.p50 <= summary.sourceMs.p50 * 1.10;
   const p95Relative = summary.decodedMs.p95 <= summary.sourceMs.p95 * 1.10;
   const admitted = exact && decodedLatency && decodedTail && p50Relative && p95Relative;
-  if (gates.decodedLatency !== decodedLatency || gates.decodedTail !== decodedTail
+  if (gates.exact !== exact || gates.decodedLatency !== decodedLatency || gates.decodedTail !== decodedTail
     || gates.decodedP50Relative !== p50Relative || gates.decodedP95Relative !== p95Relative
     || gates.admitted !== admitted) fail("gate derivation");
   expectedAdmitted &&= admitted;

@@ -3,7 +3,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use minigraf::{Minigraf, OpenOptions, QueryResult, Value};
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -11,6 +13,19 @@ const BATCH: u64 = 1_000;
 const TEMPORAL_BOUNDARY: i64 = 1_735_689_600_000;
 const TEMPORAL_BEFORE: i64 = TEMPORAL_BOUNDARY - 1;
 const TEMPORAL_AFTER: i64 = TEMPORAL_BOUNDARY + 2;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TemporalFixtureMetadata {
+    schema: &'static str,
+    facts: u64,
+    fill_percent: u8,
+    bytes: u64,
+    sha256: String,
+    format_version: u32,
+    builder_source_commit: String,
+    builder_tracked_clean: bool,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -227,6 +242,15 @@ fn main() -> Result<()> {
         [_, command, path, facts] if command == "build-temporal" => {
             build_temporal_fixture(Path::new(path), facts.parse()?)
         }
+        [_, command, path, facts, fill_percent] if command == "build-temporal-provenance" => {
+            let path = Path::new(path);
+            let facts = facts.parse()?;
+            let fill_percent = fill_percent.parse()?;
+            build_temporal_fixture_with_fill(path, facts, fill_percent)?;
+            let metadata = temporal_fixture_metadata(path, facts, fill_percent)?;
+            println!("{}", serde_json::to_string_pretty(&metadata)?);
+            Ok(())
+        }
         [_, command, path, facts, samples] if command == "measure" => {
             let measurement = measure(Path::new(path), facts.parse()?, samples.parse()?)?;
             println!("{}", serde_json::to_string(&measurement)?);
@@ -246,6 +270,7 @@ fn main() -> Result<()> {
         _ => bail!(
             "usage: current-projection-bench \
              build|build-temporal <graph> <facts> | \
+             build-temporal-provenance <graph> <facts> <fill-percent> | \
              measure|measure-temporal|measure-page-image <graph> <facts> <samples>"
         ),
     }
@@ -406,6 +431,18 @@ fn build_fixture(path: &Path, facts: u64) -> Result<()> {
 }
 
 fn build_temporal_fixture(path: &Path, facts: u64) -> Result<()> {
+    build_temporal_fixture_with_options(path, facts, None)
+}
+
+fn build_temporal_fixture_with_fill(path: &Path, facts: u64, fill_percent: u8) -> Result<()> {
+    build_temporal_fixture_with_options(path, facts, Some(fill_percent))
+}
+
+fn build_temporal_fixture_with_options(
+    path: &Path,
+    facts: u64,
+    fill_percent: Option<u8>,
+) -> Result<()> {
     const UNIQUE_FIRST_BASE: i64 = 1_577_836_800_000;
     const UNIQUE_SECOND_BASE: i64 = 1_609_459_200_000;
 
@@ -413,7 +450,7 @@ fn build_temporal_fixture(path: &Path, facts: u64) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     remove_graph(path)?;
-    let db = open(path)?;
+    let db = open_with_fill(path, fill_percent)?;
     for start in (0..facts).step_by(usize::try_from(BATCH)?) {
         let mut command = String::from("(transact [");
         for entity in start..start.saturating_add(BATCH).min(facts) {
@@ -446,6 +483,27 @@ fn build_temporal_fixture(path: &Path, facts: u64) -> Result<()> {
     }
     db.checkpoint()?;
     Ok(())
+}
+
+fn temporal_fixture_metadata(
+    path: &Path,
+    facts: u64,
+    fill_percent: u8,
+) -> Result<TemporalFixtureMetadata> {
+    Ok(TemporalFixtureMetadata {
+        schema: "vicia.temporal-projection-fixture.v1",
+        facts,
+        fill_percent,
+        bytes: fs::metadata(path)?.len(),
+        sha256: sha256_file(path)?,
+        format_version: fixture_format_version(path)?,
+        builder_source_commit: command_text("git", &["rev-parse", "HEAD"])?,
+        builder_tracked_clean: command_text(
+            "git",
+            &["status", "--porcelain", "--untracked-files=no"],
+        )?
+        .is_empty(),
+    })
 }
 
 fn format_timestamp(timestamp: i64) -> Result<String> {
@@ -1063,12 +1121,44 @@ fn aggregate_pair(result: QueryResult) -> Result<(u64, i128)> {
 }
 
 fn open(path: &Path) -> Result<Minigraf> {
-    OpenOptions {
+    open_with_fill(path, None)
+}
+
+fn open_with_fill(path: &Path, fill_percent: Option<u8>) -> Result<Minigraf> {
+    let mut options = OpenOptions {
         wal_checkpoint_threshold: usize::MAX,
         ..OpenOptions::default()
+    };
+    if let Some(fill_percent) = fill_percent {
+        options = options.benchmark_btree_fill_percent(fill_percent);
     }
-    .path(path)
-    .open()
+    options.path(path).open()
+}
+
+fn command_text(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program).args(args).output()?;
+    if !output.status.success() {
+        bail!("{program} failed with {}", output.status)
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let output = Command::new("sha256sum").arg(path).output()?;
+    if !output.status.success() {
+        bail!("sha256sum failed with {}", output.status)
+    }
+    String::from_utf8(output.stdout)?
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .context("sha256sum output missing")
+}
+
+fn fixture_format_version(path: &Path) -> Result<u32> {
+    let mut bytes = [0_u8; 8];
+    fs::File::open(path)?.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes[4..8].try_into()?))
 }
 
 fn remove_graph(path: &Path) -> Result<()> {

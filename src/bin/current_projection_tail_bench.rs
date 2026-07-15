@@ -13,6 +13,7 @@ const TEMPORAL_BEFORE: i64 = TEMPORAL_BOUNDARY - 1;
 const TEMPORAL_AFTER: i64 = TEMPORAL_BOUNDARY + 2;
 const FULL_TRIALS: usize = 20;
 const SMOKE_TRIALS: usize = 6;
+const EXPECTED_FILL_PERCENT: u8 = 90;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -80,13 +81,17 @@ struct Trial {
     probes: Vec<ProbeTrial>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FixtureReceipt {
+    schema: String,
+    facts: u64,
+    fill_percent: u8,
     bytes: u64,
     sha256: String,
     format_version: u32,
-    fill_percent: u8,
+    builder_source_commit: String,
+    builder_tracked_clean: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,27 +151,41 @@ struct Receipt {
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     match args.as_slice() {
-        [_, command, graph, facts, profile] if command == "run" => {
-            run(Path::new(graph), facts.parse()?, profile)
-        }
+        [_, command, graph, fixture, facts, profile] if command == "run" => run(
+            Path::new(graph),
+            Path::new(fixture),
+            facts.parse()?,
+            profile,
+        ),
         [_, command, graph, facts, trial_index] if command == "trial" => {
             let trial = measure_trial(Path::new(graph), facts.parse()?, trial_index.parse()?)?;
             println!("{}", serde_json::to_string(&trial)?);
             Ok(())
         }
         _ => bail!(
-            "usage: current-projection-tail-bench run <graph> <facts> <smoke|full> | \
+            "usage: current-projection-tail-bench \
+             run <graph> <fixture-metadata> <facts> <smoke|full> | \
              trial <graph> <facts> <trial-index>"
         ),
     }
 }
 
-fn run(graph: &Path, facts: u64, profile: &str) -> Result<()> {
+fn run(graph: &Path, fixture_path: &Path, facts: u64, profile: &str) -> Result<()> {
     let trials = match profile {
         "smoke" => SMOKE_TRIALS,
         "full" => FULL_TRIALS,
         _ => bail!("profile must be smoke or full"),
     };
+    let source_commit = command_text("git", &["rev-parse", "HEAD"])?;
+    let tracked_clean =
+        command_text("git", &["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    let fixture = load_fixture_metadata(
+        graph,
+        fixture_path,
+        facts,
+        &source_commit,
+        profile == "full",
+    )?;
     let executable = std::env::current_exe()?;
     let mut measurements = Vec::with_capacity(trials);
     for trial_index in 0..trials {
@@ -179,21 +198,15 @@ fn run(graph: &Path, facts: u64, profile: &str) -> Result<()> {
     let admission_eligible = profile == "full";
     let admitted = admission_eligible && probes.iter().all(|probe| probe.gates.admitted);
     let receipt = Receipt {
-        schema: "vicia.current-projection-tail.v1",
+        schema: "vicia.current-projection-tail.v2",
         profile: profile.to_owned(),
         facts,
         trials,
         admission_eligible,
-        source_commit: command_text("git", &["rev-parse", "HEAD"])?,
-        tracked_clean: command_text("git", &["status", "--porcelain", "--untracked-files=no"])?
-            .is_empty(),
+        source_commit,
+        tracked_clean,
         host: command_text("hostname", &[]).ok(),
-        fixture: FixtureReceipt {
-            bytes: fs::metadata(graph)?.len(),
-            sha256: sha256_file(graph)?,
-            format_version: fixture_format_version(graph)?,
-            fill_percent: 90,
-        },
+        fixture,
         projection_identity,
         measurements,
         probes,
@@ -203,6 +216,60 @@ fn run(graph: &Path, facts: u64, profile: &str) -> Result<()> {
         file_format_changed: false,
     };
     println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
+}
+
+fn load_fixture_metadata(
+    graph: &Path,
+    fixture_path: &Path,
+    facts: u64,
+    source_commit: &str,
+    require_clean: bool,
+) -> Result<FixtureReceipt> {
+    let fixture: FixtureReceipt = serde_json::from_slice(&fs::read(fixture_path)?)
+        .context("decode temporal fixture metadata")?;
+    validate_fixture_metadata(
+        &fixture,
+        fs::metadata(graph)?.len(),
+        &sha256_file(graph)?,
+        fixture_format_version(graph)?,
+        facts,
+        source_commit,
+        require_clean,
+    )?;
+    Ok(fixture)
+}
+
+fn validate_fixture_metadata(
+    fixture: &FixtureReceipt,
+    graph_bytes: u64,
+    graph_sha256: &str,
+    graph_format_version: u32,
+    facts: u64,
+    source_commit: &str,
+    require_clean: bool,
+) -> Result<()> {
+    if fixture.schema != "vicia.temporal-projection-fixture.v1" {
+        bail!("temporal fixture metadata schema mismatch")
+    }
+    if fixture.facts != facts {
+        bail!("temporal fixture fact count mismatch")
+    }
+    if fixture.fill_percent != EXPECTED_FILL_PERCENT {
+        bail!("temporal fixture fill percent mismatch")
+    }
+    if fixture.bytes != graph_bytes
+        || fixture.sha256 != graph_sha256
+        || fixture.format_version != graph_format_version
+    {
+        bail!("temporal fixture graph identity mismatch")
+    }
+    if fixture.builder_source_commit != source_commit {
+        bail!("temporal fixture builder source mismatch")
+    }
+    if require_clean && !fixture.builder_tracked_clean {
+        bail!("full temporal fixture builder source must be clean")
+    }
     Ok(())
 }
 
@@ -600,6 +667,77 @@ mod tests {
         assert_eq!(
             expected_pair(1_000_000, TEMPORAL_AFTER),
             (500_000, 249_999_250_000)
+        );
+    }
+
+    #[test]
+    fn fixture_metadata_binds_fill_graph_and_builder() {
+        let fixture = FixtureReceipt {
+            schema: "vicia.temporal-projection-fixture.v1".to_owned(),
+            facts: 10_000,
+            fill_percent: EXPECTED_FILL_PERCENT,
+            bytes: 42,
+            sha256: "ab".repeat(32),
+            format_version: 12,
+            builder_source_commit: "cd".repeat(20),
+            builder_tracked_clean: true,
+        };
+        assert!(
+            validate_fixture_metadata(
+                &fixture,
+                42,
+                &"ab".repeat(32),
+                12,
+                10_000,
+                &"cd".repeat(20),
+                true,
+            )
+            .is_ok()
+        );
+
+        let mut wrong_fill = fixture.clone();
+        wrong_fill.fill_percent = 87;
+        assert!(
+            validate_fixture_metadata(
+                &wrong_fill,
+                42,
+                &"ab".repeat(32),
+                12,
+                10_000,
+                &"cd".repeat(20),
+                true,
+            )
+            .is_err()
+        );
+
+        let mut wrong_graph = fixture.clone();
+        wrong_graph.sha256 = "ef".repeat(32);
+        assert!(
+            validate_fixture_metadata(
+                &wrong_graph,
+                42,
+                &"ab".repeat(32),
+                12,
+                10_000,
+                &"cd".repeat(20),
+                true,
+            )
+            .is_err()
+        );
+
+        let mut dirty_builder = fixture;
+        dirty_builder.builder_tracked_clean = false;
+        assert!(
+            validate_fixture_metadata(
+                &dirty_builder,
+                42,
+                &"ab".repeat(32),
+                12,
+                10_000,
+                &"cd".repeat(20),
+                true,
+            )
+            .is_err()
         );
     }
 }

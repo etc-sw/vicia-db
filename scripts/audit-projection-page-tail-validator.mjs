@@ -11,11 +11,21 @@ const directory = mkdtempSync(path.join(tmpdir(), "vicia-projection-page-tail-va
 
 try {
   reject("dirty", (receipt) => { receipt.trackedClean = false; }, profile === "full");
+  reject("fixture-schema", (receipt) => { receipt.fixture.schema = "wrong"; });
+  reject("fixture-facts", (receipt) => { receipt.fixture.facts -= 1; });
+  reject("fixture-fill", (receipt) => { receipt.fixture.fillPercent = 87; });
+  reject("fixture-hash-shape", (receipt) => { receipt.fixture.sha256 = "wrong"; });
+  reject("fixture-builder", (receipt) => { receipt.fixture.builderSourceCommit = "0".repeat(40); });
   reject("trial-index", (receipt) => { receipt.measurements[0].trialIndex = 2; });
   reject("probe-order", (receipt) => { receipt.measurements[0].probeOrder.reverse(); });
   reject("candidate-order", (receipt) => { receipt.measurements[0].probes[0].order.reverse(); });
   reject("identity", (receipt) => { receipt.measurements[0].image.txCount += 1; });
   reject("exactness", (receipt) => { receipt.measurements[0].probes[0].decoded.count -= 1; });
+  reject("exact-gate", (receipt) => {
+    receipt.probes[0].gates.exact = !receipt.probes[0].gates.exact;
+    receipt.probes[0].gates.admitted = false;
+    receipt.admitted = false;
+  });
   reject("false-verdict", (receipt) => { receipt.admitted = !receipt.admitted; });
   reject("scope", (receipt) => { receipt.fileFormatChanged = true; });
   if (profile === "full") {

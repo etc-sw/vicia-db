@@ -14,15 +14,16 @@ esac
 
 mkdir -p "$output_dir"
 graph="$output_dir/work.graph"
+fixture="$output_dir/fixture.json"
 receipt="$output_dir/receipt.json"
 cleanup() {
-  rm -f "$graph" "$graph.wal" "$graph.lock"
+  rm -f "$graph" "$graph.wal" "$graph.lock" "$fixture"
 }
 trap cleanup EXIT
 
 cargo run --release --features bench-internals --bin current-projection-bench -- \
-  build-temporal "$graph" "$facts"
+  build-temporal-provenance "$graph" "$facts" 90 >"$fixture"
 cargo run --release --features bench-internals --bin current-projection-tail-bench -- \
-  run "$graph" "$facts" "$profile" >"$receipt"
+  run "$graph" "$fixture" "$facts" "$profile" >"$receipt"
 node scripts/validate-projection-page-tail-receipt.mjs "$receipt" "$profile"
 node scripts/audit-projection-page-tail-validator.mjs "$receipt" "$profile"
