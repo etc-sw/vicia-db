@@ -1,6 +1,10 @@
-use crate::graph::current_projection::{CurrentProjectionBuilder, CurrentProjectionCandidate};
 #[cfg(any(test, feature = "bench-internals"))]
-use crate::graph::current_projection::{CurrentProjectionRefreshDiagnostics, ProjectedInterval};
+use crate::graph::current_projection::CurrentProjectionRefreshDiagnostics;
+use crate::graph::current_projection::{
+    CURRENT_PROJECTION_TAIL_MAX_FACTS, CURRENT_PROJECTION_TAIL_MAX_HISTORY,
+    CurrentProjectionBuilder, CurrentProjectionCandidate, CurrentProjectionTailOverlay,
+    ProjectedInterval,
+};
 use crate::graph::pending_overlay::{PendingFactId, PendingOverlay};
 use crate::graph::types::{
     Attribute, EntityId, Fact, RETRACT_ALL_VALID_FROM, TransactOptions, TxId, VALID_TIME_FOREVER,
@@ -95,6 +99,16 @@ pub struct PendingMemoryDiagnostics {
 pub(crate) enum CurrentValidTime {
     At(i64),
     Any,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CurrentProjectionTailRefresh {
+    Ready {
+        tail_facts: usize,
+        touched_entities: usize,
+        history_entries: usize,
+    },
+    OverBudget,
 }
 
 #[derive(Default)]
@@ -272,7 +286,6 @@ pub(crate) struct CurrentEntityAttributeCursor {
     last_key: Option<EavtKey>,
     committed_complete: bool,
     complete: bool,
-    #[cfg(any(test, feature = "bench-internals"))]
     emit_each_visible_window: bool,
 }
 
@@ -1985,6 +1998,116 @@ impl FactStorage {
         builder.finish()
     }
 
+    /// Refresh one process-resident projection tail through the authoritative
+    /// current-view reducer. The caller installs no partial replacement rows.
+    pub(crate) fn refresh_current_projection_tail_overlay(
+        &self,
+        overlay: &mut CurrentProjectionTailOverlay,
+        target_tx_count: u64,
+    ) -> Result<CurrentProjectionTailRefresh> {
+        if overlay.tx_count() > target_tx_count {
+            anyhow::bail!("current projection resident tail is ahead of the read view")
+        }
+        if overlay.tx_count() == target_tx_count {
+            return Ok(CurrentProjectionTailRefresh::Ready {
+                tail_facts: 0,
+                touched_entities: 0,
+                history_entries: 0,
+            });
+        }
+        let (publication_generation, current_tx_count) = self.current_projection_watermark();
+        if target_tx_count != current_tx_count {
+            anyhow::bail!("current projection resident tail requires the current read watermark")
+        }
+
+        let mut tail_facts = 0usize;
+        let mut touched = std::collections::BTreeSet::new();
+        self.for_each_fact_since(overlay.tx_count(), |fact| {
+            if fact.tx_count > target_tx_count {
+                return Ok(());
+            }
+            tail_facts = tail_facts.saturating_add(1);
+            if tail_facts > CURRENT_PROJECTION_TAIL_MAX_FACTS {
+                return Err(anyhow::anyhow!(
+                    "current projection resident tail fact budget"
+                ));
+            }
+            if fact.attribute == overlay.attribute() {
+                touched.insert(fact.entity);
+            }
+            Ok(())
+        })
+        .or_else(|error| {
+            if error.to_string() == "current projection resident tail fact budget" {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })?;
+        if tail_facts > CURRENT_PROJECTION_TAIL_MAX_FACTS {
+            return Ok(CurrentProjectionTailRefresh::OverBudget);
+        }
+        if self.current_projection_watermark() != (publication_generation, current_tx_count) {
+            anyhow::bail!("current projection publication changed while reading the resident tail")
+        }
+
+        let mut history_entries = 0usize;
+        let mut replacements = Vec::with_capacity(touched.len());
+        for entity in &touched {
+            let mut intervals = Vec::new();
+            let as_of = AsOf::Counter(target_tx_count);
+            let mut cursor = match self.current_entity_attribute_cursor(
+                *entity,
+                overlay.attribute(),
+                Some(&as_of),
+                CurrentValidTime::Any,
+            ) {
+                Ok(cursor) => cursor,
+                Err(error) if error.to_string().contains("history work exceeds") => {
+                    return Ok(CurrentProjectionTailRefresh::OverBudget);
+                }
+                Err(error) => return Err(error),
+            };
+            cursor.emit_each_visible_window = true;
+            loop {
+                let remaining = CURRENT_PROJECTION_TAIL_MAX_HISTORY.saturating_sub(history_entries);
+                if remaining == 0 {
+                    return Ok(CurrentProjectionTailRefresh::OverBudget);
+                }
+                let step = self.step_current_entity_attribute_interval_cursor(
+                    &mut cursor,
+                    remaining,
+                    &mut |value, valid_from, valid_to| {
+                        if valid_to > overlay.valid_time_floor() {
+                            intervals.push(ProjectedInterval::new(value, valid_from, valid_to));
+                        }
+                        Ok(())
+                    },
+                )?;
+                let (entries, complete) = match step {
+                    CurrentEntityAttributeStep::Yielded { entries } => (entries, false),
+                    CurrentEntityAttributeStep::Complete { entries } => (entries, true),
+                };
+                history_entries = history_entries.saturating_add(entries);
+                if complete {
+                    break;
+                }
+            }
+            replacements.push((*entity, intervals));
+        }
+        if self.current_projection_watermark() != (publication_generation, current_tx_count) {
+            anyhow::bail!("current projection publication changed during resident tail refresh")
+        }
+        if !overlay.install(target_tx_count, replacements) {
+            return Ok(CurrentProjectionTailRefresh::OverBudget);
+        }
+        Ok(CurrentProjectionTailRefresh::Ready {
+            tail_facts,
+            touched_entities: touched.len(),
+            history_entries,
+        })
+    }
+
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn refresh_current_projection_candidate(
         &self,
@@ -2127,7 +2250,6 @@ impl FactStorage {
             last_key: None,
             committed_complete: false,
             complete: false,
-            #[cfg(any(test, feature = "bench-internals"))]
             emit_each_visible_window: false,
         })
     }
@@ -2145,7 +2267,7 @@ impl FactStorage {
         )
     }
 
-    fn step_current_entity_attribute_interval_cursor(
+    pub(crate) fn step_current_entity_attribute_interval_cursor(
         &self,
         cursor: &mut CurrentEntityAttributeCursor,
         max_entries: usize,
@@ -2292,12 +2414,9 @@ impl FactStorage {
                     decode_index_value(encoded)?
                 };
                 output.push((encoded, value, *valid_from, *valid_to));
-                #[cfg(any(test, feature = "bench-internals"))]
                 if !cursor.emit_each_visible_window {
                     break;
                 }
-                #[cfg(not(any(test, feature = "bench-internals")))]
-                break;
             }
         }
         output.sort_unstable_by(|left, right| {

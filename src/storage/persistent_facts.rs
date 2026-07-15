@@ -1143,9 +1143,10 @@ impl<B: StorageBackend + 'static> PersistedProjectionReader<B> {
         tx_count: u64,
         valid_at: i64,
     ) -> Vec<crate::storage::current_projection_image::CurrentProjectionScanDescriptor> {
-        self.candidates
+        let mut descriptors = self
+            .candidates
             .iter()
-            .filter(|candidate| candidate.catalog.identity().tx_count() == tx_count)
+            .filter(|candidate| candidate.catalog.identity().tx_count() <= tx_count)
             .filter_map(|candidate| {
                 let entry = candidate.catalog.entry_at_or_before(attribute, valid_at)?;
                 Some(
@@ -1161,7 +1162,11 @@ impl<B: StorageBackend + 'static> PersistedProjectionReader<B> {
                     },
                 )
             })
-            .collect()
+            .collect::<Vec<_>>();
+        descriptors.sort_unstable_by(|left, right| {
+            right.identity.tx_count().cmp(&left.identity.tx_count())
+        });
+        descriptors
     }
 
     pub(crate) fn read_page(&self, page_id: u64) -> Result<Vec<u8>> {

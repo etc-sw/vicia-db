@@ -144,6 +144,14 @@ projection-routing-smoke OUTPUT_DIR="target/projection-routing/smoke":
 projection-routing-full OUTPUT_DIR="target/projection-routing/full":
     ./scripts/run-projection-routing-bench.sh full "{{OUTPUT_DIR}}"
 
+# Smoke the bounded resident-tail overlay above a 10K persisted projection.
+projection-tail-overlay-smoke OUTPUT_DIR="target/projection-tail-overlay/smoke":
+    ./scripts/run-projection-tail-overlay-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Admit the resident-tail route on the canonical clean 1M fixture.
+projection-tail-overlay-full OUTPUT_DIR="target/projection-tail-overlay/full":
+    ./scripts/run-projection-tail-overlay-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser

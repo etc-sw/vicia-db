@@ -518,6 +518,45 @@ impl Minigraf {
             let Some(mut aggregate) = executor.projected_attribute_aggregate_session(query)? else {
                 return Ok(None);
             };
+            let tail = if descriptor.identity.tx_count() < eligibility.tx_count() {
+                let admission = self
+                    .inner
+                    .projection_tail_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("projection tail cache mutex poisoned"))?
+                    .prepare(
+                        &self.inner.fact_storage,
+                        descriptor.identity,
+                        &descriptor.attribute,
+                        descriptor.valid_time_floor,
+                        eligibility.tx_count(),
+                    )?;
+                match admission {
+                    crate::graph::current_projection::CurrentProjectionTailAdmission::Ready {
+                        overlay,
+                        diagnostics,
+                    } => {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        crate::storage::current_projection_image::note_projection_tail(
+                            diagnostics,
+                            &overlay,
+                        );
+                        aggregate.note_scanned_rows(
+                            diagnostics
+                                .tail_facts
+                                .saturating_add(diagnostics.history_entries),
+                        )?;
+                        Some(overlay)
+                    }
+                    crate::graph::current_projection::CurrentProjectionTailAdmission::OverBudget => {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        crate::storage::current_projection_image::note_projection_tail_budget_fallback();
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let mut read_page = |page_id| reader.read_page(page_id);
             let Ok(mut scan) =
                 crate::storage::current_projection_image::CurrentProjectionScan::open(
@@ -540,7 +579,13 @@ impl Minigraf {
                     aggregate.valid_at(),
                     &mut read_page,
                     &mut |entity, encoded| {
-                        if semantic_error.is_none()
+                        if tail
+                            .as_ref()
+                            .is_some_and(|overlay| overlay.contains_entity(entity))
+                        {
+                            #[cfg(any(test, feature = "bench-internals"))]
+                            crate::storage::current_projection_image::note_projection_base_row_suppressed();
+                        } else if semantic_error.is_none()
                             && let Err(error) = aggregate.push_encoded(entity, encoded)
                         {
                             semantic_error = Some(error);
@@ -566,6 +611,26 @@ impl Minigraf {
                 };
                 aggregate.note_scanned_rows(rows)?;
                 if complete {
+                    if let Some(overlay) = &tail {
+                        let mut semantic_error = None;
+                        let overlay_rows = overlay.visit_at(
+                            aggregate.valid_at(),
+                            &mut |entity, encoded| {
+                                #[cfg(any(test, feature = "bench-internals"))]
+                                crate::storage::current_projection_image::note_projection_overlay_row_emitted();
+                                if semantic_error.is_none()
+                                    && let Err(error) = aggregate.push_encoded(entity, encoded)
+                                {
+                                    semantic_error = Some(error);
+                                }
+                                Ok(())
+                            },
+                        )?;
+                        if let Some(error) = semantic_error {
+                            return Err(error);
+                        }
+                        aggregate.note_scanned_rows(overlay_rows)?;
+                    }
                     if self.inner.fact_storage.current_projection_watermark() != captured_watermark
                     {
                         #[cfg(any(test, feature = "bench-internals"))]
@@ -1195,6 +1260,8 @@ struct Inner {
             crate::storage::backend::file::FileBackend,
         >,
     >,
+    #[cfg(not(target_arch = "wasm32"))]
+    projection_tail_cache: Mutex<crate::graph::current_projection::CurrentProjectionTailCache>,
     /// Configuration options.
     options: OpenOptions,
     /// Raw handles retain legacy automatic checkpointing. Capability handles
@@ -1652,6 +1719,9 @@ impl Minigraf {
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(ctx),
                 projection_reader,
+                projection_tail_cache: Mutex::new(
+                    crate::graph::current_projection::CurrentProjectionTailCache::default(),
+                ),
                 options: opts,
                 checkpoint_policy,
                 #[cfg(any(test, feature = "bench-internals"))]
@@ -1700,6 +1770,10 @@ impl Minigraf {
                 write_lock: Mutex::new(WriteContext::Memory),
                 #[cfg(not(target_arch = "wasm32"))]
                 projection_reader: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                projection_tail_cache: Mutex::new(
+                    crate::graph::current_projection::CurrentProjectionTailCache::default(),
+                ),
                 options: opts,
                 checkpoint_policy,
                 #[cfg(any(test, feature = "bench-internals"))]
@@ -2694,11 +2768,19 @@ impl Minigraf {
                 let decision = pfs.delta_maintenance_decision();
                 let advice = MaintenanceAdvice::from_delta_decision(decision);
                 let maintenance_outcome = pfs.run_idle_delta_maintenance()?;
-                Ok(MaintenanceOutcome::new(
+                let outcome = MaintenanceOutcome::new(
                     checkpoint_effect,
                     MaintenanceDeltaEffect::from_checkpoint_outcome(maintenance_outcome),
                     advice,
-                ))
+                );
+                if outcome.delta == MaintenanceDeltaEffect::Recompacted {
+                    self.inner
+                        .projection_tail_cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("projection tail cache mutex poisoned"))?
+                        .clear();
+                }
+                Ok(outcome)
             }
         }
     }
@@ -6193,7 +6275,7 @@ mod capability_tests {
     }
 
     #[test]
-    fn read_view_routes_exact_watermark_count_sum_and_falls_back_after_write() {
+    fn read_view_routes_exact_watermark_and_resident_tail_count_sum() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("projection-routing.graph");
         {
@@ -6251,10 +6333,79 @@ mod capability_tests {
             })
             .unwrap();
         assert_count_sum(current.query(query, 10).unwrap(), 3, 15);
-        let fallback = crate::storage::current_projection_image::projection_read_diagnostics();
-        assert_eq!(fallback.route_attempts, 1);
-        assert_eq!(fallback.completed_scans, 0);
-        assert_eq!(fallback.ledger_fallbacks, 1);
+        let tail = crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(tail.route_attempts, 1);
+        assert_eq!(tail.completed_scans, 1);
+        assert_eq!(tail.ledger_fallbacks, 0);
+        assert_eq!(tail.tail_route_attempts, 1);
+        assert_eq!(tail.tail_refreshes, 1);
+        assert_eq!(tail.tail_facts_visited, 1);
+        assert_eq!(tail.tail_entities_rebuilt, 1);
+        assert_eq!(tail.overlay_rows_emitted, 1);
+
+        assert_count_sum(current.query(query, 10).unwrap(), 3, 15);
+        let cached = crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(cached.completed_scans, 1);
+        assert_eq!(cached.tail_cache_hits, 1);
+    }
+
+    #[test]
+    fn resident_projection_tail_preserves_retract_and_valid_window_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-tail-semantics.graph");
+        let entity = "00000000-0000-0000-0000-000000000301";
+        {
+            let ledger = InteractiveLedger::open(&path).unwrap();
+            ledger
+                .execute_write(&format!(
+                    "(transact {{:valid-from \"2020-01-01\" :valid-to \"2030-01-01\"}} [[#uuid \"{entity}\" :card/rank 3]])"
+                ))
+                .unwrap();
+        }
+        let maintenance = MaintenanceLedger::open(&path).unwrap();
+        maintenance
+            .rebuild_current_projections(&[":card/rank".to_owned()])
+            .unwrap();
+        drop(maintenance);
+
+        let ledger = InteractiveLedger::open(&path).unwrap();
+        let query = "(query [:find (count ?v) (sum ?v) :where [?e :card/rank ?v]])";
+        ledger
+            .execute_write(&format!(
+                "(transact {{:valid-from \"2020-01-01\" :valid-to \"2030-01-01\"}} [[#uuid \"{entity}\" :card/rank 7]])"
+            ))
+            .unwrap();
+        let at = |valid_at| {
+            ledger
+                .read_view(ReadViewOptions {
+                    as_of: None,
+                    valid_at: ReadViewValidAt::Timestamp(valid_at),
+                })
+                .unwrap()
+        };
+        assert_count_sum(at(1_798_761_600_000).query(query, 20).unwrap(), 2, 10);
+
+        ledger
+            .execute_write(&format!(
+                "(retract {{:valid-from \"2020-01-01\" :valid-to \"2030-01-01\"}} [[#uuid \"{entity}\" :card/rank 3]])"
+            ))
+            .unwrap();
+        assert_count_sum(at(1_798_761_600_000).query(query, 30).unwrap(), 1, 7);
+        let QueryResult::QueryResults { results, .. } =
+            at(2_051_222_400_000).query(query, 30).unwrap()
+        else {
+            panic!("expected aggregate query result");
+        };
+        assert!(results.is_empty());
+
+        ledger
+            .execute_write("(transact [[:unrelated/item :unrelated/value 9]])")
+            .unwrap();
+        assert_count_sum(at(1_798_761_600_000).query(query, 40).unwrap(), 1, 7);
+        let diagnostics = crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(diagnostics.completed_scans, 1);
+        assert_eq!(diagnostics.ledger_fallbacks, 0);
+        assert_eq!(diagnostics.tail_entities_rebuilt, 0);
     }
 
     #[test]

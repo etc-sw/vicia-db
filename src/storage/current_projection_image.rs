@@ -34,6 +34,17 @@ pub struct ProjectionReadDiagnostics {
     pub rows_scanned: u64,
     pub rows_emitted: u64,
     pub full_image_decodes: u64,
+    pub tail_route_attempts: u64,
+    pub tail_cache_hits: u64,
+    pub tail_refreshes: u64,
+    pub tail_facts_visited: u64,
+    pub tail_entities_rebuilt: u64,
+    pub tail_history_entries: u64,
+    pub tail_overlay_rows: u64,
+    pub tail_overlay_bytes: u64,
+    pub tail_budget_fallbacks: u64,
+    pub base_rows_suppressed: u64,
+    pub overlay_rows_emitted: u64,
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -75,6 +86,58 @@ pub(crate) fn note_projection_ledger_fallback() {
     PROJECTION_READ_DIAGNOSTICS.with(|slot| {
         let mut diagnostics = slot.borrow_mut();
         diagnostics.ledger_fallbacks = diagnostics.ledger_fallbacks.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn note_projection_tail(
+    diagnostics: crate::graph::current_projection::CurrentProjectionTailDiagnostics,
+    overlay: &crate::graph::current_projection::CurrentProjectionTailOverlay,
+) {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut current = slot.borrow_mut();
+        current.tail_route_attempts = current.tail_route_attempts.saturating_add(1);
+        if diagnostics.cache_hit {
+            current.tail_cache_hits = current.tail_cache_hits.saturating_add(1);
+        } else {
+            current.tail_refreshes = current.tail_refreshes.saturating_add(1);
+        }
+        current.tail_facts_visited = current
+            .tail_facts_visited
+            .saturating_add(diagnostics.tail_facts as u64);
+        current.tail_entities_rebuilt = current
+            .tail_entities_rebuilt
+            .saturating_add(diagnostics.touched_entities as u64);
+        current.tail_history_entries = current
+            .tail_history_entries
+            .saturating_add(diagnostics.history_entries as u64);
+        current.tail_overlay_rows = overlay.replacement_rows() as u64;
+        current.tail_overlay_bytes = overlay.accounted_bytes() as u64;
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn note_projection_tail_budget_fallback() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.tail_route_attempts = diagnostics.tail_route_attempts.saturating_add(1);
+        diagnostics.tail_budget_fallbacks = diagnostics.tail_budget_fallbacks.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn note_projection_base_row_suppressed() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.base_rows_suppressed = diagnostics.base_rows_suppressed.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn note_projection_overlay_row_emitted() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.overlay_rows_emitted = diagnostics.overlay_rows_emitted.saturating_add(1);
     });
 }
 

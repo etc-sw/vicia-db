@@ -8,9 +8,11 @@
 
 use crate::graph::types::{EntityId, Value};
 use crate::storage::index::encode_value;
+use crate::storage::projection_catalog::ProjectionLedgerIdentity;
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub(crate) type IntervalVisitor<'a> = dyn FnMut(EntityId, &[u8], i64, i64) -> Result<()> + 'a;
 
@@ -30,7 +32,7 @@ pub struct CurrentProjectionRefreshDiagnostics {
     pub tx_count: u64,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProjectedInterval {
     value: Vec<u8>,
     valid_from: i64,
@@ -47,9 +49,236 @@ impl ProjectedInterval {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct OverlayEntry {
     intervals: Vec<ProjectedInterval>,
+}
+
+pub(crate) const CURRENT_PROJECTION_TAIL_MAX_FACTS: usize = 65_536;
+pub(crate) const CURRENT_PROJECTION_TAIL_MAX_HISTORY: usize = 65_536;
+pub(crate) const CURRENT_PROJECTION_TAIL_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Process-resident replacement rows above one immutable persisted projection.
+#[derive(Clone, Debug)]
+pub(crate) struct CurrentProjectionTailOverlay {
+    identity: ProjectionLedgerIdentity,
+    attribute: String,
+    valid_time_floor: i64,
+    tx_count: u64,
+    replacements: BTreeMap<EntityId, OverlayEntry>,
+    accounted_bytes: usize,
+}
+
+impl CurrentProjectionTailOverlay {
+    pub(crate) fn new(
+        identity: ProjectionLedgerIdentity,
+        attribute: &str,
+        valid_time_floor: i64,
+    ) -> Self {
+        Self {
+            identity,
+            attribute: attribute.to_owned(),
+            valid_time_floor,
+            tx_count: identity.tx_count(),
+            replacements: BTreeMap::new(),
+            accounted_bytes: attribute.len(),
+        }
+    }
+
+    pub(crate) fn matches(
+        &self,
+        identity: ProjectionLedgerIdentity,
+        attribute: &str,
+        valid_time_floor: i64,
+    ) -> bool {
+        self.identity == identity
+            && self.attribute == attribute
+            && self.valid_time_floor == valid_time_floor
+    }
+
+    pub(crate) fn attribute(&self) -> &str {
+        &self.attribute
+    }
+
+    pub(crate) fn valid_time_floor(&self) -> i64 {
+        self.valid_time_floor
+    }
+
+    pub(crate) fn tx_count(&self) -> u64 {
+        self.tx_count
+    }
+
+    pub(crate) fn contains_entity(&self, entity: EntityId) -> bool {
+        self.replacements.contains_key(&entity)
+    }
+
+    pub(crate) fn accounted_bytes(&self) -> usize {
+        self.accounted_bytes
+    }
+
+    pub(crate) fn replacement_rows(&self) -> usize {
+        self.replacements
+            .values()
+            .map(|entry| entry.intervals.len())
+            .sum()
+    }
+
+    pub(crate) fn install(
+        &mut self,
+        tx_count: u64,
+        replacements: Vec<(EntityId, Vec<ProjectedInterval>)>,
+    ) -> bool {
+        let mut next = BTreeMap::new();
+        for (entity, mut intervals) in replacements {
+            intervals.sort_unstable_by(|left, right| {
+                left.value
+                    .cmp(&right.value)
+                    .then_with(|| left.valid_from.cmp(&right.valid_from))
+                    .then_with(|| left.valid_to.cmp(&right.valid_to))
+            });
+            next.insert(entity, OverlayEntry { intervals });
+        }
+        for (entity, entry) in next {
+            self.replacements.insert(entity, entry);
+        }
+        let bytes = self.attribute.capacity().saturating_add(
+            self.replacements
+                .values()
+                .map(|entry| {
+                    entry
+                        .intervals
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<ProjectedInterval>())
+                        .saturating_add(
+                            entry
+                                .intervals
+                                .iter()
+                                .map(|interval| interval.value.capacity())
+                                .sum::<usize>(),
+                        )
+                })
+                .sum::<usize>(),
+        );
+        if bytes > CURRENT_PROJECTION_TAIL_MAX_BYTES {
+            return false;
+        }
+        self.accounted_bytes = bytes;
+        self.tx_count = tx_count;
+        true
+    }
+
+    pub(crate) fn visit_at(
+        &self,
+        valid_at: i64,
+        visit: &mut dyn FnMut(EntityId, &[u8]) -> Result<()>,
+    ) -> Result<usize> {
+        let mut rows = 0usize;
+        for (entity, entry) in &self.replacements {
+            for interval in &entry.intervals {
+                if interval_contains(interval.valid_from, interval.valid_to, valid_at) {
+                    visit(*entity, &interval.value)?;
+                }
+                rows = rows.saturating_add(1);
+            }
+        }
+        Ok(rows)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CurrentProjectionTailDiagnostics {
+    pub(crate) cache_hit: bool,
+    pub(crate) tail_facts: usize,
+    pub(crate) touched_entities: usize,
+    pub(crate) history_entries: usize,
+}
+
+pub(crate) enum CurrentProjectionTailAdmission {
+    Ready {
+        overlay: Arc<CurrentProjectionTailOverlay>,
+        diagnostics: CurrentProjectionTailDiagnostics,
+    },
+    OverBudget,
+}
+
+#[derive(Default)]
+pub(crate) struct CurrentProjectionTailCache {
+    overlay: Option<Arc<CurrentProjectionTailOverlay>>,
+    rejected: Option<(ProjectionLedgerIdentity, String, i64, u64)>,
+}
+
+impl CurrentProjectionTailCache {
+    pub(crate) fn prepare(
+        &mut self,
+        storage: &crate::graph::storage::FactStorage,
+        identity: ProjectionLedgerIdentity,
+        attribute: &str,
+        valid_time_floor: i64,
+        target_tx_count: u64,
+    ) -> Result<CurrentProjectionTailAdmission> {
+        if self.rejected.as_ref().is_some_and(|rejected| {
+            rejected.0 == identity
+                && rejected.1 == attribute
+                && rejected.2 == valid_time_floor
+                && rejected.3 == target_tx_count
+        }) {
+            return Ok(CurrentProjectionTailAdmission::OverBudget);
+        }
+        if let Some(overlay) = &self.overlay
+            && overlay.matches(identity, attribute, valid_time_floor)
+            && overlay.tx_count() == target_tx_count
+        {
+            return Ok(CurrentProjectionTailAdmission::Ready {
+                overlay: Arc::clone(overlay),
+                diagnostics: CurrentProjectionTailDiagnostics {
+                    cache_hit: true,
+                    ..CurrentProjectionTailDiagnostics::default()
+                },
+            });
+        }
+
+        let mut next = self
+            .overlay
+            .as_ref()
+            .filter(|overlay| overlay.matches(identity, attribute, valid_time_floor))
+            .map(|overlay| overlay.as_ref().clone())
+            .unwrap_or_else(|| {
+                CurrentProjectionTailOverlay::new(identity, attribute, valid_time_floor)
+            });
+        let refreshed =
+            storage.refresh_current_projection_tail_overlay(&mut next, target_tx_count)?;
+        let crate::graph::storage::CurrentProjectionTailRefresh::Ready {
+            tail_facts,
+            touched_entities,
+            history_entries,
+        } = refreshed
+        else {
+            self.rejected = Some((
+                identity,
+                attribute.to_owned(),
+                valid_time_floor,
+                target_tx_count,
+            ));
+            return Ok(CurrentProjectionTailAdmission::OverBudget);
+        };
+        let overlay = Arc::new(next);
+        self.overlay = Some(Arc::clone(&overlay));
+        self.rejected = None;
+        Ok(CurrentProjectionTailAdmission::Ready {
+            overlay,
+            diagnostics: CurrentProjectionTailDiagnostics {
+                cache_hit: false,
+                tail_facts,
+                touched_entities,
+                history_entries,
+            },
+        })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.overlay = None;
+        self.rejected = None;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -744,11 +973,13 @@ fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurrentProjectionBuilder, TemporalColumnBuilder, TemporalColumnDecoder, decode_value,
-        decode_varint,
+        CurrentProjectionBuilder, CurrentProjectionTailAdmission, CurrentProjectionTailCache,
+        TemporalColumnBuilder, TemporalColumnDecoder, decode_value, decode_varint,
     };
+    use crate::graph::storage::FactStorage;
     use crate::graph::types::Value;
     use crate::storage::index::encode_value;
+    use crate::storage::projection_catalog::ProjectionLedgerIdentity;
     use uuid::Uuid;
 
     #[test]
@@ -824,5 +1055,48 @@ mod tests {
         assert_eq!(candidate.integer_count_sum_at(150).unwrap(), (2, 10));
         assert_ne!(candidate.fingerprint().unwrap(), original);
         assert_eq!(candidate.row_count(), 2);
+    }
+
+    #[test]
+    fn resident_tail_memory_budget_falls_back_without_installing_partial_state() {
+        let storage = FactStorage::new();
+        let payload = "v".repeat(65_536);
+        let facts = (0..129_u128)
+            .map(|index| {
+                (
+                    Uuid::from_u128(index.saturating_add(1)),
+                    ":projection/value".to_owned(),
+                    Value::String(payload.clone()),
+                )
+            })
+            .collect();
+        storage.transact(facts, None).unwrap();
+        let mut cache = CurrentProjectionTailCache::default();
+        let admission = cache
+            .prepare(
+                &storage,
+                ProjectionLedgerIdentity::new(1, 0, 0),
+                ":projection/value",
+                i64::MIN,
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            admission,
+            CurrentProjectionTailAdmission::OverBudget
+        ));
+        let repeated = cache
+            .prepare(
+                &storage,
+                ProjectionLedgerIdentity::new(1, 0, 0),
+                ":projection/value",
+                i64::MIN,
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            repeated,
+            CurrentProjectionTailAdmission::OverBudget
+        ));
     }
 }

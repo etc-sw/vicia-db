@@ -90,6 +90,7 @@ pub(super) async fn run_idle_maintenance(db: &BrowserDb, force: bool) -> Result<
     inner.pfs = candidate;
     inner.fact_storage = candidate_storage;
     inner.paged = paged;
+    inner.projection_tail_cache.clear();
     drop(inner);
 
     Ok(maintenance_json(

@@ -90,6 +90,7 @@ struct BrowserDbInner {
     /// Exclude mutation/import/maintenance during that gap so no operation can
     /// observe or publish a half-resolved read snapshot.
     paged_read_in_flight: bool,
+    projection_tail_cache: crate::graph::current_projection::CurrentProjectionTailCache,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -280,6 +281,8 @@ impl BrowserDb {
                 paged: false,
                 open_mode: BrowserOpenMode::EagerCompatibility,
                 paged_read_in_flight: false,
+                projection_tail_cache:
+                    crate::graph::current_projection::CurrentProjectionTailCache::default(),
             })),
         })
     }
@@ -366,6 +369,8 @@ impl BrowserDb {
                 paged,
                 open_mode: mode,
                 paged_read_in_flight: false,
+                projection_tail_cache:
+                    crate::graph::current_projection::CurrentProjectionTailCache::default(),
             })),
         })
     }
@@ -789,6 +794,7 @@ impl BrowserDb {
         inner.pfs = reopened;
         inner.fact_storage = reopened_storage;
         inner.paged = paged;
+        inner.projection_tail_cache.clear();
         drop(inner);
 
         Ok(serde_json::json!({
@@ -1073,6 +1079,7 @@ impl BrowserDb {
         inner.pfs = new_pfs;
         inner.fact_storage = new_fact_storage;
         inner.paged = new_paged;
+        inner.projection_tail_cache.clear();
         Ok(())
     }
 }
@@ -1667,6 +1674,59 @@ impl BrowserDb {
             else {
                 return Ok(None);
             };
+            let tail = if descriptor.identity.tx_count() < eligibility.tx_count() {
+                let admission = loop {
+                    let prepared = {
+                        let mut inner = self.inner.borrow_mut();
+                        let storage = inner.fact_storage.clone();
+                        inner.projection_tail_cache.prepare(
+                            &storage,
+                            descriptor.identity,
+                            &descriptor.attribute,
+                            descriptor.valid_time_floor,
+                            eligibility.tx_count(),
+                        )
+                    };
+                    match prepared {
+                        Ok(admission) => break admission,
+                        Err(error) => match page_not_resident_id(&error) {
+                            Some(page_id) => {
+                                self.fetch_and_stage_page_window(page_id, BROWSER_IDB_BATCH_PAGES)
+                                    .await?;
+                                yield_browser_task().await?;
+                            }
+                            None => return Err(JsValue::from_str(&error.to_string())),
+                        },
+                    }
+                };
+                match admission {
+                    crate::graph::current_projection::CurrentProjectionTailAdmission::Ready {
+                        overlay,
+                        diagnostics,
+                    } => {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        crate::storage::current_projection_image::note_projection_tail(
+                            diagnostics,
+                            &overlay,
+                        );
+                        aggregate
+                            .note_scanned_rows(
+                                diagnostics
+                                    .tail_facts
+                                    .saturating_add(diagnostics.history_entries),
+                            )
+                            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                        Some(overlay)
+                    }
+                    crate::graph::current_projection::CurrentProjectionTailAdmission::OverBudget => {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        crate::storage::current_projection_image::note_projection_tail_budget_fallback();
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let mut scan = loop {
                 let mut read_page = |page_id| reader.read_page(page_id);
                 match crate::storage::current_projection_image::CurrentProjectionScan::open(
@@ -1705,7 +1765,13 @@ impl BrowserDb {
                     aggregate.valid_at(),
                     &mut read_page,
                     &mut |entity, encoded| {
-                        if semantic_error.is_none()
+                        if tail
+                            .as_ref()
+                            .is_some_and(|overlay| overlay.contains_entity(entity))
+                        {
+                            #[cfg(any(test, feature = "bench-internals"))]
+                            crate::storage::current_projection_image::note_projection_base_row_suppressed();
+                        } else if semantic_error.is_none()
                             && let Err(error) = aggregate.push_encoded(entity, encoded)
                         {
                             semantic_error = Some(error);
@@ -1746,6 +1812,27 @@ impl BrowserDb {
                     .note_scanned_rows(rows)
                     .map_err(|error| JsValue::from_str(&error.to_string()))?;
                 if complete {
+                    if let Some(overlay) = &tail {
+                        let mut semantic_error = None;
+                        let overlay_rows = overlay
+                            .visit_at(aggregate.valid_at(), &mut |entity, encoded| {
+                                #[cfg(any(test, feature = "bench-internals"))]
+                                crate::storage::current_projection_image::note_projection_overlay_row_emitted();
+                                if semantic_error.is_none()
+                                    && let Err(error) = aggregate.push_encoded(entity, encoded)
+                                {
+                                    semantic_error = Some(error);
+                                }
+                                Ok(())
+                            })
+                            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                        if let Some(error) = semantic_error {
+                            return Err(JsValue::from_str(&error.to_string()));
+                        }
+                        aggregate
+                            .note_scanned_rows(overlay_rows)
+                            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                    }
                     let watermark = self
                         .inner
                         .borrow()
@@ -1983,6 +2070,7 @@ impl BrowserDb {
         inner.pfs = restored;
         inner.fact_storage = restored_storage;
         inner.paged = restored_paged;
+        inner.projection_tail_cache.clear();
         inner.mutation_failure_rolled_back = true;
         drop(inner);
         Err(write_error)
@@ -4910,6 +4998,35 @@ mod tests {
         assert_eq!(third["arena_reused"], true);
         assert_eq!(third["after_pages"], second["after_pages"]);
 
+        db.execute(
+            r#"(transact [[#uuid "00000000-0000-0000-0000-000000000203" :card/rank 4]])"#
+                .to_owned(),
+        )
+        .await
+        .expect("append resident projection tail");
+        let tail_view = db.read_view().expect("resident-tail read view");
+        let tail: serde_json::Value = serde_json::from_str(
+            &tail_view
+                .query(
+                    "(query [:find (count ?rank) (sum ?rank) :where [?e :card/rank ?rank]])"
+                        .to_owned(),
+                    10,
+                    4_096,
+                )
+                .await
+                .expect("resident-tail browser aggregate"),
+        )
+        .unwrap();
+        assert_eq!(tail["results"][0][0], 2);
+        assert_eq!(tail["results"][0][1], 13);
+        let tail_diagnostics =
+            crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(tail_diagnostics.completed_scans, 1);
+        assert_eq!(tail_diagnostics.ledger_fallbacks, 0);
+        assert_eq!(tail_diagnostics.tail_refreshes, 1);
+        assert_eq!(tail_diagnostics.tail_facts_visited, 1);
+        assert_eq!(tail_diagnostics.overlay_rows_emitted, 1);
+
         let exported = db.export_graph_async().await.expect("export v13");
         let bytes = exported.to_vec();
         let header =
@@ -4941,7 +5058,7 @@ mod tests {
             .await
             .expect("query imported v13");
         let imported_result: serde_json::Value = serde_json::from_str(&imported_result).unwrap();
-        assert_eq!(imported_result["results"].as_array().unwrap().len(), 1);
+        assert_eq!(imported_result["results"].as_array().unwrap().len(), 2);
     }
 
     #[wasm_bindgen_test]
