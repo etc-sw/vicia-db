@@ -109,6 +109,8 @@ current executable checklist.
   rebuild and publication is 650.787 ms, adds 36.84 MiB peak RSS, emits a
   16,531,456-byte image (6.68%), and reopens the exact
   `500,000/249,999,250,000` current aggregate.
-- [ ] Record the 1M disposable-worker browser time/process-PSS receipt and run
-  the Vetch package differential suite. Keep production query routing and the
-  Vetch package unchanged until both pass.
+- [x] Record the clean 1M Chrome 150 disposable-worker receipt. Publication
+  takes 4,146.4 ms, adds 485.40 MiB sampled PSS, advances the exact v12 prefix
+  to v13, and terminates the worker; every 30-second/1-GiB resource gate passes.
+- [ ] Run the Vetch package differential suite from the clean candidate. Keep
+  production query routing and the Vetch package unchanged until it passes.

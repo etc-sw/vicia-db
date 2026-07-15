@@ -1,0 +1,123 @@
+{
+  "schema": "vicia.browser-projection-maintenance.v1",
+  "fixture": "/target/browser-projection/fixture.graph",
+  "chrome": "/usr/local/bin/google-chrome",
+  "chromeVersion": "Google Chrome for Testing 150.0.7871.115",
+  "profile": "/tmp/vicia-r2c2-projection-profile-69afe5c",
+  "import": {
+    "result": {
+      "fixtureBytes": 247562240,
+      "fetchMs": 594.3,
+      "openEmptyMs": 15.6,
+      "importMs": 5843.5,
+      "totalMs": 6453.4,
+      "heapBeforeBytes": 1022547,
+      "heapAfterBytes": 248720468,
+      "stats": {
+        "idbCount": 60440,
+        "headerVersion": 12,
+        "headerPageCount": 60440,
+        "headerNodeCount": 1000000
+      }
+    },
+    "rss": {
+      "measurement": "200 ms sampled sum of Linux Chrome process-tree RSS; shared pages may be counted once per process",
+      "beforeBytes": 993800192,
+      "peakBytes": 2645934080,
+      "afterBytes": 2236645376,
+      "peakDeltaBytes": 1652133888
+    },
+    "pss": {
+      "measurement": "200 ms sampled sum of Linux Chrome process-tree proportional set size",
+      "beforeBytes": 385629184,
+      "peakBytes": 2032138240,
+      "afterBytes": 1552453632,
+      "peakDeltaBytes": 1646509056
+    },
+    "private": {
+      "measurement": "200 ms sampled sum of Linux Chrome process-tree private clean plus private dirty bytes",
+      "beforeBytes": 205586432,
+      "peakBytes": 1849135104,
+      "afterBytes": 1369358336,
+      "peakDeltaBytes": 1643548672
+    }
+  },
+  "maintenance": {
+    "result": {
+      "elapsedMs": 4146.4,
+      "outcome": {
+        "after_pages": 64477,
+        "arena_reused": false,
+        "attribute_count": 1,
+        "base_generation": 1,
+        "before_pages": 60440,
+        "checkpoint": "noop",
+        "generation": 1,
+        "manifest_generation": 0,
+        "projection_bytes": 16531456,
+        "row_count": 500000,
+        "tx_count": 1000,
+        "valid_time_floor": 1784100996664
+      },
+      "heapBeforeBytes": 950322,
+      "heapAfterBytes": 1004585,
+      "before": {
+        "idbCount": 60440,
+        "headerVersion": 12,
+        "headerPageCount": 60440,
+        "headerNodeCount": 1000000
+      },
+      "after": {
+        "idbCount": 64477,
+        "headerVersion": 13,
+        "headerPageCount": 64477,
+        "headerNodeCount": 1000000
+      },
+      "workerTerminated": true
+    },
+    "rss": {
+      "measurement": "200 ms sampled sum of Linux Chrome process-tree RSS; shared pages may be counted once per process",
+      "beforeBytes": 1212534784,
+      "peakBytes": 1798537216,
+      "afterBytes": 1700921344,
+      "peakDeltaBytes": 586002432
+    },
+    "pss": {
+      "measurement": "200 ms sampled sum of Linux Chrome process-tree proportional set size",
+      "beforeBytes": 410576896,
+      "peakBytes": 919560192,
+      "afterBytes": 608356352,
+      "peakDeltaBytes": 508983296
+    },
+    "private": {
+      "measurement": "200 ms sampled sum of Linux Chrome process-tree private clean plus private dirty bytes",
+      "beforeBytes": 225845248,
+      "peakBytes": 731877376,
+      "afterBytes": 419483648,
+      "peakDeltaBytes": 506032128
+    }
+  },
+  "source": {
+    "commit": "69afe5ca923255e1e915bd46d37dcd0116b33b00",
+    "trackedClean": true,
+    "fixtureSha256": "4310367075767341c8c7a75fcc30cb2efb12fe9100ed16e764f2952fd02a6074",
+    "wasmSha256": "292304d494a99367ae324b2b66f9d75aa74f876dfd805f1c37c0f97755e0dda0"
+  },
+  "environment": {
+    "platform": "linux",
+    "release": "6.6.87.2-microsoft-standard-WSL2",
+    "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 33655283712,
+    "node": "v23.11.1"
+  },
+  "admissionEligible": true,
+  "gates": {
+    "exactAuthority": true,
+    "elapsed": true,
+    "imageBudget": true,
+    "rss": true,
+    "pss": true
+  },
+  "admitted": true
+}

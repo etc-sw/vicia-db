@@ -2282,9 +2282,21 @@ The authoritative receipt is preserved at
 with SHA-256
 `dd5735e30859d3cc142fb1e5741a7e398e952856088d5c531c7892fb99ead188`.
 
-This native receipt complements the 77-test real-Chrome functional suite. Browser
-disposable-worker time and process-PSS remain a separate host-level receipt;
-neither receipt changes production query routing or the Vetch package.
+The separate Chrome 150 disposable-worker receipt binds the exact fixture and
+WASM hashes. One 1M rebuild takes 4,146.4 ms, adds 586,002,432 B sampled
+process-tree RSS and 508,983,296 B PSS, publishes the identical 16,531,456-byte
+image, advances IndexedDB from 60,440 v12 pages to 64,477 v13 pages, and
+terminates the worker. This is well inside the 30-second and 1 GiB RSS/PSS
+gates and far below the earlier 2.09 GiB recompact PSS delta.
+
+The authoritative browser receipt is preserved at
+`benchmarks/baselines/browser-projection-maintenance/2026-07-15-hal7800-r2c2-full/receipt.json`
+with SHA-256
+`9420f7c9c6532e170bc0d9991b66c1559d98efb4876ac308575fe6687ac1c867`.
+Its validator derives every gate from raw page, timing, and memory observations;
+the mutation audit rejects fixture, authority, timing, PSS, and verdict drift.
+Neither native nor browser admission changes production query routing or the
+Vetch package.
 
 ```bash
 just projection-maintenance-smoke

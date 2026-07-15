@@ -223,6 +223,13 @@ termination and not a general device-memory floor. A legacy v10 database's
 first `openPaged()` also follows an O(total) migration path and uses the same
 worker lifecycle during Vetch cutover.
 
+R2-C2 adds a smaller O(total) worker measurement for current-projection
+publication. On the same Chrome 150 host, one 1M attribute rebuild took
+4.146 seconds with a 485.40 MiB sampled process-tree PSS delta, published
+60,440 v12 pages as 64,477 v13 pages, and terminated the disposable worker.
+The derived 16,531,456-byte image remains subordinate to the ledger; foreground
+reads do not route through it in this slice.
+
 Vetch `b3a1107` supplies the browser caller evidence: it observes maintenance
 advice centrally, schedules soft and hard idle demand outside the foreground
 operation, acquires the same Web Lock in a disposable worker, opens

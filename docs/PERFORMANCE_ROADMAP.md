@@ -700,6 +700,8 @@ and commits it with page 0 in one IndexedDB transaction. The 77-test Chrome
 suite proves v13 reopen, strict import/export, abort preservation, and legacy
 migration. The clean 1M native public-maintenance receipt passes at 650.787 ms
 with a 36.84 MiB peak-RSS delta and a 16,531,456-byte image (6.68% of the
-source). The remaining R2-C2 closeout is the disposable-worker browser time/PSS
-receipt and the Vetch package differential suite. Keep production query routing
-and the Vetch package unchanged until those gates pass.
+source). The Chrome 150 disposable-worker receipt also passes at 4,146.4 ms
+with a 485.40 MiB sampled PSS delta, exact v12-to-v13 page authority, and worker
+termination. The remaining R2-C2 closeout is the Vetch package differential
+suite. Keep production query routing and the Vetch package unchanged until that
+gate passes.
