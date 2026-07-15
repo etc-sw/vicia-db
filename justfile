@@ -104,6 +104,14 @@ projection-page-image-smoke OUTPUT_DIR="target/projection-page-image/smoke":
 projection-page-image-full OUTPUT_DIR="target/projection-page-image/full":
     ./scripts/run-projection-page-image-bench.sh full "{{OUTPUT_DIR}}"
 
+# Smoke the paired source-versus-decoded R2-B query-tail receipt.
+projection-page-tail-smoke OUTPUT_DIR="target/projection-page-tail/smoke":
+    ./scripts/run-projection-page-tail-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run the clean 1M paired source-versus-decoded R2-B query-tail gate.
+projection-page-tail-full OUTPUT_DIR="target/projection-page-tail/full":
+    ./scripts/run-projection-page-tail-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser

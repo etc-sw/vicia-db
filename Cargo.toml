@@ -132,6 +132,11 @@ name = "current-projection-bench"
 path = "src/bin/current_projection_bench.rs"
 required-features = ["bench-internals"]
 
+[[bin]]
+name = "current-projection-tail-bench"
+path = "src/bin/current_projection_tail_bench.rs"
+required-features = ["bench-internals"]
+
 [features]
 default = []
 wasm = []
