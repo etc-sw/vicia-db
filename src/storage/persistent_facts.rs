@@ -23,14 +23,21 @@ use crate::storage::delta_manifest::{
 use crate::storage::delta_segment::{DeltaSegment, write_segment_pages};
 use crate::storage::header_extension::{
     BasePageIntegrityDescriptor, HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
-    HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection, build_header_page,
+    HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection, ProjectionCatalogSlot,
+    ProjectionCatalogSlotName, ProjectionCatalogSlotSelection, build_header_page,
     build_header_page_with_extension, select_header_manifest_slot_from_page0,
+    select_projection_catalog_slots,
 };
 use crate::storage::index::{AevtKey, AvetKey, EavtKey, FactRef, VaetKey, encode_value};
 use crate::storage::packed_pages::{PackedFactPacker, pack_facts, visit_fact_refs_in_pages};
 use crate::storage::page_integrity::{
     BasePageIntegrityCatalog, catalog_crc32,
     compute_page_checksum as compute_integrity_page_checksum,
+};
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::storage::projection_catalog::ProjectionCatalogEntry;
+use crate::storage::projection_catalog::{
+    ProjectionCatalog, ProjectionLedgerIdentity, read_catalog,
 };
 use crate::storage::{
     CommittedFactReader, CommittedIndexReader, FileHeader, PAGE_SIZE, StorageBackend,
@@ -692,7 +699,7 @@ impl BrowserV11BootstrapPlan {
         let header = FileHeader::from_bytes(page0)?;
         header.validate()?;
         if header.version < crate::storage::INTEGRITY_FORMAT_VERSION
-            || header.version > crate::storage::FORMAT_VERSION
+            || header.version > crate::storage::MAX_READABLE_FORMAT_VERSION
         {
             anyhow::bail!(
                 "Sparse browser bootstrap requires a paged-ready v{}..=v{} format, got v{}",
@@ -1096,6 +1103,32 @@ struct FactV1 {
 /// only pending writes live in the mutable in-memory [`FactStorage`]. Full base
 /// publication and copy-on-write recompact write data and integrity metadata
 /// before page 0, while delta checkpoints preserve the selected base identity.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // Selected metadata becomes query-visible in R2-C3 routing.
+struct PersistedProjectionCatalogCandidate {
+    slot: ProjectionCatalogSlotName,
+    descriptor: ProjectionCatalogSlot,
+    catalog: ProjectionCatalog,
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Repository-only location receipt for one committed projection publication.
+pub struct ProjectionPublicationReceipt {
+    /// Monotonic projection catalog generation.
+    pub generation: u64,
+    /// First page of the persisted projection image.
+    pub image_page_start: u64,
+    /// Number of pages occupied by the image.
+    pub image_page_count: u64,
+    /// First page of the catalog that describes the image.
+    pub catalog_page_start: u64,
+    /// Number of pages occupied by the catalog.
+    pub catalog_page_count: u64,
+    /// Page count made visible by the page-0 commit.
+    pub published_page_count: u64,
+}
+
 pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     backend: Arc<Mutex<B>>,
     page_cache: Arc<PageCache>,
@@ -1104,6 +1137,8 @@ pub struct PersistentFactStorage<B: StorageBackend + 'static> {
     last_checkpointed_tx_count: u64,
     header_manifest_selection: HeaderManifestSlotSelection,
     delta_manifest_selection: PersistedManifestSelection,
+    projection_catalog_candidates: Vec<PersistedProjectionCatalogCandidate>,
+    projection_catalog_recovery_required: bool,
     /// Shared committed delta state for the selected manifest. A checkpoint
     /// extends these maps with only the newly published segment instead of
     /// rereading or rematerializing the complete selected lineage.
@@ -1160,6 +1195,8 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             last_checkpointed_tx_count: 0,
             header_manifest_selection: HeaderManifestSlotSelection::NoDeltaManifest,
             delta_manifest_selection: PersistedManifestSelection::NoDeltaManifest,
+            projection_catalog_candidates: Vec::new(),
+            projection_catalog_recovery_required: false,
             resident_delta_segment_count: 0,
             resident_delta_facts: None,
             resident_delta_indexes: None,
@@ -1554,7 +1591,11 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             } => Ok((
                 HeaderExtension::new(extension.primary(), descriptor)
                     .with_base_fact_page_start(extension.base_fact_page_start())?
-                    .with_base_integrity(extension.base_integrity())?,
+                    .with_base_integrity(extension.base_integrity())?
+                    .with_projection_catalog_slots(
+                        extension.projection_primary(),
+                        extension.projection_secondary(),
+                    )?,
                 HeaderManifestSlotName::Secondary,
             )),
             HeaderManifestSlotSelection::Use {
@@ -1563,14 +1604,22 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             } => Ok((
                 HeaderExtension::new(descriptor, extension.secondary())
                     .with_base_fact_page_start(extension.base_fact_page_start())?
-                    .with_base_integrity(extension.base_integrity())?,
+                    .with_base_integrity(extension.base_integrity())?
+                    .with_projection_catalog_slots(
+                        extension.projection_primary(),
+                        extension.projection_secondary(),
+                    )?,
                 HeaderManifestSlotName::Primary,
             )),
             HeaderManifestSlotSelection::NoDeltaManifest
             | HeaderManifestSlotSelection::RecoveryRequired { .. } => Ok((
                 HeaderExtension::new(descriptor, HeaderManifestSlot::empty())
                     .with_base_fact_page_start(extension.base_fact_page_start())?
-                    .with_base_integrity(extension.base_integrity())?,
+                    .with_base_integrity(extension.base_integrity())?
+                    .with_projection_catalog_slots(
+                        extension.projection_primary(),
+                        extension.projection_secondary(),
+                    )?,
                 HeaderManifestSlotName::Primary,
             )),
         }
@@ -1730,6 +1779,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let integrity =
             write_base_integrity_catalog(&mut *backend, 1, 1, total_data_pages, next4, None)?;
         let mut header = FileHeader::new();
+        header.version = self
+            .loaded_format_version
+            .max(crate::storage::FORMAT_VERSION);
         header.page_count = integrity.published_page_count;
         header.node_count = node_count;
         header.last_checkpointed_tx_count = checkpoint_tx_count;
@@ -2055,6 +2107,9 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
         let mut header = FileHeader::new();
+        header.version = self
+            .loaded_format_version
+            .max(crate::storage::FORMAT_VERSION);
         header.page_count = integrity.published_page_count;
         header.node_count = node_count;
         header.last_checkpointed_tx_count = checkpoint_tx_count;
@@ -2133,6 +2188,100 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             diagnostics.publish_finalize_micros = checkpoint_elapsed_micros(phase_started);
         });
         Ok(CheckpointOutcome::FullRebuildFromVisibleDelta)
+    }
+
+    fn persisted_projection_identity(&self, header: &FileHeader) -> ProjectionLedgerIdentity {
+        let base_generation = self
+            .base_integrity
+            .as_ref()
+            .map(|catalog| catalog.base_generation())
+            .unwrap_or(0);
+        match &self.delta_manifest_selection {
+            PersistedManifestSelection::Use { manifest, .. } => ProjectionLedgerIdentity::new(
+                base_generation,
+                manifest.generation(),
+                header
+                    .last_checkpointed_tx_count
+                    .max(manifest.high_tx_count()),
+            ),
+            PersistedManifestSelection::NoDeltaManifest
+            | PersistedManifestSelection::RecoveryRequired { .. } => {
+                ProjectionLedgerIdentity::new(base_generation, 0, header.last_checkpointed_tx_count)
+            }
+        }
+    }
+
+    fn load_projection_catalog_candidates(
+        &mut self,
+        header: &FileHeader,
+        extension: Option<&HeaderExtension>,
+    ) -> Result<()> {
+        self.projection_catalog_candidates.clear();
+        self.projection_catalog_recovery_required = false;
+        if header.version < crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION
+        {
+            return Ok(());
+        }
+        let extension = extension
+            .ok_or_else(|| anyhow::anyhow!("v13 database is missing its header extension"))?;
+        let selection = select_projection_catalog_slots(extension);
+        let ordered = match selection {
+            ProjectionCatalogSlotSelection::NoProjectionCatalog => return Ok(()),
+            ProjectionCatalogSlotSelection::RecoveryRequired => {
+                self.projection_catalog_recovery_required = true;
+                return Ok(());
+            }
+            ProjectionCatalogSlotSelection::Candidates { newest, previous } => {
+                [Some(newest), previous]
+            }
+        };
+        let expected_identity = self.persisted_projection_identity(header);
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        for candidate in ordered.into_iter().flatten() {
+            let (slot, descriptor) = candidate;
+            let catalog_end = descriptor
+                .catalog_page_start()
+                .checked_add(descriptor.catalog_page_count())
+                .ok_or_else(|| anyhow::anyhow!("Projection catalog page range overflow"))?;
+            if catalog_end > header.page_count {
+                self.projection_catalog_recovery_required = true;
+                continue;
+            }
+            let catalog = match read_catalog(
+                &*backend,
+                descriptor.catalog_page_start(),
+                descriptor.catalog_page_count(),
+                descriptor.catalog_len(),
+                descriptor.catalog_checksum(),
+            ) {
+                Ok(catalog) => catalog,
+                Err(_) => {
+                    self.projection_catalog_recovery_required = true;
+                    continue;
+                }
+            };
+            if catalog.generation() != descriptor.generation() {
+                self.projection_catalog_recovery_required = true;
+                continue;
+            }
+            if catalog.identity() != expected_identity {
+                continue;
+            }
+            if validate_projection_catalog_layout(&catalog, descriptor).is_err() {
+                self.projection_catalog_recovery_required = true;
+                continue;
+            }
+            self.projection_catalog_candidates
+                .push(PersistedProjectionCatalogCandidate {
+                    slot,
+                    descriptor,
+                    catalog,
+                });
+        }
+        Ok(())
     }
 
     /// Load all facts from the backend into memory.
@@ -2216,6 +2365,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         }
         self.header_manifest_selection = header_manifest_selection;
         self.delta_manifest_selection = delta_manifest_selection;
+        self.load_projection_catalog_candidates(&header, header_extension.as_ref())?;
         let selected_delta_manifest = self.delta_manifest_selection.manifest().cloned();
         let selected_delta_has_segments = selected_delta_manifest
             .as_ref()
@@ -2713,7 +2863,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         };
         let curr_header = FileHeader::from_bytes(&curr_header_page)?;
         if curr_header.version < crate::storage::INTEGRITY_FORMAT_VERSION
-            || curr_header.version > crate::storage::FORMAT_VERSION
+            || curr_header.version > crate::storage::MAX_READABLE_FORMAT_VERSION
             || curr_header.fact_page_format != FACT_PAGE_FORMAT_PACKED
             || curr_header.eavt_root_page == 0
             || curr_header.aevt_root_page == 0
@@ -3074,6 +3224,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         #[cfg(feature = "bench-internals")]
         let phase_started = Instant::now();
         let mut header = FileHeader::new(); // current format
+        header.version = curr_header.version.max(crate::storage::FORMAT_VERSION);
         header.page_count = integrity.published_page_count;
         let pending_len = u64::try_from(pending_facts.len())
             .map_err(|_| anyhow::anyhow!("pending fact count exceeds u64::MAX"))?;
@@ -3156,9 +3307,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn projection_ledger_identity(
-        &self,
-    ) -> Result<crate::storage::current_projection_image::ProjectionLedgerIdentity> {
+    pub(crate) fn projection_ledger_identity(&self) -> Result<ProjectionLedgerIdentity> {
         let base_generation = self
             .base_integrity
             .as_ref()
@@ -3185,13 +3334,233 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
                 "current projection image cannot bind to an inconsistent manifest selection"
             ),
         };
-        Ok(
-            crate::storage::current_projection_image::ProjectionLedgerIdentity::new(
-                base_generation,
-                manifest_generation,
-                self.storage.current_tx_count(),
+        Ok(ProjectionLedgerIdentity::new(
+            base_generation,
+            manifest_generation,
+            self.storage.current_tx_count(),
+        ))
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn publish_current_projection_image(
+        &mut self,
+        image: &crate::storage::current_projection_image::CurrentProjectionPageImage,
+        attribute: &str,
+        valid_time_floor: i64,
+    ) -> Result<ProjectionPublicationReceipt> {
+        if self.dirty {
+            anyhow::bail!("Projection publication requires a clean durable ledger");
+        }
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        let captured_page0 = backend.read_page(0)?;
+        let captured_header = FileHeader::from_bytes(&captured_page0)?;
+        captured_header.validate()?;
+        if captured_header.version < crate::storage::INTEGRITY_FORMAT_VERSION
+            || captured_header.version > crate::storage::MAX_READABLE_FORMAT_VERSION
+        {
+            anyhow::bail!("Projection publication requires a paged-ready ledger format");
+        }
+        let durable_identity = self.persisted_projection_identity(&captured_header);
+        if image.identity() != durable_identity
+            || self.storage.current_tx_count() != durable_identity.tx_count()
+        {
+            anyhow::bail!("Projection image is not bound to the selected durable ledger");
+        }
+        if image.as_bytes().is_empty()
+            || !image.as_bytes().len().is_multiple_of(PAGE_SIZE)
+            || image.page_count() == 0
+        {
+            anyhow::bail!("Projection image is not a complete page range");
+        }
+
+        let extension = HeaderExtension::read_from_page0(captured_header.version, &captured_page0)?
+            .ok_or_else(|| anyhow::anyhow!("Projection publication requires a header extension"))?;
+        let slot_selection = select_projection_catalog_slots(&extension);
+        let highest_generation = [
+            extension.projection_primary(),
+            extension.projection_secondary(),
+        ]
+        .into_iter()
+        .filter(|slot| slot.is_selectable())
+        .map(ProjectionCatalogSlot::generation)
+        .max()
+        .unwrap_or(0);
+        let generation = highest_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Projection catalog generation overflow"))?;
+        let image_page_start = captured_header.page_count;
+        for (index, page) in image.as_bytes().chunks_exact(PAGE_SIZE).enumerate() {
+            let page_id = image_page_start
+                .checked_add(u64::try_from(index)?)
+                .ok_or_else(|| anyhow::anyhow!("Projection image page id overflow"))?;
+            backend.write_page(page_id, page)?;
+        }
+        backend.sync()?;
+
+        let entry = ProjectionCatalogEntry::new(
+            attribute.to_owned(),
+            valid_time_floor,
+            image_page_start,
+            image.page_count(),
+            image.logical_bytes(),
+            image.row_count(),
+            image.fingerprint(),
+        )?;
+        let catalog = ProjectionCatalog::new(generation, durable_identity, vec![entry])?;
+        let (catalog_bytes, catalog_len, catalog_checksum) = catalog.encode_pages()?;
+        let catalog_page_start = image_page_start
+            .checked_add(image.page_count())
+            .ok_or_else(|| anyhow::anyhow!("Projection catalog page start overflow"))?;
+        for (index, page) in catalog_bytes.chunks_exact(PAGE_SIZE).enumerate() {
+            let page_id = catalog_page_start
+                .checked_add(u64::try_from(index)?)
+                .ok_or_else(|| anyhow::anyhow!("Projection catalog page id overflow"))?;
+            backend.write_page(page_id, page)?;
+        }
+        backend.sync()?;
+
+        let current_page0 = backend.read_page(0)?;
+        if current_page0 != captured_page0 {
+            anyhow::bail!("Ledger page 0 changed during projection publication");
+        }
+        let catalog_page_count = u64::try_from(catalog_bytes.len() / PAGE_SIZE)?;
+        let descriptor = ProjectionCatalogSlot::new(
+            generation,
+            catalog_page_start,
+            catalog_page_count,
+            catalog_len,
+            catalog_checksum,
+        )?;
+        let (projection_primary, projection_secondary, published_slot) = match slot_selection {
+            ProjectionCatalogSlotSelection::Candidates {
+                newest: (ProjectionCatalogSlotName::Primary, _),
+                ..
+            } => (
+                extension.projection_primary(),
+                descriptor,
+                ProjectionCatalogSlotName::Secondary,
             ),
-        )
+            ProjectionCatalogSlotSelection::Candidates {
+                newest: (ProjectionCatalogSlotName::Secondary, _),
+                ..
+            } => (
+                descriptor,
+                extension.projection_secondary(),
+                ProjectionCatalogSlotName::Primary,
+            ),
+            ProjectionCatalogSlotSelection::NoProjectionCatalog
+            | ProjectionCatalogSlotSelection::RecoveryRequired => (
+                descriptor,
+                extension.projection_secondary(),
+                ProjectionCatalogSlotName::Primary,
+            ),
+        };
+        let published_extension = HeaderExtension::new(extension.primary(), extension.secondary())
+            .with_base_fact_page_start(extension.base_fact_page_start())?
+            .with_base_integrity(extension.base_integrity())?
+            .with_projection_catalog_slots(projection_primary, projection_secondary)?;
+        let published_page_count = catalog_page_start
+            .checked_add(catalog_page_count)
+            .ok_or_else(|| anyhow::anyhow!("Projection publication page count overflow"))?;
+        let mut published_header = captured_header;
+        published_header.version =
+            crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION;
+        published_header.page_count = published_page_count;
+        published_header.header_checksum = compute_header_checksum(&published_header);
+        let published_page0 =
+            build_header_page_with_extension(published_header, published_extension.clone())?;
+        backend.write_page(0, &published_page0)?;
+        backend.sync()?;
+        drop(backend);
+
+        self.loaded_format_version = published_header.version;
+        self.load_projection_catalog_candidates(&published_header, Some(&published_extension))?;
+        if !self
+            .projection_catalog_candidates
+            .iter()
+            .any(|candidate| candidate.slot == published_slot && candidate.descriptor == descriptor)
+        {
+            anyhow::bail!("Published projection catalog could not be selected");
+        }
+        Ok(ProjectionPublicationReceipt {
+            generation,
+            image_page_start,
+            image_page_count: image.page_count(),
+            catalog_page_start,
+            catalog_page_count,
+            published_page_count,
+        })
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn load_current_projection_image(
+        &self,
+        attribute: &str,
+        valid_time_floor: i64,
+    ) -> Result<Option<crate::graph::current_projection::CurrentProjectionCandidate>> {
+        let mut matching_descriptor = false;
+        for candidate in &self.projection_catalog_candidates {
+            if candidate.catalog.identity().tx_count() != self.storage.current_tx_count() {
+                continue;
+            }
+            let Some(entry) = candidate.catalog.entry(attribute, valid_time_floor) else {
+                continue;
+            };
+            matching_descriptor = true;
+            let page_count = usize::try_from(entry.image_page_count())
+                .map_err(|_| anyhow::anyhow!("Projection image page count exceeds usize"))?;
+            let capacity = page_count
+                .checked_mul(PAGE_SIZE)
+                .ok_or_else(|| anyhow::anyhow!("Projection image capacity overflow"))?;
+            let mut bytes = Vec::with_capacity(capacity);
+            let backend = self
+                .backend
+                .lock()
+                .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+            let mut readable = true;
+            for offset in 0..entry.image_page_count() {
+                let page_id = entry
+                    .image_page_start()
+                    .checked_add(offset)
+                    .ok_or_else(|| anyhow::anyhow!("Projection image page id overflow"))?;
+                match backend.read_page(page_id) {
+                    Ok(page) if page.len() == PAGE_SIZE => bytes.extend_from_slice(&page),
+                    _ => {
+                        readable = false;
+                        break;
+                    }
+                }
+            }
+            drop(backend);
+            if !readable {
+                continue;
+            }
+            let decoded = crate::storage::current_projection_image::decode(
+                &bytes,
+                candidate.catalog.identity(),
+                attribute,
+                valid_time_floor,
+                self.storage.current_projection_watermark().0,
+            );
+            let Ok(decoded) = decoded else {
+                continue;
+            };
+            if decoded.row_count() != usize::try_from(entry.row_count())?
+                || decoded.fingerprint()? != entry.fingerprint()
+                || crate::storage::current_projection_image::logical_bytes(&bytes)?
+                    != entry.image_logical_bytes()
+            {
+                continue;
+            }
+            return Ok(Some(decoded));
+        }
+        if matching_descriptor || self.projection_catalog_recovery_required {
+            anyhow::bail!("No valid matching projection image remains");
+        }
+        Ok(None)
     }
 
     #[cfg(test)]
@@ -3379,7 +3748,7 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let header = FileHeader::from_bytes(&page0)?;
         header.validate()?;
         if header.version < crate::storage::INTEGRITY_FORMAT_VERSION
-            || header.version > crate::storage::FORMAT_VERSION
+            || header.version > crate::storage::MAX_READABLE_FORMAT_VERSION
         {
             anyhow::bail!("Paged browser export requires a paged-ready file format");
         }
@@ -3865,11 +4234,31 @@ fn validate_v11_base_integrity_descriptor(
             && header.aevt_root_page == 0
             && header.avet_root_page == 0
             && header.vaet_root_page == 0;
+        let canonical_empty_tail = if header.version
+            >= crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION
+        {
+            let slots = [
+                extension.projection_primary(),
+                extension.projection_secondary(),
+            ];
+            header.page_count == 1
+                || (slots.iter().any(|slot| !slot.is_empty())
+                    && slots
+                        .iter()
+                        .filter(|slot| slot.is_selectable())
+                        .all(|slot| {
+                            slot.catalog_page_start()
+                                .checked_add(slot.catalog_page_count())
+                                .is_some_and(|end| end <= header.page_count)
+                        }))
+        } else {
+            header.page_count == 1
+        };
         if header.fact_page_count == 0
             && header.node_count == 0
             && roots_are_empty
             && extension.base_fact_page_start() == 1
-            && header.page_count == 1
+            && canonical_empty_tail
         {
             return Ok(None);
         }
@@ -3993,6 +4382,32 @@ fn build_header_page_with_base_integrity(
     } else {
         build_header_page(header)
     }
+}
+
+fn validate_projection_catalog_layout(
+    catalog: &ProjectionCatalog,
+    descriptor: ProjectionCatalogSlot,
+) -> Result<()> {
+    let catalog_start = descriptor.catalog_page_start();
+    let mut ranges = Vec::with_capacity(catalog.entries().len());
+    for entry in catalog.entries() {
+        let end = entry
+            .image_page_start()
+            .checked_add(entry.image_page_count())
+            .ok_or_else(|| anyhow::anyhow!("Projection image page range overflow"))?;
+        if entry.image_page_start() == 0 || end > catalog_start {
+            anyhow::bail!("Projection image range overlaps later catalog metadata");
+        }
+        ranges.push((entry.image_page_start(), end));
+    }
+    ranges.sort_unstable();
+    if ranges
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left.1 > right.0))
+    {
+        anyhow::bail!("Projection catalog image ranges overlap");
+    }
+    Ok(())
 }
 
 type SortedIndexEntries = (
@@ -5152,6 +5567,29 @@ mod tests {
         let mut backend = MemoryBackend::new();
         backend.write_page(0, &page0).unwrap();
         let resident = plan.plan_resident_metadata(&backend).unwrap();
+        assert!(resident.manifest_candidates().is_empty());
+    }
+
+    #[test]
+    fn browser_sparse_bootstrap_accepts_v13_without_fetching_projection_pages() {
+        let mut header = FileHeader::new();
+        header.version = crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION;
+        header.page_count = 2;
+        header.header_checksum = compute_header_checksum(&header);
+        let projection = ProjectionCatalogSlot::new(1, 1, 1, 128, 0x1234_5678).unwrap();
+        let extension = HeaderExtension::empty()
+            .with_projection_catalog_slots(projection, ProjectionCatalogSlot::empty())
+            .unwrap();
+        let page0 = build_header_page_with_extension(header, extension).unwrap();
+
+        let plan = BrowserV11BootstrapPlan::from_page0(&page0).unwrap();
+        assert_eq!(plan.published_page_count(), 2);
+        assert!(plan.required_ranges().is_empty());
+        assert!(plan.manifest_candidates().is_empty());
+
+        let mut ledger_only = MemoryBackend::new();
+        ledger_only.write_page(0, &page0).unwrap();
+        let resident = plan.plan_resident_metadata(&ledger_only).unwrap();
         assert!(resident.manifest_candidates().is_empty());
     }
 

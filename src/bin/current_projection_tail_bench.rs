@@ -226,6 +226,47 @@ struct IsolatedReceipt {
     file_format_changed: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedProbe {
+    name: String,
+    valid_at: i64,
+    count: u64,
+    checksum: i128,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicationReceipt {
+    schema: &'static str,
+    profile: String,
+    facts: u64,
+    admission_eligible: bool,
+    source_commit: String,
+    tracked_clean: bool,
+    host: Option<String>,
+    fixture: FixtureReceipt,
+    source_format_version: u32,
+    published_format_version: u32,
+    source_bytes: u64,
+    published_bytes: u64,
+    projection_identity: ImageIdentity,
+    generation: u64,
+    image_page_start: u64,
+    image_page_count: u64,
+    catalog_page_start: u64,
+    catalog_page_count: u64,
+    published_page_count: u64,
+    publish_ms: f64,
+    reopen_decode_ms: f64,
+    probes: Vec<PersistedProbe>,
+    exact: bool,
+    admitted: bool,
+    production_query_routing_changed: bool,
+    public_api_changed: bool,
+    default_write_format_changed: bool,
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     match args.as_slice() {
@@ -246,6 +287,15 @@ fn main() -> Result<()> {
             facts.parse()?,
             profile,
         ),
+        [_, command, source, published, fixture, facts, profile] if command == "publish" => {
+            run_publication(
+                Path::new(source),
+                Path::new(published),
+                Path::new(fixture),
+                facts.parse()?,
+                profile,
+            )
+        }
         [
             _,
             command,
@@ -272,10 +322,124 @@ fn main() -> Result<()> {
              run <graph> <fixture-metadata> <facts> <smoke|full> | \
              trial <graph> <facts> <trial-index> | \
              isolated-run <graph> <fixture-metadata> <facts> <smoke|full> | \
+             publish <source-graph> <published-graph> <fixture-metadata> <facts> <smoke|full> | \
              isolated-trial <graph> <facts> <source|decoded> \
              <probe-index> <trial-index> <launch-index>"
         ),
     }
+}
+
+fn run_publication(
+    source: &Path,
+    published: &Path,
+    fixture_path: &Path,
+    facts: u64,
+    profile: &str,
+) -> Result<()> {
+    if profile != "smoke" && profile != "full" {
+        bail!("profile must be smoke or full")
+    }
+    let source_commit = command_text("git", &["rev-parse", "HEAD"])?;
+    let tracked_clean =
+        command_text("git", &["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    let fixture = load_fixture_metadata(
+        source,
+        fixture_path,
+        facts,
+        &source_commit,
+        profile == "full",
+    )?;
+    if published.exists() {
+        fs::remove_file(published)?;
+    }
+    fs::copy(source, published)?;
+    let source_bytes = fs::metadata(source)?.len();
+    let source_format_version = fixture_format_version(source)?;
+
+    let db = open(published)?;
+    let candidate = db.benchmark_build_current_projection(ATTRIBUTE, TEMPORAL_BEFORE)?;
+    if candidate.row_count() != usize::try_from(facts)? {
+        bail!("source projection row count mismatch")
+    }
+    let image = db.benchmark_encode_current_projection_page_image(&candidate)?;
+    let identity = image.identity();
+    let fingerprint = candidate.fingerprint()?;
+    let projection_identity = ImageIdentity {
+        base_generation: identity.base_generation(),
+        manifest_generation: identity.manifest_generation(),
+        tx_count: identity.tx_count(),
+        fingerprint: format!("{fingerprint:016x}"),
+        row_count: u64::try_from(candidate.row_count())?,
+        padded_bytes: image.padded_bytes(),
+    };
+    let started = Instant::now();
+    let publication =
+        db.benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, TEMPORAL_BEFORE)?;
+    let publish_ms = started.elapsed().as_secs_f64() * 1000.0;
+    drop(db);
+
+    let reopened = open(published)?;
+    let started = Instant::now();
+    let decoded = reopened
+        .benchmark_load_current_projection_page_image(ATTRIBUTE, TEMPORAL_BEFORE)?
+        .context("published projection was not selected after reopen")?;
+    let reopen_decode_ms = started.elapsed().as_secs_f64() * 1000.0;
+    if decoded.row_count() != candidate.row_count() || decoded.fingerprint()? != fingerprint {
+        bail!("reopened projection differs from the source candidate")
+    }
+    let mut probes = Vec::with_capacity(PROBES.len());
+    let mut exact = true;
+    for probe in PROBES {
+        let (count, checksum) = aggregate(&reopened, &decoded, probe.valid_at)?;
+        let expected = expected_pair(facts, probe.valid_at);
+        exact &= (count, checksum) == expected;
+        probes.push(PersistedProbe {
+            name: probe.name.to_owned(),
+            valid_at: probe.valid_at,
+            count,
+            checksum,
+        });
+    }
+    let published_format_version = fixture_format_version(published)?;
+    let published_bytes = fs::metadata(published)?.len();
+    let admission_eligible = profile == "full";
+    let admitted = admission_eligible
+        && exact
+        && source_format_version == 12
+        && published_format_version == 13
+        && publication.image_page_count == image.page_count()
+        && publication.catalog_page_count == 1;
+    let receipt = PublicationReceipt {
+        schema: "vicia.projection-publication.v1",
+        profile: profile.to_owned(),
+        facts,
+        admission_eligible,
+        source_commit,
+        tracked_clean,
+        host: command_text("hostname", &[]).ok(),
+        fixture,
+        source_format_version,
+        published_format_version,
+        source_bytes,
+        published_bytes,
+        projection_identity,
+        generation: publication.generation,
+        image_page_start: publication.image_page_start,
+        image_page_count: publication.image_page_count,
+        catalog_page_start: publication.catalog_page_start,
+        catalog_page_count: publication.catalog_page_count,
+        published_page_count: publication.published_page_count,
+        publish_ms,
+        reopen_decode_ms,
+        probes,
+        exact,
+        admitted,
+        production_query_routing_changed: false,
+        public_api_changed: false,
+        default_write_format_changed: false,
+    };
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
 }
 
 fn run(graph: &Path, fixture_path: &Path, facts: u64, profile: &str) -> Result<()> {

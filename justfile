@@ -120,6 +120,14 @@ projection-isolated-tail-smoke OUTPUT_DIR="target/projection-isolated-tail/smoke
 projection-isolated-tail-full OUTPUT_DIR="target/projection-isolated-tail/full":
     ./scripts/run-projection-isolated-tail-bench.sh full "{{OUTPUT_DIR}}"
 
+# Smoke v13 projection image/catalog publication and reopen on 10K rows.
+projection-publication-smoke OUTPUT_DIR="target/projection-publication/smoke":
+    ./scripts/run-projection-publication-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Admit v13 persisted selection and exact reopen over the canonical 1M fixture.
+projection-publication-full OUTPUT_DIR="target/projection-publication/full":
+    ./scripts/run-projection-publication-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser

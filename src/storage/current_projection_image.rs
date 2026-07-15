@@ -14,6 +14,7 @@ use crate::graph::current_projection::{
 };
 use crate::graph::types::EntityId;
 use crate::storage::PAGE_SIZE;
+use crate::storage::projection_catalog::ProjectionLedgerIdentity;
 use anyhow::{Result, anyhow, bail};
 use crc32fast::Hasher;
 
@@ -29,42 +30,6 @@ const VALUE_OFFSETS: u32 = 3;
 const VALUE_BYTES: u32 = 4;
 const VALID_FROM: u32 = 5;
 const VALID_TO: u32 = 6;
-
-/// Persistent ledger state to which a detached projection image belongs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProjectionLedgerIdentity {
-    base_generation: u64,
-    manifest_generation: u64,
-    tx_count: u64,
-}
-
-impl ProjectionLedgerIdentity {
-    pub(crate) fn new(base_generation: u64, manifest_generation: u64, tx_count: u64) -> Self {
-        Self {
-            base_generation,
-            manifest_generation,
-            tx_count,
-        }
-    }
-
-    /// Immutable base generation selected by the ledger.
-    #[must_use]
-    pub fn base_generation(self) -> u64 {
-        self.base_generation
-    }
-
-    /// Selected delta-manifest generation, or zero when no manifest exists.
-    #[must_use]
-    pub fn manifest_generation(self) -> u64 {
-        self.manifest_generation
-    }
-
-    /// Exact transaction watermark represented by the image.
-    #[must_use]
-    pub fn tx_count(self) -> u64 {
-        self.tx_count
-    }
-}
 
 /// A complete, page-aligned current-projection image not yet published.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,7 +96,7 @@ pub(crate) fn encode(
     candidate: &CurrentProjectionCandidate,
     identity: ProjectionLedgerIdentity,
 ) -> Result<CurrentProjectionPageImage> {
-    if candidate.tx_count() != identity.tx_count {
+    if candidate.tx_count() != identity.tx_count() {
         bail!("current projection image transaction watermark mismatch")
     }
 
@@ -379,7 +344,7 @@ pub(crate) fn decode(
         attribute: attribute.to_owned(),
         valid_time_floor,
         publication_generation,
-        tx_count: identity.tx_count,
+        tx_count: identity.tx_count(),
         entities,
         value_offsets,
         value_bytes: section_bytes(bytes, sections[3])?.to_vec(),
@@ -390,6 +355,21 @@ pub(crate) fn decode(
         bail!("current projection image logical fingerprint mismatch")
     }
     Ok(candidate)
+}
+
+pub(crate) fn logical_bytes(bytes: &[u8]) -> Result<u64> {
+    if bytes.len() < PAGE_SIZE || !bytes.len().is_multiple_of(PAGE_SIZE) {
+        bail!("current projection image is not a complete page range")
+    }
+    let sections = read_sections(bytes)?;
+    validate_sections(bytes, &sections)?;
+    sections
+        .iter()
+        .try_fold(u64::try_from(PAGE_SIZE)?, |total, section| {
+            total
+                .checked_add(u64::try_from(section.len)?)
+                .ok_or_else(|| anyhow!("current projection image logical byte count overflow"))
+        })
 }
 
 fn write_header(
@@ -410,9 +390,9 @@ fn write_header(
         .unwrap_or(PAGE_SIZE)
         / PAGE_SIZE;
     page[16..24].copy_from_slice(&u64::try_from(page_count)?.to_le_bytes());
-    page[24..32].copy_from_slice(&identity.base_generation.to_le_bytes());
-    page[32..40].copy_from_slice(&identity.manifest_generation.to_le_bytes());
-    page[40..48].copy_from_slice(&identity.tx_count.to_le_bytes());
+    page[24..32].copy_from_slice(&identity.base_generation().to_le_bytes());
+    page[32..40].copy_from_slice(&identity.manifest_generation().to_le_bytes());
+    page[40..48].copy_from_slice(&identity.tx_count().to_le_bytes());
     page[48..56].copy_from_slice(&valid_time_floor.to_le_bytes());
     page[56..64].copy_from_slice(&u64::try_from(row_count)?.to_le_bytes());
     page[64..72].copy_from_slice(&fingerprint.to_le_bytes());
@@ -617,11 +597,11 @@ fn read_i64(bytes: &[u8], offset: usize) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurrentProjectionPageImage, ProjectionLedgerIdentity, checksum_header, checksum_payload,
-        decode, encode, read_u64,
+        CurrentProjectionPageImage, checksum_header, checksum_payload, decode, encode, read_u64,
     };
     use crate::graph::current_projection::{CurrentProjectionBuilder, ProjectedInterval};
     use crate::graph::types::Value;
+    use crate::storage::projection_catalog::ProjectionLedgerIdentity;
     use uuid::Uuid;
 
     fn candidate() -> crate::CurrentProjectionCandidate {

@@ -1762,6 +1762,59 @@ impl Minigraf {
         )
     }
 
+    /// Persist one admitted projection image behind the v13 catalog authority.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "bench-internals")))]
+    #[doc(hidden)]
+    pub fn benchmark_publish_current_projection_page_image(
+        &self,
+        image: &crate::CurrentProjectionPageImage,
+        attribute: &str,
+        valid_time_floor: i64,
+    ) -> Result<crate::ProjectionPublicationReceipt> {
+        let mut guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        match &mut *guard {
+            WriteContext::File {
+                pfs,
+                wal,
+                wal_entry_count,
+                ..
+            } => {
+                if wal.is_some() || *wal_entry_count != 0 {
+                    anyhow::bail!("Projection publication requires a retired durable WAL");
+                }
+                pfs.publish_current_projection_image(image, attribute, valid_time_floor)
+            }
+            WriteContext::Memory => {
+                anyhow::bail!("Persisted projection publication requires a file-backed database")
+            }
+        }
+    }
+
+    /// Load and verify a persisted projection without installing query routing.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "bench-internals")))]
+    #[doc(hidden)]
+    pub fn benchmark_load_current_projection_page_image(
+        &self,
+        attribute: &str,
+        valid_time_floor: i64,
+    ) -> Result<Option<crate::CurrentProjectionCandidate>> {
+        let guard = self
+            .inner
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write lock poisoned"))?;
+        match &*guard {
+            WriteContext::File { pfs, .. } => {
+                pfs.load_current_projection_image(attribute, valid_time_floor)
+            }
+            WriteContext::Memory => Ok(None),
+        }
+    }
+
     /// Run the R1 integer count/sum probe after rejecting stale candidates.
     #[cfg(any(test, feature = "bench-internals"))]
     #[doc(hidden)]
@@ -2339,7 +2392,7 @@ impl Minigraf {
     }
 
     /// Force the visible delta into a fresh base for repository benchmarks.
-    #[cfg(all(feature = "bench-internals", not(target_arch = "wasm32")))]
+    #[cfg(all(any(test, feature = "bench-internals"), not(target_arch = "wasm32")))]
     pub fn benchmark_recompact_visible_delta(&self) -> Result<()> {
         if is_write_tx_active() {
             bail!("cannot benchmark recompact while a WriteTransaction is active");
@@ -6025,5 +6078,299 @@ mod capability_tests {
                 .unwrap(),
             (1, 10)
         );
+    }
+
+    #[test]
+    fn persisted_projection_publication_round_trips_without_routing_queries() {
+        const ATTRIBUTE: &str = ":projection/value";
+        const FLOOR: i64 = 0;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-v13.graph");
+        let expected_rows;
+        let receipt;
+        {
+            let db = Minigraf::open(&path).unwrap();
+            db.execute(
+                r#"(transact [[#uuid "00000000-0000-0000-0000-000000000001" :projection/value 10]
+                              [#uuid "00000000-0000-0000-0000-000000000002" :projection/value 20]])"#,
+            )
+            .unwrap();
+            db.checkpoint().unwrap();
+            let candidate = db
+                .benchmark_build_current_projection(ATTRIBUTE, FLOOR)
+                .unwrap();
+            expected_rows = db.benchmark_current_projection_rows(&candidate).unwrap();
+            let image = db
+                .benchmark_encode_current_projection_page_image(&candidate)
+                .unwrap();
+            receipt = db
+                .benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, FLOOR)
+                .unwrap();
+            let loaded = db
+                .benchmark_load_current_projection_page_image(ATTRIBUTE, FLOOR)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                db.benchmark_current_projection_rows(&loaded).unwrap(),
+                expected_rows
+            );
+            assert_eq!(receipt.image_page_count, image.page_count());
+            assert_eq!(receipt.catalog_page_count, 1);
+        }
+
+        let page0 = std::fs::read(&path).unwrap();
+        let header =
+            crate::storage::FileHeader::from_bytes(&page0[..crate::storage::PAGE_SIZE]).unwrap();
+        assert_eq!(
+            header.version,
+            crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION
+        );
+        assert_eq!(header.page_count, receipt.published_page_count);
+
+        let db = Minigraf::open(&path).unwrap();
+        let loaded = db
+            .benchmark_load_current_projection_page_image(ATTRIBUTE, FLOOR)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.benchmark_current_projection_rows(&loaded).unwrap(),
+            expected_rows
+        );
+        db.execute(
+            r#"(transact [[#uuid "00000000-0000-0000-0000-000000000003" :projection/value 30]])"#,
+        )
+        .unwrap();
+        assert!(
+            db.benchmark_load_current_projection_page_image(ATTRIBUTE, FLOOR)
+                .unwrap()
+                .is_none(),
+            "a WAL-visible transaction must make the persisted projection stale"
+        );
+        let pending = db
+            .benchmark_build_current_projection(ATTRIBUTE, FLOOR)
+            .unwrap();
+        let pending_image = db
+            .benchmark_encode_current_projection_page_image(&pending)
+            .unwrap();
+        assert!(
+            db.benchmark_publish_current_projection_page_image(&pending_image, ATTRIBUTE, FLOOR,)
+                .is_err(),
+            "projection publication must not retire or bypass a pending WAL"
+        );
+        assert!(Minigraf::wal_path_for(&path).exists());
+    }
+
+    #[test]
+    fn corrupt_projection_falls_back_without_hiding_ledger_data() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        const ATTRIBUTE: &str = ":projection/value";
+        const FLOOR: i64 = 0;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-recovery.graph");
+        let first;
+        let second;
+        let expected;
+        {
+            let db = Minigraf::open(&path).unwrap();
+            db.execute(
+                r#"(transact [[#uuid "00000000-0000-0000-0000-000000000011" :projection/value 11]])"#,
+            )
+            .unwrap();
+            db.checkpoint().unwrap();
+            let candidate = db
+                .benchmark_build_current_projection(ATTRIBUTE, FLOOR)
+                .unwrap();
+            expected = db.benchmark_current_projection_rows(&candidate).unwrap();
+            let image = db
+                .benchmark_encode_current_projection_page_image(&candidate)
+                .unwrap();
+            first = db
+                .benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, FLOOR)
+                .unwrap();
+            second = db
+                .benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, FLOOR)
+                .unwrap();
+        }
+
+        let corrupt_page = |page_id: u64| {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.seek(SeekFrom::Start(page_id * crate::storage::PAGE_SIZE as u64))
+                .unwrap();
+            file.write_all(b"X").unwrap();
+            file.sync_all().unwrap();
+        };
+        corrupt_page(second.image_page_start);
+        {
+            let db = Minigraf::open(&path).unwrap();
+            let recovered = db
+                .benchmark_load_current_projection_page_image(ATTRIBUTE, FLOOR)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                db.benchmark_current_projection_rows(&recovered).unwrap(),
+                expected
+            );
+        }
+
+        corrupt_page(first.image_page_start);
+        let db = Minigraf::open(&path).unwrap();
+        assert!(
+            db.benchmark_load_current_projection_page_image(ATTRIBUTE, FLOOR)
+                .is_err(),
+            "both corrupt projection images must fail closed"
+        );
+        let ledger = db
+            .execute(r#"(query [:find ?value :where [?e :projection/value ?value]])"#)
+            .unwrap();
+        let QueryResult::QueryResults { results, .. } = ledger else {
+            panic!("expected ledger query results");
+        };
+        assert_eq!(
+            results.len(),
+            1,
+            "projection loss must not hide ledger facts"
+        );
+    }
+
+    #[test]
+    fn v13_delta_checkpoint_preserves_and_recompact_retires_projection_slots() {
+        const ATTRIBUTE: &str = ":projection/value";
+        const FLOOR: i64 = 0;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-lineage.graph");
+        let db = Minigraf::open(&path).unwrap();
+        db.execute(
+            r#"(transact [[#uuid "00000000-0000-0000-0000-000000000021" :projection/value 21]])"#,
+        )
+        .unwrap();
+        db.checkpoint().unwrap();
+        let candidate = db
+            .benchmark_build_current_projection(ATTRIBUTE, FLOOR)
+            .unwrap();
+        let image = db
+            .benchmark_encode_current_projection_page_image(&candidate)
+            .unwrap();
+        db.benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, FLOOR)
+            .unwrap();
+        let published_page0 = std::fs::read(&path).unwrap();
+        let published_extension =
+            crate::storage::header_extension::HeaderExtension::read_from_page0(
+                crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION,
+                &published_page0[..crate::storage::PAGE_SIZE],
+            )
+            .unwrap()
+            .unwrap();
+
+        db.execute(
+            r#"(transact [[#uuid "00000000-0000-0000-0000-000000000022" :projection/value 22]])"#,
+        )
+        .unwrap();
+        db.checkpoint().unwrap();
+        let checkpoint_page0 = std::fs::read(&path).unwrap();
+        let checkpoint_header =
+            crate::storage::FileHeader::from_bytes(&checkpoint_page0[..crate::storage::PAGE_SIZE])
+                .unwrap();
+        let checkpoint_extension =
+            crate::storage::header_extension::HeaderExtension::read_from_page0(
+                checkpoint_header.version,
+                &checkpoint_page0[..crate::storage::PAGE_SIZE],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint_header.version, 13);
+        assert_eq!(
+            checkpoint_extension.projection_primary(),
+            published_extension.projection_primary()
+        );
+        assert_eq!(
+            checkpoint_extension.projection_secondary(),
+            published_extension.projection_secondary()
+        );
+
+        db.benchmark_recompact_visible_delta().unwrap();
+        let compact_page0 = std::fs::read(&path).unwrap();
+        let compact_header =
+            crate::storage::FileHeader::from_bytes(&compact_page0[..crate::storage::PAGE_SIZE])
+                .unwrap();
+        let compact_extension = crate::storage::header_extension::HeaderExtension::read_from_page0(
+            compact_header.version,
+            &compact_page0[..crate::storage::PAGE_SIZE],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(compact_header.version, 13);
+        assert!(compact_extension.projection_primary().is_empty());
+        assert!(compact_extension.projection_secondary().is_empty());
+        assert!(
+            db.benchmark_load_current_projection_page_image(ATTRIBUTE, FLOOR)
+                .unwrap()
+                .is_none()
+        );
+        let QueryResult::QueryResults { results, .. } = db
+            .execute(r#"(query [:find ?value :where [?e :projection/value ?value]])"#)
+            .unwrap()
+        else {
+            panic!("expected ledger query results");
+        };
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn unpublished_projection_tail_is_ignored_and_reused() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        const ATTRIBUTE: &str = ":projection/value";
+        const FLOOR: i64 = 0;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-unpublished-tail.graph");
+        let published_page_count;
+        {
+            let db = Minigraf::open(&path).unwrap();
+            db.execute(
+                r#"(transact [[#uuid "00000000-0000-0000-0000-000000000031" :projection/value 31]])"#,
+            )
+            .unwrap();
+            db.checkpoint().unwrap();
+        }
+        {
+            let bytes = std::fs::read(&path).unwrap();
+            let header =
+                crate::storage::FileHeader::from_bytes(&bytes[..crate::storage::PAGE_SIZE])
+                    .unwrap();
+            published_page_count = header.page_count;
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.seek(SeekFrom::Start(
+                published_page_count * crate::storage::PAGE_SIZE as u64,
+            ))
+            .unwrap();
+            file.write_all(&vec![0xA5; crate::storage::PAGE_SIZE])
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let db = Minigraf::open(&path).unwrap();
+        let candidate = db
+            .benchmark_build_current_projection(ATTRIBUTE, FLOOR)
+            .unwrap();
+        let image = db
+            .benchmark_encode_current_projection_page_image(&candidate)
+            .unwrap();
+        let receipt = db
+            .benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, FLOOR)
+            .unwrap();
+        assert_eq!(receipt.image_page_start, published_page_count);
+        let bytes = std::fs::read(&path).unwrap();
+        let image_offset =
+            usize::try_from(published_page_count * crate::storage::PAGE_SIZE as u64).unwrap();
+        assert_eq!(&bytes[image_offset..image_offset + 8], b"MGCPG001");
     }
 }

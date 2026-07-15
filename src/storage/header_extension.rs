@@ -4,14 +4,18 @@ use anyhow::{Result, bail};
 pub(crate) const HEADER_EXTENSION_OFFSET: usize = 84;
 const LEGACY_HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX001";
 const HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX002";
+const PROJECTION_HEADER_EXTENSION_MAGIC: [u8; 8] = *b"MGHEX003";
 pub(crate) const LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 10;
 pub(crate) const HEADER_EXTENSION_FILE_FORMAT_VERSION: u32 = 11;
 pub(crate) const PREFIX_LEAF_FILE_FORMAT_VERSION: u32 = 12;
+pub(crate) const PROJECTION_CATALOG_FILE_FORMAT_VERSION: u32 = 13;
 pub(crate) const LEGACY_HEADER_EXTENSION_LEN: usize =
     HeaderExtension::PREFIX_LEN + (HeaderManifestSlot::LEN * 2) + HeaderExtension::BASE_LAYOUT_LEN;
 pub(crate) const HEADER_EXTENSION_LEN: usize =
     LEGACY_HEADER_EXTENSION_LEN + BasePageIntegrityDescriptor::LEN;
-const _: () = assert!(HEADER_EXTENSION_OFFSET + HEADER_EXTENSION_LEN <= PAGE_SIZE);
+pub(crate) const PROJECTION_HEADER_EXTENSION_LEN: usize =
+    HEADER_EXTENSION_LEN + (ProjectionCatalogSlot::LEN * 2);
+const _: () = assert!(HEADER_EXTENSION_OFFSET + PROJECTION_HEADER_EXTENSION_LEN <= PAGE_SIZE);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HeaderManifestSlot {
@@ -165,6 +169,135 @@ impl HeaderManifestSlot {
 
     fn compute_checksum(self) -> u32 {
         crc32fast::hash(&self.checksum_payload())
+    }
+}
+
+/// Page-0 pointer to one committed projection catalog generation.
+///
+/// This intentionally mirrors the delta-manifest slot wire size while keeping
+/// the two authorities semantically distinct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectionCatalogSlot {
+    generation: u64,
+    catalog_page_start: u64,
+    catalog_page_count: u64,
+    catalog_len: u64,
+    catalog_checksum: u32,
+    slot_checksum: u32,
+}
+
+impl ProjectionCatalogSlot {
+    pub(crate) const LEN: usize = 40;
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn new(
+        generation: u64,
+        catalog_page_start: u64,
+        catalog_page_count: u64,
+        catalog_len: u64,
+        catalog_checksum: u32,
+    ) -> Result<Self> {
+        if generation == 0 {
+            bail!("Projection catalog slot generation must be non-zero");
+        }
+        if catalog_page_start == 0 || catalog_page_count == 0 || catalog_len == 0 {
+            bail!("Projection catalog slot range must be non-empty");
+        }
+        let capacity = catalog_page_count
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("Projection catalog slot capacity overflow"))?;
+        let minimum_len = catalog_page_count
+            .saturating_sub(1)
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("Projection catalog slot minimum length overflow"))?;
+        if catalog_len > capacity || catalog_len <= minimum_len {
+            bail!("Projection catalog slot length is not canonical for its page count");
+        }
+        catalog_page_start
+            .checked_add(catalog_page_count)
+            .ok_or_else(|| anyhow::anyhow!("Projection catalog slot page range overflow"))?;
+        let mut slot = Self {
+            generation,
+            catalog_page_start,
+            catalog_page_count,
+            catalog_len,
+            catalog_checksum,
+            slot_checksum: 0,
+        };
+        slot.slot_checksum = slot.compute_checksum();
+        Ok(slot)
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self {
+            generation: 0,
+            catalog_page_start: 0,
+            catalog_page_count: 0,
+            catalog_len: 0,
+            catalog_checksum: 0,
+            slot_checksum: 0,
+        }
+    }
+
+    pub(crate) fn generation(self) -> u64 {
+        self.generation
+    }
+    pub(crate) fn catalog_page_start(self) -> u64 {
+        self.catalog_page_start
+    }
+    pub(crate) fn catalog_page_count(self) -> u64 {
+        self.catalog_page_count
+    }
+    pub(crate) fn catalog_len(self) -> u64 {
+        self.catalog_len
+    }
+    pub(crate) fn catalog_checksum(self) -> u32 {
+        self.catalog_checksum
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self == Self::empty()
+    }
+
+    pub(crate) fn is_selectable(self) -> bool {
+        !self.is_empty()
+            && self.slot_checksum == self.compute_checksum()
+            && self.catalog_page_start > 0
+            && self.catalog_page_count > 0
+            && self.catalog_len > 0
+            && self
+                .catalog_page_start
+                .checked_add(self.catalog_page_count)
+                .is_some()
+    }
+
+    fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut bytes = [0u8; Self::LEN];
+        bytes[0..8].copy_from_slice(&self.generation.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.catalog_page_start.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.catalog_page_count.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.catalog_len.to_le_bytes());
+        bytes[32..36].copy_from_slice(&self.catalog_checksum.to_le_bytes());
+        bytes[36..40].copy_from_slice(&self.slot_checksum.to_le_bytes());
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::LEN {
+            bail!("Projection catalog slot length is invalid");
+        }
+        Ok(Self {
+            generation: read_u64_le(bytes, 0, "projection catalog slot generation")?,
+            catalog_page_start: read_u64_le(bytes, 8, "projection catalog page start")?,
+            catalog_page_count: read_u64_le(bytes, 16, "projection catalog page count")?,
+            catalog_len: read_u64_le(bytes, 24, "projection catalog length")?,
+            catalog_checksum: read_u32_le(bytes, 32, "projection catalog checksum")?,
+            slot_checksum: read_u32_le(bytes, 36, "projection catalog slot checksum")?,
+        })
+    }
+
+    fn compute_checksum(self) -> u32 {
+        crc32fast::hash(&self.to_bytes()[..Self::LEN - 4])
     }
 }
 
@@ -358,6 +491,8 @@ pub(crate) struct HeaderExtension {
     base_fact_page_start: u64,
     base_layout_checksum: u32,
     base_integrity: BasePageIntegrityDescriptor,
+    projection_primary: ProjectionCatalogSlot,
+    projection_secondary: ProjectionCatalogSlot,
 }
 
 impl HeaderExtension {
@@ -372,6 +507,8 @@ impl HeaderExtension {
             base_fact_page_start,
             base_layout_checksum: Self::compute_base_layout_checksum(base_fact_page_start),
             base_integrity: BasePageIntegrityDescriptor::empty(),
+            projection_primary: ProjectionCatalogSlot::empty(),
+            projection_secondary: ProjectionCatalogSlot::empty(),
         }
     }
 
@@ -393,6 +530,29 @@ impl HeaderExtension {
 
     pub(crate) fn base_integrity(&self) -> BasePageIntegrityDescriptor {
         self.base_integrity
+    }
+
+    pub(crate) fn projection_primary(&self) -> ProjectionCatalogSlot {
+        self.projection_primary
+    }
+
+    pub(crate) fn projection_secondary(&self) -> ProjectionCatalogSlot {
+        self.projection_secondary
+    }
+
+    pub(crate) fn with_projection_catalog_slots(
+        mut self,
+        primary: ProjectionCatalogSlot,
+        secondary: ProjectionCatalogSlot,
+    ) -> Result<Self> {
+        if (!primary.is_empty() && !primary.is_selectable())
+            || (!secondary.is_empty() && !secondary.is_selectable())
+        {
+            bail!("Projection catalog slot is invalid");
+        }
+        self.projection_primary = primary;
+        self.projection_secondary = secondary;
+        Ok(self)
     }
 
     pub(crate) fn with_base_fact_page_start(mut self, base_fact_page_start: u64) -> Result<Self> {
@@ -439,6 +599,10 @@ impl HeaderExtension {
             HEADER_EXTENSION_FILE_FORMAT_VERSION | PREFIX_LEAF_FILE_FORMAT_VERSION => {
                 (HEADER_EXTENSION_MAGIC, HEADER_EXTENSION_LEN)
             }
+            PROJECTION_CATALOG_FILE_FORMAT_VERSION => (
+                PROJECTION_HEADER_EXTENSION_MAGIC,
+                PROJECTION_HEADER_EXTENSION_LEN,
+            ),
             _ => bail!("Unsupported header extension file format version"),
         };
         let mut bytes = Vec::with_capacity(capacity);
@@ -452,6 +616,12 @@ impl HeaderExtension {
             bytes.extend_from_slice(&self.base_integrity.to_bytes());
         } else if !self.base_integrity.is_empty() {
             bail!("v10 header extension cannot encode v11 base integrity metadata");
+        }
+        if file_format_version >= PROJECTION_CATALOG_FILE_FORMAT_VERSION {
+            bytes.extend_from_slice(&self.projection_primary.to_bytes());
+            bytes.extend_from_slice(&self.projection_secondary.to_bytes());
+        } else if !self.projection_primary.is_empty() || !self.projection_secondary.is_empty() {
+            bail!("v12 header extension cannot encode projection catalog slots");
         }
         debug_assert_eq!(bytes.len(), capacity);
         Ok(bytes)
@@ -481,14 +651,18 @@ impl HeaderExtension {
         if file_format_version != LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
             && file_format_version != HEADER_EXTENSION_FILE_FORMAT_VERSION
             && file_format_version != PREFIX_LEAF_FILE_FORMAT_VERSION
+            && file_format_version != PROJECTION_CATALOG_FILE_FORMAT_VERSION
         {
             bail!("Unsupported header extension file format version");
         }
 
-        let extension_len = if file_format_version == LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION {
-            LEGACY_HEADER_EXTENSION_LEN
-        } else {
-            HEADER_EXTENSION_LEN
+        let extension_len = match file_format_version {
+            LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION => LEGACY_HEADER_EXTENSION_LEN,
+            HEADER_EXTENSION_FILE_FORMAT_VERSION | PREFIX_LEAF_FILE_FORMAT_VERSION => {
+                HEADER_EXTENSION_LEN
+            }
+            PROJECTION_CATALOG_FILE_FORMAT_VERSION => PROJECTION_HEADER_EXTENSION_LEN,
+            _ => unreachable!("file format version was validated above"),
         };
         let Some(extension_bytes) =
             page.get(HEADER_EXTENSION_OFFSET..HEADER_EXTENSION_OFFSET + extension_len)
@@ -502,10 +676,13 @@ impl HeaderExtension {
         let magic = extension_bytes
             .get(0..HEADER_EXTENSION_MAGIC.len())
             .ok_or_else(|| anyhow::anyhow!("Header extension missing magic"))?;
-        let expected_magic = if file_format_version == LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION {
-            LEGACY_HEADER_EXTENSION_MAGIC
-        } else {
-            HEADER_EXTENSION_MAGIC
+        let expected_magic = match file_format_version {
+            LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION => LEGACY_HEADER_EXTENSION_MAGIC,
+            HEADER_EXTENSION_FILE_FORMAT_VERSION | PREFIX_LEAF_FILE_FORMAT_VERSION => {
+                HEADER_EXTENSION_MAGIC
+            }
+            PROJECTION_CATALOG_FILE_FORMAT_VERSION => PROJECTION_HEADER_EXTENSION_MAGIC,
+            _ => unreachable!("file format version was validated above"),
         };
         if magic != expected_magic {
             bail!("Header extension magic mismatch");
@@ -580,12 +757,42 @@ impl HeaderExtension {
             bail!("Base integrity coverage does not match the base fact page start");
         }
 
+        let (projection_primary, projection_secondary) =
+            if file_format_version >= PROJECTION_CATALOG_FILE_FORMAT_VERSION {
+                let primary_start = HEADER_EXTENSION_LEN;
+                let secondary_start = primary_start + ProjectionCatalogSlot::LEN;
+                let secondary_end = secondary_start + ProjectionCatalogSlot::LEN;
+                (
+                    ProjectionCatalogSlot::from_bytes(
+                        extension_bytes
+                            .get(primary_start..secondary_start)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Projection primary catalog slot is truncated")
+                            })?,
+                    )?,
+                    ProjectionCatalogSlot::from_bytes(
+                        extension_bytes
+                            .get(secondary_start..secondary_end)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Projection secondary catalog slot is truncated")
+                            })?,
+                    )?,
+                )
+            } else {
+                (
+                    ProjectionCatalogSlot::empty(),
+                    ProjectionCatalogSlot::empty(),
+                )
+            };
+
         Ok(Some(Self {
             primary,
             secondary,
             base_fact_page_start,
             base_layout_checksum: Self::compute_base_layout_checksum(base_fact_page_start),
             base_integrity,
+            projection_primary,
+            projection_secondary,
         }))
     }
 
@@ -622,6 +829,58 @@ pub(crate) enum HeaderManifestSlotSelection {
     RecoveryRequired {
         reason: HeaderManifestSlotRecoveryReason,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectionCatalogSlotName {
+    Primary,
+    Secondary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectionCatalogSlotSelection {
+    NoProjectionCatalog,
+    Candidates {
+        newest: (ProjectionCatalogSlotName, ProjectionCatalogSlot),
+        previous: Option<(ProjectionCatalogSlotName, ProjectionCatalogSlot)>,
+    },
+    RecoveryRequired,
+}
+
+pub(crate) fn select_projection_catalog_slots(
+    extension: &HeaderExtension,
+) -> ProjectionCatalogSlotSelection {
+    let slots = [
+        (
+            ProjectionCatalogSlotName::Primary,
+            extension.projection_primary(),
+        ),
+        (
+            ProjectionCatalogSlotName::Secondary,
+            extension.projection_secondary(),
+        ),
+    ];
+    let has_invalid = slots
+        .iter()
+        .any(|(_, slot)| !slot.is_empty() && !slot.is_selectable());
+    let mut valid = slots
+        .into_iter()
+        .filter(|(_, slot)| slot.is_selectable())
+        .collect::<Vec<_>>();
+    valid.sort_by_key(|(_, slot)| std::cmp::Reverse(slot.generation()));
+    match valid.as_slice() {
+        [] if has_invalid => ProjectionCatalogSlotSelection::RecoveryRequired,
+        [] => ProjectionCatalogSlotSelection::NoProjectionCatalog,
+        [newest] => ProjectionCatalogSlotSelection::Candidates {
+            newest: *newest,
+            previous: None,
+        },
+        [newest, previous] => ProjectionCatalogSlotSelection::Candidates {
+            newest: *newest,
+            previous: Some(*previous),
+        },
+        _ => unreachable!("page 0 contains exactly two projection catalog slots"),
+    }
 }
 
 pub(crate) fn select_header_manifest_slot(
@@ -682,9 +941,10 @@ pub(crate) fn build_header_page(header: FileHeader) -> Result<Vec<u8>> {
     if header.version == LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
         || header.version == HEADER_EXTENSION_FILE_FORMAT_VERSION
         || header.version == PREFIX_LEAF_FILE_FORMAT_VERSION
+        || header.version == PROJECTION_CATALOG_FILE_FORMAT_VERSION
     {
         HeaderExtension::empty().write_to_page0_for_version(header.version, &mut page)?;
-    } else if header.version > PREFIX_LEAF_FILE_FORMAT_VERSION {
+    } else if header.version > PROJECTION_CATALOG_FILE_FORMAT_VERSION {
         bail!("Unsupported header extension file format version");
     }
 
@@ -699,8 +959,9 @@ pub(crate) fn build_header_page_with_extension(
     if header.version != LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION
         && header.version != HEADER_EXTENSION_FILE_FORMAT_VERSION
         && header.version != PREFIX_LEAF_FILE_FORMAT_VERSION
+        && header.version != PROJECTION_CATALOG_FILE_FORMAT_VERSION
     {
-        bail!("Header extension requires v10, v11, or v12 file format");
+        bail!("Header extension requires v10 through v13 file format");
     }
     let mut page = header.to_bytes();
     if page.len() > PAGE_SIZE {
@@ -742,14 +1003,22 @@ mod tests {
         HEADER_EXTENSION_OFFSET, HeaderExtension, HeaderManifestSlot, HeaderManifestSlotName,
         HeaderManifestSlotRecoveryReason, HeaderManifestSlotSelection,
         LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION, LEGACY_HEADER_EXTENSION_LEN,
-        PREFIX_LEAF_FILE_FORMAT_VERSION, build_header_page, build_header_page_with_extension,
+        PREFIX_LEAF_FILE_FORMAT_VERSION, PROJECTION_CATALOG_FILE_FORMAT_VERSION,
+        PROJECTION_HEADER_EXTENSION_LEN, ProjectionCatalogSlot, ProjectionCatalogSlotName,
+        ProjectionCatalogSlotSelection, build_header_page, build_header_page_with_extension,
         select_header_manifest_slot, select_header_manifest_slot_from_page0,
+        select_projection_catalog_slots,
     };
     use crate::storage::{FORMAT_VERSION, FileHeader, PAGE_SIZE};
 
     fn slot(generation: u64, page_start: u64) -> HeaderManifestSlot {
         HeaderManifestSlot::new(generation, page_start, 2, 128, 0xCAFE_BABE)
             .expect("slot descriptor should be valid")
+    }
+
+    fn projection_slot(generation: u64, page_start: u64) -> ProjectionCatalogSlot {
+        ProjectionCatalogSlot::new(generation, page_start, 1, 128, 0x1234_5678)
+            .expect("projection slot should be valid")
     }
 
     fn page_with_extension(extension: &HeaderExtension) -> Vec<u8> {
@@ -777,6 +1046,63 @@ mod tests {
         assert_eq!(PREFIX_LEAF_FILE_FORMAT_VERSION, 12);
         assert_eq!(HEADER_EXTENSION_FILE_FORMAT_VERSION, 11);
         assert_eq!(LEGACY_HEADER_EXTENSION_FILE_FORMAT_VERSION, 10);
+    }
+
+    #[test]
+    fn v13_projection_catalog_slots_round_trip_and_select_newest() {
+        let extension = HeaderExtension::empty()
+            .with_projection_catalog_slots(projection_slot(4, 100), projection_slot(5, 200))
+            .unwrap();
+        let page = page_with_header_version_and_extension(
+            PROJECTION_CATALOG_FILE_FORMAT_VERSION,
+            &extension,
+        );
+        let decoded =
+            HeaderExtension::read_from_page0(PROJECTION_CATALOG_FILE_FORMAT_VERSION, &page)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            decoded
+                .to_bytes_for_version(PROJECTION_CATALOG_FILE_FORMAT_VERSION)
+                .unwrap()
+                .len(),
+            PROJECTION_HEADER_EXTENSION_LEN
+        );
+        assert!(matches!(
+            select_projection_catalog_slots(&decoded),
+            ProjectionCatalogSlotSelection::Candidates {
+                newest: (ProjectionCatalogSlotName::Secondary, descriptor),
+                previous: Some((ProjectionCatalogSlotName::Primary, _)),
+            } if descriptor.generation() == 5
+        ));
+    }
+
+    #[test]
+    fn corrupt_newer_projection_slot_keeps_verified_predecessor() {
+        let extension = HeaderExtension::empty()
+            .with_projection_catalog_slots(projection_slot(4, 100), projection_slot(5, 200))
+            .unwrap();
+        let mut page = page_with_header_version_and_extension(
+            PROJECTION_CATALOG_FILE_FORMAT_VERSION,
+            &extension,
+        );
+        let secondary_checksum = HEADER_EXTENSION_OFFSET
+            + HEADER_EXTENSION_LEN
+            + ProjectionCatalogSlot::LEN
+            + ProjectionCatalogSlot::LEN
+            - 1;
+        page[secondary_checksum] ^= 1;
+        let decoded =
+            HeaderExtension::read_from_page0(PROJECTION_CATALOG_FILE_FORMAT_VERSION, &page)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            select_projection_catalog_slots(&decoded),
+            ProjectionCatalogSlotSelection::Candidates {
+                newest: (ProjectionCatalogSlotName::Primary, descriptor),
+                previous: None,
+            } if descriptor.generation() == 4
+        ));
     }
 
     #[test]

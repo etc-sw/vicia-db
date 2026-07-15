@@ -22,6 +22,7 @@ pub mod layout_diagnostics;
 pub mod packed_pages;
 pub(crate) mod page_integrity;
 pub mod persistent_facts;
+pub(crate) mod projection_catalog;
 
 use anyhow::Result;
 
@@ -136,6 +137,9 @@ pub const MAGIC_NUMBER: [u8; 4] = *b"MGRF";
 /// page-local prefix-compressed B+tree leaves. v11 remains directly readable;
 /// v10 and older files load through the migration path.
 pub const FORMAT_VERSION: u32 = 12;
+/// Newest format understood by this build. v13 remains opt-in until projection
+/// publication completes its rollout gates; ordinary writers still create v12.
+pub(crate) const MAX_READABLE_FORMAT_VERSION: u32 = 13;
 /// Oldest format with the generation-bound base-page integrity catalog.
 pub(crate) const INTEGRITY_FORMAT_VERSION: u32 = 11;
 
@@ -400,11 +404,11 @@ impl FileHeader {
         if self.magic != MAGIC_NUMBER {
             anyhow::bail!("Invalid magic number");
         }
-        if self.version < 1 || self.version > FORMAT_VERSION {
+        if self.version < 1 || self.version > MAX_READABLE_FORMAT_VERSION {
             anyhow::bail!(
                 "Unsupported format version: {} (supported: 1-{})",
                 self.version,
-                FORMAT_VERSION
+                MAX_READABLE_FORMAT_VERSION
             );
         }
         // Validate logical relationships

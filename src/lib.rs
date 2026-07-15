@@ -127,7 +127,7 @@ pub use graph::storage::{
 #[cfg(feature = "bench-internals")]
 pub use storage::btree_v6::LeafReadDiagnostics;
 #[cfg(any(test, feature = "bench-internals"))]
-pub use storage::current_projection_image::{CurrentProjectionPageImage, ProjectionLedgerIdentity};
+pub use storage::current_projection_image::CurrentProjectionPageImage;
 #[cfg(feature = "bench-internals")]
 pub use storage::layout_diagnostics::{
     PrefixEstimate, StorageIndexLayout, StorageLayoutDiagnostics, StoragePageLayout,
@@ -135,6 +135,10 @@ pub use storage::layout_diagnostics::{
 };
 #[cfg(feature = "bench-internals")]
 pub use storage::persistent_facts::CheckpointConstructionDiagnostics;
+#[cfg(any(test, feature = "bench-internals"))]
+pub use storage::persistent_facts::ProjectionPublicationReceipt;
+#[cfg(any(test, feature = "bench-internals"))]
+pub use storage::projection_catalog::ProjectionLedgerIdentity;
 
 // Query result type
 pub use query::datalog::executor::QueryResult;
