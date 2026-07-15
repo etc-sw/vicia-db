@@ -2342,6 +2342,40 @@ just projection-routing-smoke
 just projection-routing-full
 ```
 
+### R2-C4 bounded resident-tail overlay
+
+`vicia.projection-tail-overlay.v1` measures the exact projection route after
+1,024 post-publication facts. The overlay replaces complete touched-entity
+intervals through the authoritative current reducer and is installed only when
+tail facts, retained history, and resident bytes remain within 65,536 entries,
+65,536 entries, and 8 MiB respectively.
+
+The clean HAL7800 1M receipt returns exact
+`501,024/251,023,773,776` count/checksum. Refresh takes 128.586 ms; cached
+p50/p95 is 120.685/130.062 ms versus 116.308/118.593 ms without a tail. Both
+paths read 4,036 projection pages, decode no full image, add zero measured query
+RSS, and avoid ledger fallback. Native retract, valid-time, unrelated-write,
+corruption, and over-budget fallback tests pass with the 77-test Chrome matrix
+and validator mutation audit. The authoritative receipt is preserved at
+`benchmarks/baselines/projection-tail-overlay/2026-07-15-hal7800-r2c4-full/receipt.json`.
+
+### R2-C5 complete Vetch package rollout
+
+The atomic package sync builds from clean Vicia `b909cf5`, validates the staged
+candidate, and then moves JS glue, Rust and TypeScript declarations, manifest,
+licenses, WASM, and provenance into Vetch together. The resulting WASM SHA-256
+is `3267022d385175f2df1f335264190a029a12e814841afff2a9a5f4f925e46968`.
+
+The final clean Vetch commit `140ff14` passes the 77-test Chrome format matrix,
+authority spike, contract, lifecycle, canvas persistence concurrency,
+TypeScript checking, and the production build. The broader Vetch authority
+suite also passes against the same package. Source stability, workspace hash,
+installed-package provenance, and WASM hash are checked before publication.
+The final integration receipt is preserved at
+`benchmarks/baselines/vetch-package-differential/2026-07-15-r2c5-rollout/receipt.json`.
+This closes R2 without a package version bump, automatic projection rebuild,
+new scheduling policy, or expansion of the admitted Datalog route.
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a

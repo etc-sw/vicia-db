@@ -58,7 +58,7 @@ current executable checklist.
 
 ## Next task
 
-### Status: R2-C1 persisted publication authority is admitted
+### Status: R2 is closed; R3 bounded-memory recompact is next
 
 - [x] Add a deterministic, page-aligned codec for entity, value, and temporal
   columns behind `bench-internals` and tests.
@@ -137,3 +137,15 @@ current executable checklist.
   116.308/118.593 ms no-tail projection. It reads the same 4,036 base pages,
   decodes no full image, adds zero measured query RSS, and passes native,
   real-Chrome, fallback, provenance, and validator mutation gates.
+- [x] Roll the complete v13 browser package into clean Vetch. The package moves
+  JS glue, declarations, manifest, licenses, WASM, build provenance, and the
+  integration receipt together from clean Vicia `b909cf5`. Its WASM SHA-256 is
+  `3267022d385175f2df1f335264190a029a12e814841afff2a9a5f4f925e46968`;
+  the final clean Vetch commit is `140ff14`. The 77-test Chrome matrix,
+  authority spike/contract/lifecycle, canvas persistence concurrency, full
+  Vetch authority suite, TypeScript check, and production build pass. Package
+  version, default v12 writes, Vetch scheduling, and arbitrary Datalog remain
+  unchanged.
+- [ ] Bound explicit idle recompact memory as R3. Preserve full-history ledger
+  identity, selected-state recovery, v11/v12 import, and projection retirement;
+  keep O(total) work out of foreground writes.

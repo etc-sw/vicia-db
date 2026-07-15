@@ -1,6 +1,6 @@
 # Vicia DB Performance Roadmap
 
-Status: canonical high-level performance direction as of 2026-07-14.
+Status: canonical high-level performance direction as of 2026-07-15.
 
 This document owns the whole performance shape, priority order, admission
 rules, and stop conditions. It does not replace the evidence or implementation
@@ -682,7 +682,7 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 through R2-C4 are closed. Maintenance-owned native and browser projection
+R0 through R2-C5 are closed. Maintenance-owned native and browser projection
 publication plus the narrow exact-watermark aggregate route are admitted:
 
 ```text
@@ -726,11 +726,17 @@ add zero measured query RSS, and avoid ledger fallback. Native retract,
 valid-window, unrelated-write, and over-budget tests plus the real-Chrome
 77-test suite and validator mutation audit pass.
 
-The next durable slice is R2-C5: stage the complete v13 browser package from
-this source commit into Vetch, rerun the package provenance and consumer
-differentials, and publish the package only when its JS glue, typings,
-manifest, WASM bytes, and source identity move together. This is rollout of the
-already admitted storage/read boundary, not a wider query feature. If the clean
-Vetch build or real browser persistence surface regresses, keep the package
-unpublished and repair the consumer seam before beginning R3 bounded-memory
-recompact work.
+R2-C5 publishes that complete boundary into Vetch as one package. Clean Vicia
+source `b909cf5` produces WASM SHA-256 `3267022d385175f2df1f335264190a029a12e814841afff2a9a5f4f925e46968`;
+the generated JS glue, Rust and TypeScript declarations, manifests, licenses,
+and provenance move together in clean Vetch commit `140ff14`. The final
+integration receipt passes the 77-test Chrome matrix, authority spike,
+contract, lifecycle, canvas persistence concurrency, TypeScript check, and
+production build. R2 is closed without changing the package version, ordinary
+v12 writer default, application scheduling policy, or arbitrary-Datalog route.
+
+The next durable slice is R3 bounded-memory recompact. Measure and bound peak
+live memory during explicit idle recompact while preserving ledger identity,
+selected-state recovery, v11/v12 compatibility, and projection retirement.
+Do not move recompact into foreground writes or add a public scheduling API
+before the existing maintenance path proves insufficient.
