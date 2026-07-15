@@ -607,6 +607,27 @@ async function projectionMaintenanceMain() {
       forwardConsole: true,
     },
   );
+  const outcome = evidence.maintenance.result.outcome;
+  evidence.admissionEligible = true;
+  evidence.gates = {
+    exactAuthority:
+      outcome.attribute_count === 1
+      && outcome.row_count === 500_000
+      && outcome.tx_count === 1_000
+      && outcome.before_pages === 60_440
+      && outcome.after_pages === 64_477
+      && evidence.maintenance.result.before.headerVersion === 12
+      && evidence.maintenance.result.after.headerVersion === 13
+      && evidence.maintenance.result.after.idbCount === outcome.after_pages
+      && evidence.maintenance.result.workerTerminated === true,
+    elapsed: evidence.maintenance.result.elapsedMs <= 30_000,
+    imageBudget: outcome.projection_bytes <= evidence.import.result.fixtureBytes * 0.15,
+    rss: evidence.maintenance.rss.peakDeltaBytes <= 1024 * 1024 * 1024,
+    pss: evidence.maintenance.pss.peakDeltaBytes <= 1024 * 1024 * 1024,
+  };
+  evidence.admitted = evidence.admissionEligible
+    && evidence.source.trackedClean
+    && Object.values(evidence.gates).every(Boolean);
   console.log(JSON.stringify(evidence, null, 2));
 }
 
