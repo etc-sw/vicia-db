@@ -551,6 +551,8 @@ async function projectionMaintenanceMain() {
     console.error("usage: bench-driver.cjs projection-maintenance <fixture-url-path>");
     process.exit(1);
   }
+  const fixturePath = path.resolve(process.cwd(), fixture.replace(/^\//, ""));
+  const wasmPath = path.resolve(process.cwd(), "minigraf-wasm/minigraf_bg.wasm");
   const evidence = {
     schema: "vicia.browser-projection-maintenance.v1",
     fixture,
@@ -565,6 +567,8 @@ async function projectionMaintenanceMain() {
         ["status", "--porcelain", "--untracked-files=no"],
         { encoding: "utf8" },
       ).trim().length === 0,
+      fixtureSha256: crypto.createHash("sha256").update(fs.readFileSync(fixturePath)).digest("hex"),
+      wasmSha256: crypto.createHash("sha256").update(fs.readFileSync(wasmPath)).digest("hex"),
     },
     environment: {
       platform: process.platform,
