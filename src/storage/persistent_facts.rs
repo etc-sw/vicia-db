@@ -1129,6 +1129,49 @@ struct PersistedProjectionCatalogCandidate {
     catalog: ProjectionCatalog,
 }
 
+/// Immutable projection read authority detached from ledger mutation ownership.
+#[derive(Clone)]
+pub(crate) struct PersistedProjectionReader<B: StorageBackend + 'static> {
+    backend: Arc<Mutex<B>>,
+    candidates: Vec<PersistedProjectionCatalogCandidate>,
+}
+
+impl<B: StorageBackend + 'static> PersistedProjectionReader<B> {
+    pub(crate) fn scan_descriptors(
+        &self,
+        attribute: &str,
+        tx_count: u64,
+        valid_at: i64,
+    ) -> Vec<crate::storage::current_projection_image::CurrentProjectionScanDescriptor> {
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.catalog.identity().tx_count() == tx_count)
+            .filter_map(|candidate| {
+                let entry = candidate.catalog.entry_at_or_before(attribute, valid_at)?;
+                Some(
+                    crate::storage::current_projection_image::CurrentProjectionScanDescriptor {
+                        image_page_start: entry.image_page_start(),
+                        image_page_count: entry.image_page_count(),
+                        image_logical_bytes: entry.image_logical_bytes(),
+                        identity: candidate.catalog.identity(),
+                        attribute: entry.attribute().to_owned(),
+                        valid_time_floor: entry.valid_time_floor(),
+                        row_count: entry.row_count(),
+                        fingerprint: entry.fingerprint(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn read_page(&self, page_id: u64) -> Result<Vec<u8>> {
+        self.backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?
+            .read_page(page_id)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Location receipt for one committed projection publication.
 pub struct ProjectionPublicationReceipt {
@@ -1210,6 +1253,13 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
     /// A value of 256 means at most 256 x 4KB = 1MB of cached pages.
     pub fn new(backend: B, page_cache_capacity: usize) -> Result<Self> {
         Self::new_with_btree_options(backend, page_cache_capacity, BtreeBuildOptions::default())
+    }
+
+    pub(crate) fn projection_reader(&self) -> PersistedProjectionReader<B> {
+        PersistedProjectionReader {
+            backend: Arc::clone(&self.backend),
+            candidates: self.projection_catalog_candidates.clone(),
+        }
     }
 
     #[cfg(feature = "bench-internals")]

@@ -136,6 +136,14 @@ projection-maintenance-smoke OUTPUT_DIR="target/projection-maintenance/smoke":
 projection-maintenance-full OUTPUT_DIR="target/projection-maintenance/full":
     ./scripts/run-projection-maintenance-bench.sh full "{{OUTPUT_DIR}}"
 
+# Smoke exact-watermark production projection routing on 10K facts.
+projection-routing-smoke OUTPUT_DIR="target/projection-routing/smoke":
+    ./scripts/run-projection-routing-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Admit exact-watermark production projection routing on the canonical 1M fixture.
+projection-routing-full OUTPUT_DIR="target/projection-routing/full":
+    ./scripts/run-projection-routing-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser

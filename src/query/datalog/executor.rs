@@ -121,6 +121,76 @@ pub(crate) enum OwnedAggregateStep {
     Complete(QueryResult),
 }
 
+/// Aggregate semantics for an exact-watermark persisted projection scan.
+pub(crate) struct ProjectedAttributeAggregateSession {
+    attribute: String,
+    valid_at: i64,
+    tx_count: u64,
+    sink: AggregationSink,
+    find: Vec<FindSpec>,
+    entity_var: Option<String>,
+    value_var: Option<String>,
+    max_results: usize,
+    scanned_rows: usize,
+}
+
+impl ProjectedAttributeAggregateSession {
+    pub(crate) fn attribute(&self) -> &str {
+        &self.attribute
+    }
+
+    pub(crate) fn valid_at(&self) -> i64 {
+        self.valid_at
+    }
+
+    pub(crate) fn tx_count(&self) -> u64 {
+        self.tx_count
+    }
+
+    pub(crate) fn remaining_source_budget(&self) -> usize {
+        self.max_results
+            .saturating_add(1)
+            .saturating_sub(self.scanned_rows)
+    }
+
+    pub(crate) fn note_scanned_rows(&mut self, rows: usize) -> Result<()> {
+        self.scanned_rows = self.scanned_rows.saturating_add(rows);
+        if self.scanned_rows > self.max_results {
+            anyhow::bail!(
+                "query source work exceeds max-results {}; incomplete result rejected",
+                self.max_results
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn push_encoded(&mut self, entity: crate::EntityId, encoded: &[u8]) -> Result<()> {
+        let value = crate::graph::current_projection::decode_value(encoded)?;
+        let entity_var = self.entity_var.as_deref();
+        let value_var = self.value_var.as_deref();
+        if entity_var == value_var && Value::Ref(entity) != value {
+            return Ok(());
+        }
+        self.sink.push_values(|var| {
+            if Some(var) == entity_var {
+                Some(Value::Ref(entity))
+            } else if Some(var) == value_var {
+                Some(value.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn finish(self) -> Result<QueryResult> {
+        let results = project_find_specs(&self.sink.finish()?, &self.find);
+        Ok(QueryResult::QueryResults {
+            vars: self.find.iter().map(FindSpec::display_name).collect(),
+            results,
+        })
+    }
+}
+
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 impl OwnedAttributeAggregateSession {
     pub(crate) fn step(&mut self, max_entries: usize) -> Result<OwnedAggregateStep> {
@@ -255,6 +325,43 @@ impl DatalogExecutor {
             value_var: value_var.map(str::to_owned),
             max_results: query.max_results.unwrap_or(self.max_results),
             visited_entries: 0,
+        }))
+    }
+
+    pub(crate) fn projected_attribute_aggregate_session(
+        &self,
+        query: &DatalogQuery,
+    ) -> Result<Option<ProjectedAttributeAggregateSession>> {
+        let Some((attribute, entity_var, value_var)) = owned_attribute_aggregate(query) else {
+            return Ok(None);
+        };
+        if !query.with_vars.is_empty()
+            || query.find.iter().any(|spec| {
+                !matches!(spec, FindSpec::Aggregate { func, .. } if func == "count" || func == "sum")
+            })
+        {
+            return Ok(None);
+        }
+        let Some(AsOf::Counter(tx_count)) = query.as_of else {
+            return Ok(None);
+        };
+        let Some(ValidAt::Timestamp(valid_at)) = query.valid_at else {
+            return Ok(None);
+        };
+        let registry = self
+            .functions
+            .read()
+            .map_err(|_| anyhow!("functions lock poisoned"))?;
+        Ok(Some(ProjectedAttributeAggregateSession {
+            attribute: attribute.clone(),
+            valid_at,
+            tx_count,
+            sink: AggregationSink::new(&query.find, &query.with_vars, &registry),
+            find: query.find.clone(),
+            entity_var: entity_var.map(str::to_owned),
+            value_var: value_var.map(str::to_owned),
+            max_results: query.max_results.unwrap_or(self.max_results),
+            scanned_rows: 0,
         }))
     }
 

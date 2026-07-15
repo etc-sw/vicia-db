@@ -16,6 +16,94 @@ use crate::storage::PAGE_SIZE;
 use crate::storage::projection_catalog::ProjectionLedgerIdentity;
 use anyhow::{Result, anyhow, bail};
 use crc32fast::Hasher;
+#[cfg(any(test, feature = "bench-internals"))]
+use std::cell::RefCell;
+use std::collections::VecDeque;
+
+/// Repository-only evidence for production current-projection query routing.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub struct ProjectionReadDiagnostics {
+    pub route_attempts: u64,
+    pub completed_scans: u64,
+    pub corrupt_candidates: u64,
+    pub ledger_fallbacks: u64,
+    pub pages_read: u64,
+    pub rows_scanned: u64,
+    pub rows_emitted: u64,
+    pub full_image_decodes: u64,
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+thread_local! {
+    static PROJECTION_READ_DIAGNOSTICS: RefCell<ProjectionReadDiagnostics> =
+        RefCell::new(ProjectionReadDiagnostics::default());
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn reset_projection_read_diagnostics() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        *slot.borrow_mut() = ProjectionReadDiagnostics::default();
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn projection_read_diagnostics() -> ProjectionReadDiagnostics {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn note_projection_route_attempt() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.route_attempts = diagnostics.route_attempts.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn note_projection_corrupt_candidate() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.corrupt_candidates = diagnostics.corrupt_candidates.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn note_projection_ledger_fallback() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.ledger_fallbacks = diagnostics.ledger_fallbacks.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn note_projection_page_read() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.pages_read = diagnostics.pages_read.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn note_projection_row(emitted: bool) {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.rows_scanned = diagnostics.rows_scanned.saturating_add(1);
+        if emitted {
+            diagnostics.rows_emitted = diagnostics.rows_emitted.saturating_add(1);
+        }
+    });
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn note_projection_complete() {
+    PROJECTION_READ_DIAGNOSTICS.with(|slot| {
+        let mut diagnostics = slot.borrow_mut();
+        diagnostics.completed_scans = diagnostics.completed_scans.saturating_add(1);
+    });
+}
 
 const MAGIC: [u8; 8] = *b"MGCPG001";
 const CODEC_VERSION: u32 = 1;
@@ -82,6 +170,486 @@ impl CurrentProjectionPageImage {
     pub fn fingerprint(&self) -> u64 {
         self.fingerprint
     }
+}
+
+/// Catalog-bound location of one immutable current-projection image.
+#[derive(Clone, Debug)]
+pub(crate) struct CurrentProjectionScanDescriptor {
+    pub(crate) image_page_start: u64,
+    pub(crate) image_page_count: u64,
+    pub(crate) image_logical_bytes: u64,
+    pub(crate) identity: ProjectionLedgerIdentity,
+    pub(crate) attribute: String,
+    pub(crate) valid_time_floor: i64,
+    pub(crate) row_count: u64,
+    pub(crate) fingerprint: u64,
+}
+
+/// Bounded page-backed scan state for one projected attribute aggregate.
+pub(crate) struct CurrentProjectionScan {
+    descriptor: CurrentProjectionScanDescriptor,
+    sections: [Section; SECTION_COUNT],
+    row_count: usize,
+    row: usize,
+    valid_from: PageTemporalDecoder,
+    valid_to: PageTemporalDecoder,
+    previous_entity: Option<EntityId>,
+    fingerprint: u64,
+    pages: ProjectionPageCache,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CurrentProjectionScanStep {
+    Yielded { rows: usize },
+    Complete { rows: usize },
+}
+
+#[derive(Clone, Copy)]
+struct PageTemporalDecoder {
+    position: usize,
+    predictors: [u64; 8],
+    next_predictor: usize,
+}
+
+impl PageTemporalDecoder {
+    fn new() -> Self {
+        Self {
+            position: 0,
+            predictors: [0; 8],
+            next_predictor: 0,
+        }
+    }
+}
+
+struct ProjectionPageCache {
+    pages: VecDeque<(u64, Vec<u8>)>,
+}
+
+impl ProjectionPageCache {
+    const CAPACITY: usize = 8;
+
+    fn new() -> Self {
+        Self {
+            pages: VecDeque::with_capacity(Self::CAPACITY),
+        }
+    }
+
+    fn read_range(
+        &mut self,
+        descriptor: &CurrentProjectionScanDescriptor,
+        offset: usize,
+        len: usize,
+        read_page: &mut dyn FnMut(u64) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("current projection scan range overflow"))?;
+        let image_bytes = usize::try_from(descriptor.image_page_count)?
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| anyhow!("current projection scan image capacity overflow"))?;
+        if end > image_bytes {
+            bail!("current projection scan range exceeds image")
+        }
+        let mut output = Vec::with_capacity(len);
+        let mut cursor = offset;
+        while cursor < end {
+            let page_offset = cursor / PAGE_SIZE;
+            let page_id = descriptor
+                .image_page_start
+                .checked_add(u64::try_from(page_offset)?)
+                .ok_or_else(|| anyhow!("current projection scan page id overflow"))?;
+            let in_page = cursor % PAGE_SIZE;
+            let take = (end - cursor).min(PAGE_SIZE - in_page);
+            if let Some(index) = self.pages.iter().position(|(id, _)| *id == page_id) {
+                let (id, page) = self
+                    .pages
+                    .remove(index)
+                    .ok_or_else(|| anyhow!("current projection page cache entry disappeared"))?;
+                output.extend_from_slice(
+                    page.get(in_page..in_page + take)
+                        .ok_or_else(|| anyhow!("current projection page is truncated"))?,
+                );
+                self.pages.push_back((id, page));
+            } else {
+                let page = read_page(page_id)?;
+                #[cfg(any(test, feature = "bench-internals"))]
+                note_projection_page_read();
+                if page.len() != PAGE_SIZE {
+                    bail!("current projection page has invalid length")
+                }
+                output.extend_from_slice(
+                    page.get(in_page..in_page + take)
+                        .ok_or_else(|| anyhow!("current projection page is truncated"))?,
+                );
+                if self.pages.len() == Self::CAPACITY {
+                    self.pages.pop_front();
+                }
+                self.pages.push_back((page_id, page));
+            }
+            cursor = cursor.saturating_add(take);
+        }
+        Ok(output)
+    }
+
+    fn read_array<const N: usize>(
+        &mut self,
+        descriptor: &CurrentProjectionScanDescriptor,
+        offset: usize,
+        read_page: &mut dyn FnMut(u64) -> Result<Vec<u8>>,
+    ) -> Result<[u8; N]> {
+        let mut output = [0; N];
+        self.visit_range(descriptor, offset, N, read_page, |bytes| {
+            output.copy_from_slice(bytes);
+            Ok(())
+        })?;
+        Ok(output)
+    }
+
+    fn read_byte(
+        &mut self,
+        descriptor: &CurrentProjectionScanDescriptor,
+        offset: usize,
+        read_page: &mut dyn FnMut(u64) -> Result<Vec<u8>>,
+    ) -> Result<u8> {
+        Ok(self.read_array::<1>(descriptor, offset, read_page)?[0])
+    }
+
+    fn visit_range<T>(
+        &mut self,
+        descriptor: &CurrentProjectionScanDescriptor,
+        offset: usize,
+        len: usize,
+        read_page: &mut dyn FnMut(u64) -> Result<Vec<u8>>,
+        visit: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("current projection scan range overflow"))?;
+        let first_page = offset / PAGE_SIZE;
+        let last_page = end.saturating_sub(1) / PAGE_SIZE;
+        if len == 0 || first_page != last_page {
+            let bytes = self.read_range(descriptor, offset, len, read_page)?;
+            return visit(&bytes);
+        }
+        let page_id = descriptor
+            .image_page_start
+            .checked_add(u64::try_from(first_page)?)
+            .ok_or_else(|| anyhow!("current projection scan page id overflow"))?;
+        if let Some(index) = self.pages.iter().position(|(id, _)| *id == page_id) {
+            let (id, page) = self
+                .pages
+                .remove(index)
+                .ok_or_else(|| anyhow!("current projection page cache entry disappeared"))?;
+            self.pages.push_back((id, page));
+        } else {
+            let page = read_page(page_id)?;
+            #[cfg(any(test, feature = "bench-internals"))]
+            note_projection_page_read();
+            if page.len() != PAGE_SIZE {
+                bail!("current projection page has invalid length")
+            }
+            if self.pages.len() == Self::CAPACITY {
+                self.pages.pop_front();
+            }
+            self.pages.push_back((page_id, page));
+        }
+        let in_page = offset % PAGE_SIZE;
+        let page = &self
+            .pages
+            .back()
+            .ok_or_else(|| anyhow!("current projection page cache is empty"))?
+            .1;
+        visit(
+            page.get(in_page..in_page + len)
+                .ok_or_else(|| anyhow!("current projection page is truncated"))?,
+        )
+    }
+}
+
+impl CurrentProjectionScan {
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+    pub(crate) fn rows_scanned(&self) -> usize {
+        self.row
+    }
+
+    pub(crate) fn open(
+        descriptor: CurrentProjectionScanDescriptor,
+        read_page: &mut dyn FnMut(u64) -> Result<Vec<u8>>,
+    ) -> Result<Self> {
+        let mut pages = ProjectionPageCache::new();
+        let header = pages.read_range(&descriptor, 0, PAGE_SIZE, read_page)?;
+        if header.get(0..8) != Some(MAGIC.as_slice()) {
+            bail!("invalid current projection image magic")
+        }
+        if read_u32(&header, 8)? != CODEC_VERSION
+            || usize::try_from(read_u32(&header, 12)?)? != PAGE_SIZE
+        {
+            bail!("unsupported current projection image layout")
+        }
+        if read_u64(&header, 16)? != descriptor.image_page_count {
+            bail!("current projection image page count mismatch")
+        }
+        if read_u32(&header, HEADER_CHECKSUM_OFFSET)? != checksum_header(&header) {
+            bail!("current projection image header checksum mismatch")
+        }
+        if header[84..DIRECTORY_OFFSET].iter().any(|byte| *byte != 0) {
+            bail!("current projection image reserved header bytes are non-zero")
+        }
+        let directory_end = DIRECTORY_OFFSET + SECTION_COUNT * DIRECTORY_ENTRY_LEN;
+        if header[directory_end..PAGE_SIZE]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            bail!("current projection image unused header bytes are non-zero")
+        }
+        let identity = ProjectionLedgerIdentity::new(
+            read_u64(&header, 24)?,
+            read_u64(&header, 32)?,
+            read_u64(&header, 40)?,
+        );
+        if identity != descriptor.identity {
+            bail!("current projection image ledger identity mismatch")
+        }
+        let valid_time_floor = read_i64(&header, 48)?;
+        if valid_time_floor != descriptor.valid_time_floor {
+            bail!("current projection image valid-time floor mismatch")
+        }
+        let row_count = usize::try_from(read_u64(&header, 56)?)?;
+        if u64::try_from(row_count)? != descriptor.row_count
+            || read_u64(&header, 64)? != descriptor.fingerprint
+            || usize::try_from(read_u32(&header, 72)?)? != SECTION_COUNT
+        {
+            bail!("current projection image catalog metadata mismatch")
+        }
+        let sections = read_sections(&header)?;
+        validate_streaming_sections(&descriptor, &sections, row_count)?;
+        let attribute =
+            pages.read_range(&descriptor, sections[0].offset, sections[0].len, read_page)?;
+        if attribute != descriptor.attribute.as_bytes() {
+            bail!("current projection image attribute mismatch")
+        }
+        let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+        hash_projection_bytes(&mut fingerprint, &attribute);
+        hash_projection_bytes(&mut fingerprint, &valid_time_floor.to_be_bytes());
+        Ok(Self {
+            descriptor,
+            sections,
+            row_count,
+            row: 0,
+            valid_from: PageTemporalDecoder::new(),
+            valid_to: PageTemporalDecoder::new(),
+            previous_entity: None,
+            fingerprint,
+            pages,
+        })
+    }
+
+    pub(crate) fn step(
+        &mut self,
+        max_rows: usize,
+        valid_at: i64,
+        read_page: &mut dyn FnMut(u64) -> Result<Vec<u8>>,
+        visit: &mut dyn FnMut(EntityId, &[u8]) -> Result<()>,
+    ) -> Result<CurrentProjectionScanStep> {
+        if max_rows == 0 {
+            return Ok(CurrentProjectionScanStep::Yielded { rows: 0 });
+        }
+        let started = self.row;
+        while self.row < self.row_count && self.row.saturating_sub(started) < max_rows {
+            let row = self.row;
+            let entity_offset = self.sections[1]
+                .offset
+                .checked_add(
+                    row.checked_mul(16)
+                        .ok_or_else(|| anyhow!("entity offset overflow"))?,
+                )
+                .ok_or_else(|| anyhow!("entity offset overflow"))?;
+            let entity_bytes =
+                self.pages
+                    .read_array::<16>(&self.descriptor, entity_offset, read_page)?;
+            let entity = EntityId::from_bytes(entity_bytes);
+            if self
+                .previous_entity
+                .is_some_and(|previous| previous > entity)
+            {
+                bail!("current projection image entities are not sorted")
+            }
+            let offset_position = self.sections[2]
+                .offset
+                .checked_add(
+                    row.checked_mul(4)
+                        .ok_or_else(|| anyhow!("value offset overflow"))?,
+                )
+                .ok_or_else(|| anyhow!("value offset overflow"))?;
+            let offsets =
+                self.pages
+                    .read_array::<8>(&self.descriptor, offset_position, read_page)?;
+            let start = usize::try_from(u32::from_le_bytes(offsets[0..4].try_into()?))?;
+            let end = usize::try_from(u32::from_le_bytes(offsets[4..8].try_into()?))?;
+            if start > end || end > self.sections[3].len {
+                bail!("current projection image value offsets are invalid")
+            }
+            let mut next_from = self.valid_from;
+            let mut next_to = self.valid_to;
+            let valid_from = decode_page_temporal(
+                &mut next_from,
+                self.sections[4],
+                &self.descriptor,
+                &mut self.pages,
+                read_page,
+            )?;
+            let valid_to = decode_page_temporal(
+                &mut next_to,
+                self.sections[5],
+                &self.descriptor,
+                &mut self.pages,
+                read_page,
+            )?;
+            if valid_from >= valid_to || valid_to <= self.descriptor.valid_time_floor {
+                bail!("current projection image interval is invalid")
+            }
+            let emitted = valid_from <= valid_at && valid_at < valid_to;
+            let mut next_fingerprint = self.fingerprint;
+            hash_projection_bytes(&mut next_fingerprint, entity.as_bytes());
+            self.pages.visit_range(
+                &self.descriptor,
+                self.sections[3].offset.saturating_add(start),
+                end.saturating_sub(start),
+                read_page,
+                |value| {
+                    validate_encoded_value(value)?;
+                    if emitted {
+                        visit(entity, value)?;
+                    }
+                    hash_projection_bytes(&mut next_fingerprint, value);
+                    Ok(())
+                },
+            )?;
+            #[cfg(any(test, feature = "bench-internals"))]
+            note_projection_row(emitted);
+            hash_projection_bytes(&mut next_fingerprint, &valid_from.to_be_bytes());
+            hash_projection_bytes(&mut next_fingerprint, &valid_to.to_be_bytes());
+            self.fingerprint = next_fingerprint;
+            self.valid_from = next_from;
+            self.valid_to = next_to;
+            self.previous_entity = Some(entity);
+            self.row = self.row.saturating_add(1);
+        }
+        let rows = self.row.saturating_sub(started);
+        if self.row < self.row_count {
+            return Ok(CurrentProjectionScanStep::Yielded { rows });
+        }
+        if self.valid_from.position != self.sections[4].len
+            || self.valid_to.position != self.sections[5].len
+            || self.fingerprint != self.descriptor.fingerprint
+        {
+            bail!("current projection image logical fingerprint mismatch")
+        }
+        #[cfg(any(test, feature = "bench-internals"))]
+        note_projection_complete();
+        Ok(CurrentProjectionScanStep::Complete { rows })
+    }
+}
+
+fn validate_streaming_sections(
+    descriptor: &CurrentProjectionScanDescriptor,
+    sections: &[Section; SECTION_COUNT],
+    row_count: usize,
+) -> Result<()> {
+    let image_bytes = usize::try_from(descriptor.image_page_count)?
+        .checked_mul(PAGE_SIZE)
+        .ok_or_else(|| anyhow!("current projection image capacity overflow"))?;
+    let mut previous_end = PAGE_SIZE;
+    for section in sections {
+        if section.offset < PAGE_SIZE
+            || section.offset % PAGE_SIZE != 0
+            || section.offset != align_page(previous_end)?
+        {
+            bail!("current projection image section layout is non-canonical")
+        }
+        previous_end = section
+            .offset
+            .checked_add(section.len)
+            .ok_or_else(|| anyhow!("current projection section range overflow"))?;
+        if previous_end > image_bytes {
+            bail!("current projection image section exceeds page range")
+        }
+    }
+    if align_page(previous_end)? != image_bytes
+        || sections[1].len != row_count.saturating_mul(16)
+        || sections[2].len != row_count.saturating_add(1).saturating_mul(4)
+    {
+        bail!("current projection image row-aligned layout mismatch")
+    }
+    let logical_bytes = sections
+        .iter()
+        .try_fold(u64::try_from(PAGE_SIZE)?, |total, section| {
+            total
+                .checked_add(u64::try_from(section.len)?)
+                .ok_or_else(|| anyhow!("current projection logical length overflow"))
+        })?;
+    if logical_bytes != descriptor.image_logical_bytes {
+        bail!("current projection image logical length mismatch")
+    }
+    Ok(())
+}
+
+fn decode_page_temporal(
+    decoder: &mut PageTemporalDecoder,
+    section: Section,
+    descriptor: &CurrentProjectionScanDescriptor,
+    pages: &mut ProjectionPageCache,
+    read_page: &mut dyn FnMut(u64) -> Result<Vec<u8>>,
+) -> Result<i64> {
+    if decoder.position >= section.len {
+        bail!("truncated current projection temporal predictor")
+    }
+    let predictor = usize::from(pages.read_byte(
+        descriptor,
+        section.offset.saturating_add(decoder.position),
+        read_page,
+    )?);
+    decoder.position = decoder.position.saturating_add(1);
+    let previous = *decoder
+        .predictors
+        .get(predictor)
+        .ok_or_else(|| anyhow!("invalid current projection temporal predictor"))?;
+    let mut delta = 0_u64;
+    for index in 0..10_u32 {
+        if decoder.position >= section.len {
+            bail!("truncated current projection temporal varint")
+        }
+        let byte = pages.read_byte(
+            descriptor,
+            section.offset.saturating_add(decoder.position),
+            read_page,
+        )?;
+        decoder.position = decoder.position.saturating_add(1);
+        let payload = u64::from(byte & 0x7f);
+        if index == 9 && payload > 1 {
+            bail!("current projection temporal varint exceeds u64")
+        }
+        delta |= payload << (index * 7);
+        if byte & 0x80 == 0 {
+            if index > 0 && payload == 0 {
+                bail!("current projection temporal varint is overlong")
+            }
+            let bits = previous ^ delta;
+            decoder.predictors[decoder.next_predictor] = bits;
+            decoder.next_predictor = decoder.next_predictor.saturating_add(1) % 8;
+            return Ok(i64::from_ne_bytes(bits.to_ne_bytes()));
+        }
+    }
+    bail!("current projection temporal varint is overlong")
+}
+
+fn hash_projection_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    *hash ^= 0xff;
+    *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -597,7 +1165,8 @@ fn read_i64(bytes: &[u8], offset: usize) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurrentProjectionPageImage, checksum_header, checksum_payload, decode, encode, read_u64,
+        CurrentProjectionPageImage, CurrentProjectionScan, CurrentProjectionScanDescriptor,
+        CurrentProjectionScanStep, checksum_header, checksum_payload, decode, encode, read_u64,
     };
     use crate::graph::current_projection::{CurrentProjectionBuilder, ProjectedInterval};
     use crate::graph::types::Value;
@@ -648,6 +1217,30 @@ mod tests {
         decode(image.as_bytes(), identity(), ":상태/value", -10, 99).unwrap()
     }
 
+    fn scan_descriptor(image: &CurrentProjectionPageImage) -> CurrentProjectionScanDescriptor {
+        CurrentProjectionScanDescriptor {
+            image_page_start: 0,
+            image_page_count: image.page_count(),
+            image_logical_bytes: image.logical_bytes(),
+            identity: image.identity(),
+            attribute: ":상태/value".to_owned(),
+            valid_time_floor: -10,
+            row_count: image.row_count(),
+            fingerprint: image.fingerprint(),
+        }
+    }
+
+    fn image_page_reader(bytes: &[u8]) -> impl FnMut(u64) -> anyhow::Result<Vec<u8>> + '_ {
+        move |page_id| {
+            let start = usize::try_from(page_id)?.saturating_mul(crate::storage::PAGE_SIZE);
+            let end = start.saturating_add(crate::storage::PAGE_SIZE);
+            Ok(bytes
+                .get(start..end)
+                .ok_or_else(|| anyhow::anyhow!("page outside test image"))?
+                .to_vec())
+        }
+    }
+
     #[test]
     fn page_image_round_trips_and_is_deterministic() {
         let candidate = candidate();
@@ -676,6 +1269,110 @@ mod tests {
             decoded.fingerprint().unwrap(),
             candidate.fingerprint().unwrap()
         );
+    }
+
+    #[test]
+    fn page_backed_scan_resumes_without_decoding_the_full_image() {
+        let image = encode(&candidate(), identity()).unwrap();
+        let mut read_page = image_page_reader(image.as_bytes());
+        let mut scan =
+            CurrentProjectionScan::open(scan_descriptor(&image), &mut read_page).unwrap();
+        let mut visible = Vec::new();
+        loop {
+            let step = scan
+                .step(1, 0, &mut read_page, &mut |entity, value| {
+                    visible.push((entity, value.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+            if matches!(step, CurrentProjectionScanStep::Complete { .. }) {
+                break;
+            }
+        }
+        let expected = candidate().rows_at(0).unwrap();
+        assert_eq!(visible.len(), expected.len());
+        for ((entity, encoded), row) in visible.iter().zip(expected.iter()) {
+            assert_eq!(*entity, row.0);
+            assert_eq!(
+                crate::graph::current_projection::decode_value(encoded).unwrap(),
+                row.1
+            );
+        }
+    }
+
+    #[test]
+    fn page_backed_scan_rejects_logical_corruption_at_completion() {
+        let image = encode(&candidate(), identity()).unwrap();
+        let mut corrupt = image.as_bytes().to_vec();
+        let value_offset = usize::try_from(read_u64(&corrupt, 208).unwrap()).unwrap();
+        corrupt[value_offset + 1] ^= 1;
+        let mut read_page = image_page_reader(&corrupt);
+        let mut scan =
+            CurrentProjectionScan::open(scan_descriptor(&image), &mut read_page).unwrap();
+        assert!(
+            scan.step(usize::MAX, 0, &mut read_page, &mut |_, _| Ok(()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn page_backed_scan_retains_completed_rows_across_a_page_fault() {
+        let mut builder = CurrentProjectionBuilder::new(":bulk/value", -1, 1, 0);
+        for entity in 0..600_u128 {
+            builder
+                .push(
+                    Uuid::from_u128(entity + 1),
+                    &Value::Integer(i64::try_from(entity).unwrap()),
+                    0,
+                    i64::MAX,
+                )
+                .unwrap();
+        }
+        let candidate = builder.finish().unwrap();
+        let identity = ProjectionLedgerIdentity::new(1, 0, 0);
+        let image = encode(&candidate, identity).unwrap();
+        let descriptor = CurrentProjectionScanDescriptor {
+            image_page_start: 0,
+            image_page_count: image.page_count(),
+            image_logical_bytes: image.logical_bytes(),
+            identity,
+            attribute: ":bulk/value".to_owned(),
+            valid_time_floor: -1,
+            row_count: image.row_count(),
+            fingerprint: image.fingerprint(),
+        };
+        let entity_start = usize::try_from(read_u64(image.as_bytes(), 160).unwrap()).unwrap();
+        let fault_page = u64::try_from(entity_start / crate::storage::PAGE_SIZE + 1).unwrap();
+        let mut faulted = false;
+        let mut read_page = |page_id: u64| {
+            if page_id == fault_page && !faulted {
+                faulted = true;
+                anyhow::bail!("page {page_id} is not resident")
+            }
+            let start = usize::try_from(page_id)?.saturating_mul(crate::storage::PAGE_SIZE);
+            let end = start.saturating_add(crate::storage::PAGE_SIZE);
+            Ok(image.as_bytes()[start..end].to_vec())
+        };
+        let mut scan = CurrentProjectionScan::open(descriptor, &mut read_page).unwrap();
+        let mut visited = 0_usize;
+        assert!(
+            scan.step(600, 1, &mut read_page, &mut |_, _| {
+                visited = visited.saturating_add(1);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(scan.rows_scanned(), 256);
+        assert_eq!(visited, 256);
+        assert!(matches!(
+            scan.step(600, 1, &mut read_page, &mut |_, _| {
+                visited = visited.saturating_add(1);
+                Ok(())
+            })
+            .unwrap(),
+            CurrentProjectionScanStep::Complete { .. }
+        ));
+        assert_eq!(visited, 600);
     }
 
     #[test]

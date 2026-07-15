@@ -70,12 +70,16 @@ use crate::query::datalog::functions::{
 };
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::query::datalog::types::DatalogQuery;
 use crate::query::datalog::types::{
     AsOf, AttributeSpec, DatalogCommand, ForgetSource, ForgetSpec, PseudoAttr, Transaction, ValidAt,
 };
 
 /// Largest result admitted by the foreground read-view API.
 pub const READ_VIEW_MAX_ROWS: usize = 10_000;
+/// Largest explicitly budgeted query source-work allowance on a read view.
+pub const READ_VIEW_MAX_QUERY_WORK_ROWS: usize = 1_000_000;
 /// Maximum exact entities admitted by one current-view request.
 pub const CURRENT_ENTITIES_MAX_IDS: usize = 128;
 /// Maximum attributes admitted by one current-view request.
@@ -264,8 +268,8 @@ pub(crate) fn prepare_read_view_query(
     valid_at: ValidAt,
     max_rows: usize,
 ) -> Result<DatalogCommand> {
-    if max_rows == 0 || max_rows > READ_VIEW_MAX_ROWS {
-        bail!("read-view max_rows must be in 1..={READ_VIEW_MAX_ROWS}; got {max_rows}");
+    if max_rows == 0 || max_rows > READ_VIEW_MAX_QUERY_WORK_ROWS {
+        bail!("read-view max_rows must be in 1..={READ_VIEW_MAX_QUERY_WORK_ROWS}; got {max_rows}");
     }
 
     let command = parse_datalog_command(input).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -294,6 +298,13 @@ impl ReadView<'_> {
         self.tx_count
     }
 
+    /// Return repository-only diagnostics from the most recent query on this thread.
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn last_projection_read_diagnostics(&self) -> crate::ProjectionReadDiagnostics {
+        crate::storage::current_projection_image::projection_read_diagnostics()
+    }
+
     /// Execute one selective query with an explicit result and work bound.
     ///
     /// `max_rows` bounds the complete result and conservatively limits source
@@ -301,8 +312,16 @@ impl ReadView<'_> {
     /// produced. A query may therefore reject even when its final projection
     /// would fit. The method never returns a truncated prefix.
     pub fn query(&self, input: &str, max_rows: usize) -> Result<QueryResult> {
+        #[cfg(any(test, feature = "bench-internals"))]
+        crate::storage::current_projection_image::reset_projection_read_diagnostics();
         let command =
             prepare_read_view_query(input, self.tx_count, self.valid_at.clone(), max_rows)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let DatalogCommand::Query(query) = &command
+            && let Some(result) = self.db.try_projected_read_view_query(query)?
+        {
+            return Ok(result);
+        }
         let mut executor = DatalogExecutor::new_with_rules_and_functions(
             self.db.inner.fact_storage.clone(),
             self.db.inner.rules.clone(),
@@ -465,6 +484,104 @@ impl ReadView<'_> {
                 return Ok(results);
             }
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Minigraf {
+    fn try_projected_read_view_query(&self, query: &DatalogQuery) -> Result<Option<QueryResult>> {
+        let Some(reader) = self.inner.projection_reader.as_ref() else {
+            return Ok(None);
+        };
+        let executor = DatalogExecutor::new_with_rules_and_functions(
+            self.inner.fact_storage.clone(),
+            self.inner.rules.clone(),
+            self.inner.functions.clone(),
+        );
+        let Some(eligibility) = executor.projected_attribute_aggregate_session(query)? else {
+            return Ok(None);
+        };
+        #[cfg(any(test, feature = "bench-internals"))]
+        crate::storage::current_projection_image::note_projection_route_attempt();
+        let captured_watermark = self.inner.fact_storage.current_projection_watermark();
+        if captured_watermark.1 != eligibility.tx_count() {
+            #[cfg(any(test, feature = "bench-internals"))]
+            crate::storage::current_projection_image::note_projection_ledger_fallback();
+            return Ok(None);
+        }
+        let descriptors = reader.scan_descriptors(
+            eligibility.attribute(),
+            eligibility.tx_count(),
+            eligibility.valid_at(),
+        );
+        for descriptor in descriptors {
+            let Some(mut aggregate) = executor.projected_attribute_aggregate_session(query)? else {
+                return Ok(None);
+            };
+            let mut read_page = |page_id| reader.read_page(page_id);
+            let Ok(mut scan) =
+                crate::storage::current_projection_image::CurrentProjectionScan::open(
+                    descriptor,
+                    &mut read_page,
+                )
+            else {
+                #[cfg(any(test, feature = "bench-internals"))]
+                crate::storage::current_projection_image::note_projection_corrupt_candidate();
+                continue;
+            };
+            loop {
+                let remaining = aggregate.remaining_source_budget();
+                if remaining == 0 {
+                    aggregate.note_scanned_rows(1)?;
+                }
+                let mut semantic_error = None;
+                let step = scan.step(
+                    remaining.min(4_096),
+                    aggregate.valid_at(),
+                    &mut read_page,
+                    &mut |entity, encoded| {
+                        if semantic_error.is_none()
+                            && let Err(error) = aggregate.push_encoded(entity, encoded)
+                        {
+                            semantic_error = Some(error);
+                        }
+                        Ok(())
+                    },
+                );
+                if let Some(error) = semantic_error {
+                    return Err(error);
+                }
+                let Ok(step) = step else {
+                    #[cfg(any(test, feature = "bench-internals"))]
+                    crate::storage::current_projection_image::note_projection_corrupt_candidate();
+                    break;
+                };
+                let (rows, complete) = match step {
+                    crate::storage::current_projection_image::CurrentProjectionScanStep::Yielded {
+                        rows,
+                    } => (rows, false),
+                    crate::storage::current_projection_image::CurrentProjectionScanStep::Complete {
+                        rows,
+                    } => (rows, true),
+                };
+                aggregate.note_scanned_rows(rows)?;
+                if complete {
+                    if self.inner.fact_storage.current_projection_watermark() != captured_watermark
+                    {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        crate::storage::current_projection_image::note_projection_ledger_fallback();
+                        return Ok(None);
+                    }
+                    return aggregate.finish().map(Some);
+                }
+                if rows == 0 {
+                    break;
+                }
+            }
+        }
+        #[cfg(any(test, feature = "bench-internals"))]
+        crate::storage::current_projection_image::note_projection_ledger_fallback();
+        Ok(None)
     }
 }
 use crate::storage::backend::MemoryBackend;
@@ -1072,6 +1189,12 @@ struct Inner {
     /// Serialises all writes. Holds `WriteContext` which contains the PFS/WAL
     /// for file-backed databases.
     write_lock: Mutex<WriteContext>,
+    #[cfg(not(target_arch = "wasm32"))]
+    projection_reader: Option<
+        crate::storage::persistent_facts::PersistedProjectionReader<
+            crate::storage::backend::file::FileBackend,
+        >,
+    >,
     /// Configuration options.
     options: OpenOptions,
     /// Raw handles retain legacy automatic checkpointing. Capability handles
@@ -1505,6 +1628,7 @@ impl Minigraf {
         // Replay any existing WAL entries before opening the writer
         let replay = Self::replay_wal(&wal_path, &fact_storage, &pfs)?;
         let wal_entry_count = replay.entry_count;
+        let projection_reader = Some(pfs.projection_reader());
 
         // Open the WAL writer only if the WAL file already exists from a previous session.
         // Otherwise, create it lazily on the first write.
@@ -1527,6 +1651,7 @@ impl Minigraf {
                 rules: Arc::new(RwLock::new(RuleRegistry::new())),
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(ctx),
+                projection_reader,
                 options: opts,
                 checkpoint_policy,
                 #[cfg(any(test, feature = "bench-internals"))]
@@ -1573,6 +1698,8 @@ impl Minigraf {
                 rules: Arc::new(RwLock::new(RuleRegistry::new())),
                 functions: Arc::new(RwLock::new(FunctionRegistry::with_builtins())),
                 write_lock: Mutex::new(WriteContext::Memory),
+                #[cfg(not(target_arch = "wasm32"))]
+                projection_reader: None,
                 options: opts,
                 checkpoint_policy,
                 #[cfg(any(test, feature = "bench-internals"))]
@@ -1839,6 +1966,12 @@ impl Minigraf {
     #[cfg(feature = "bench-internals")]
     pub fn last_leaf_read_diagnostics(&self) -> crate::LeafReadDiagnostics {
         crate::storage::btree_v6::leaf_read_diagnostics()
+    }
+
+    /// Return repository-only diagnostics from the most recent read-view query.
+    #[cfg(feature = "bench-internals")]
+    pub fn last_projection_read_diagnostics(&self) -> crate::ProjectionReadDiagnostics {
+        crate::storage::current_projection_image::projection_read_diagnostics()
     }
 
     /// Enable or disable the repository-only leaf diagnostic probe on this thread.
@@ -6057,6 +6190,139 @@ mod capability_tests {
             crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION
         );
         assert_eq!(reopened.current_tx_count(), 1);
+    }
+
+    #[test]
+    fn read_view_routes_exact_watermark_count_sum_and_falls_back_after_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-routing.graph");
+        {
+            let ledger = InteractiveLedger::open(&path).unwrap();
+            ledger
+                .execute_write(
+                    r#"(transact [[#uuid "00000000-0000-0000-0000-000000000201" :card/rank 3]
+                                  [#uuid "00000000-0000-0000-0000-000000000202" :card/rank 7]])"#,
+                )
+                .unwrap();
+        }
+        let maintenance = MaintenanceLedger::open(&path).unwrap();
+        let outcome = maintenance
+            .rebuild_current_projections(&[":card/rank".to_owned()])
+            .unwrap();
+        drop(maintenance);
+
+        let ledger = InteractiveLedger::open(&path).unwrap();
+        let query = "(query [:find (count ?v) (sum ?v) :where [?e :card/rank ?v]])";
+        let view = ledger
+            .read_view(ReadViewOptions {
+                as_of: Some(outcome.tx_count),
+                valid_at: ReadViewValidAt::Now,
+            })
+            .unwrap();
+        assert_count_sum(view.query(query, 10).unwrap(), 2, 10);
+        let routed = crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(routed.route_attempts, 1);
+        assert_eq!(routed.completed_scans, 1);
+        assert_eq!(routed.rows_scanned, 2);
+        assert_eq!(routed.rows_emitted, 2);
+        assert_eq!(routed.full_image_decodes, 0);
+        assert_eq!(routed.ledger_fallbacks, 0);
+        let raw = view
+            .query("(query [:find ?v :where [?e :card/rank ?v]])", 10)
+            .unwrap();
+        let QueryResult::QueryResults { results, .. } = raw else {
+            panic!("expected raw query results");
+        };
+        assert_eq!(results.len(), 2);
+        let raw_diagnostics =
+            crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(raw_diagnostics.route_attempts, 0);
+        assert_eq!(raw_diagnostics.completed_scans, 0);
+
+        ledger
+            .execute_write(
+                r#"(transact [[#uuid "00000000-0000-0000-0000-000000000203" :card/rank 5]])"#,
+            )
+            .unwrap();
+        let current = ledger
+            .read_view(ReadViewOptions {
+                as_of: None,
+                valid_at: ReadViewValidAt::Now,
+            })
+            .unwrap();
+        assert_count_sum(current.query(query, 10).unwrap(), 3, 15);
+        let fallback = crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(fallback.route_attempts, 1);
+        assert_eq!(fallback.completed_scans, 0);
+        assert_eq!(fallback.ledger_fallbacks, 1);
+    }
+
+    #[test]
+    fn read_view_falls_back_to_ledger_when_every_projection_candidate_is_corrupt() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        const ATTRIBUTE: &str = ":card/rank";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-routing-corrupt.graph");
+        let receipts = {
+            let db = Minigraf::open(&path).unwrap();
+            db.execute(
+                r#"(transact [[#uuid "00000000-0000-0000-0000-000000000211" :card/rank 3]
+                              [#uuid "00000000-0000-0000-0000-000000000212" :card/rank 7]])"#,
+            )
+            .unwrap();
+            db.checkpoint().unwrap();
+            let candidate = db.benchmark_build_current_projection(ATTRIBUTE, 0).unwrap();
+            let image = db
+                .benchmark_encode_current_projection_page_image(&candidate)
+                .unwrap();
+            [
+                db.benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, 0)
+                    .unwrap(),
+                db.benchmark_publish_current_projection_page_image(&image, ATTRIBUTE, 0)
+                    .unwrap(),
+            ]
+        };
+        for receipt in receipts {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.seek(SeekFrom::Start(
+                receipt.image_page_start * crate::storage::PAGE_SIZE as u64,
+            ))
+            .unwrap();
+            file.write_all(b"X").unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let ledger = InteractiveLedger::open(&path).unwrap();
+        let view = ledger.read_view(ReadViewOptions::default()).unwrap();
+        assert_count_sum(
+            view.query(
+                "(query [:find (count ?v) (sum ?v) :where [?e :card/rank ?v]])",
+                10,
+            )
+            .unwrap(),
+            2,
+            10,
+        );
+        let diagnostics = crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(diagnostics.route_attempts, 1);
+        assert_eq!(diagnostics.completed_scans, 0);
+        assert_eq!(diagnostics.corrupt_candidates, 2);
+        assert_eq!(diagnostics.ledger_fallbacks, 1);
+    }
+
+    fn assert_count_sum(result: QueryResult, count: i64, sum: i64) {
+        let QueryResult::QueryResults { results, .. } = result else {
+            panic!("expected aggregate query result");
+        };
+        assert_eq!(
+            results,
+            vec![vec![Value::Integer(count), Value::Integer(sum)]]
+        );
     }
 
     #[test]

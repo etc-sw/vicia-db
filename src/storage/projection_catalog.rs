@@ -111,19 +111,24 @@ impl ProjectionCatalogEntry {
         self.image_page_count
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn image_logical_bytes(&self) -> u64 {
         self.image_logical_bytes
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn row_count(&self) -> u64 {
         self.row_count
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn fingerprint(&self) -> u64 {
         self.fingerprint
+    }
+
+    pub(crate) fn attribute(&self) -> &str {
+        &self.attribute
+    }
+
+    pub(crate) fn valid_time_floor(&self) -> i64 {
+        self.valid_time_floor
     }
 
     fn key(&self) -> (&str, i64) {
@@ -186,6 +191,17 @@ impl ProjectionCatalog {
             .binary_search_by(|entry| entry.key().cmp(&(attribute, valid_time_floor)))
             .ok()
             .and_then(|index| self.entries.get(index))
+    }
+
+    pub(crate) fn entry_at_or_before(
+        &self,
+        attribute: &str,
+        valid_at: i64,
+    ) -> Option<&ProjectionCatalogEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.attribute() == attribute && entry.valid_time_floor() <= valid_at)
+            .max_by_key(|entry| entry.valid_time_floor())
     }
 
     pub(crate) fn encode_pages(&self) -> Result<(Vec<u8>, u64, u32)> {

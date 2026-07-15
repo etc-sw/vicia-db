@@ -102,8 +102,8 @@ pub use db::{
     CURRENT_REFS_MAX_HISTORY_ENTRIES, CurrentEntitiesRequest, CurrentFact, CurrentRefsRequest,
     InteractiveLedger, InteractiveWriteTransaction, MaintenanceAdvice, MaintenanceCheckpointEffect,
     MaintenanceDeltaEffect, MaintenanceLedger, MaintenanceOutcome, Minigraf, OpenOptions,
-    ProjectionMaintenanceOutcome, READ_VIEW_MAX_ROWS, ReadView, ReadViewOptions, ReadViewValidAt,
-    WriteTransaction,
+    ProjectionMaintenanceOutcome, READ_VIEW_MAX_QUERY_WORK_ROWS, READ_VIEW_MAX_ROWS, ReadView,
+    ReadViewOptions, ReadViewValidAt, WriteTransaction,
 };
 /// Vicia DB compatibility name for the primary embedded database handle.
 ///
@@ -128,7 +128,9 @@ pub use graph::storage::{
 #[cfg(feature = "bench-internals")]
 pub use storage::btree_v6::LeafReadDiagnostics;
 #[cfg(any(test, feature = "bench-internals"))]
-pub use storage::current_projection_image::CurrentProjectionPageImage;
+pub use storage::current_projection_image::{
+    CurrentProjectionPageImage, ProjectionReadDiagnostics,
+};
 #[cfg(feature = "bench-internals")]
 pub use storage::layout_diagnostics::{
     PrefixEstimate, StorageIndexLayout, StorageLayoutDiagnostics, StoragePageLayout,

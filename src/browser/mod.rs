@@ -1098,6 +1098,8 @@ impl BrowserReadView {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<String, JsValue> {
+        #[cfg(any(test, feature = "bench-internals"))]
+        crate::storage::current_projection_image::reset_projection_read_diagnostics();
         if max_bytes == 0 || max_bytes > BROWSER_READ_VIEW_MAX_RESULT_BYTES {
             return Err(JsValue::from_str(&format!(
                 "read-view max_bytes must be in 1..={BROWSER_READ_VIEW_MAX_RESULT_BYTES}; got {max_bytes}"
@@ -1115,7 +1117,7 @@ impl BrowserReadView {
         };
         db.ensure_usable()?;
         let guarded = db.begin_paged_read()?;
-        let result = db.execute_read_command(command).await;
+        let result = db.execute_read_view_command(command).await;
         if guarded {
             db.finish_paged_read();
         }
@@ -1610,6 +1612,165 @@ impl BrowserDb {
                 },
             }
         }
+    }
+
+    async fn execute_read_view_command(
+        &self,
+        command: DatalogCommand,
+    ) -> Result<QueryResult, JsValue> {
+        if let DatalogCommand::Query(query) = &command
+            && let Some(result) = self.try_execute_projected_read_view_query(query).await?
+        {
+            return Ok(result);
+        }
+        self.execute_read_command(command).await
+    }
+
+    async fn try_execute_projected_read_view_query(
+        &self,
+        query: &crate::query::datalog::types::DatalogQuery,
+    ) -> Result<Option<QueryResult>, JsValue> {
+        let (executor, reader, captured_watermark) = {
+            let inner = self.inner.borrow();
+            (
+                DatalogExecutor::new_with_rules_and_functions(
+                    inner.fact_storage.clone(),
+                    inner.rules.clone(),
+                    inner.functions.clone(),
+                ),
+                inner.pfs.projection_reader(),
+                inner.fact_storage.current_projection_watermark(),
+            )
+        };
+        let Some(eligibility) = executor
+            .projected_attribute_aggregate_session(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        #[cfg(any(test, feature = "bench-internals"))]
+        crate::storage::current_projection_image::note_projection_route_attempt();
+        if captured_watermark.1 != eligibility.tx_count() {
+            #[cfg(any(test, feature = "bench-internals"))]
+            crate::storage::current_projection_image::note_projection_ledger_fallback();
+            return Ok(None);
+        }
+        let descriptors = reader.scan_descriptors(
+            eligibility.attribute(),
+            eligibility.tx_count(),
+            eligibility.valid_at(),
+        );
+        for descriptor in descriptors {
+            let Some(mut aggregate) = executor
+                .projected_attribute_aggregate_session(query)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?
+            else {
+                return Ok(None);
+            };
+            let mut scan = loop {
+                let mut read_page = |page_id| reader.read_page(page_id);
+                match crate::storage::current_projection_image::CurrentProjectionScan::open(
+                    descriptor.clone(),
+                    &mut read_page,
+                ) {
+                    Ok(scan) => break Some(scan),
+                    Err(error) => match page_not_resident_id(&error) {
+                        Some(page_id) => {
+                            self.fetch_and_stage_page_window(page_id, BROWSER_IDB_BATCH_PAGES)
+                                .await?;
+                        }
+                        None => {
+                            #[cfg(any(test, feature = "bench-internals"))]
+                            crate::storage::current_projection_image::note_projection_corrupt_candidate();
+                            break None;
+                        }
+                    },
+                }
+            };
+            let Some(mut scan) = scan.take() else {
+                continue;
+            };
+            loop {
+                let remaining = aggregate.remaining_source_budget();
+                if remaining == 0 {
+                    aggregate
+                        .note_scanned_rows(1)
+                        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                }
+                let mut semantic_error = None;
+                let mut read_page = |page_id| reader.read_page(page_id);
+                let scan_started = scan.rows_scanned();
+                let step = scan.step(
+                    remaining.min(BROWSER_AGGREGATE_ENTRY_BUDGET),
+                    aggregate.valid_at(),
+                    &mut read_page,
+                    &mut |entity, encoded| {
+                        if semantic_error.is_none()
+                            && let Err(error) = aggregate.push_encoded(entity, encoded)
+                        {
+                            semantic_error = Some(error);
+                        }
+                        Ok(())
+                    },
+                );
+                if let Some(error) = semantic_error {
+                    return Err(JsValue::from_str(&error.to_string()));
+                }
+                let step = match step {
+                    Ok(step) => step,
+                    Err(error) => match page_not_resident_id(&error) {
+                        Some(page_id) => {
+                            aggregate
+                                .note_scanned_rows(scan.rows_scanned().saturating_sub(scan_started))
+                                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                            self.fetch_and_stage_page_window(page_id, BROWSER_IDB_BATCH_PAGES)
+                                .await?;
+                            continue;
+                        }
+                        None => {
+                            #[cfg(any(test, feature = "bench-internals"))]
+                            crate::storage::current_projection_image::note_projection_corrupt_candidate();
+                            break;
+                        }
+                    },
+                };
+                let (rows, complete) = match step {
+                    crate::storage::current_projection_image::CurrentProjectionScanStep::Yielded {
+                        rows,
+                    } => (rows, false),
+                    crate::storage::current_projection_image::CurrentProjectionScanStep::Complete {
+                        rows,
+                    } => (rows, true),
+                };
+                aggregate
+                    .note_scanned_rows(rows)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                if complete {
+                    let watermark = self
+                        .inner
+                        .borrow()
+                        .fact_storage
+                        .current_projection_watermark();
+                    if watermark != captured_watermark {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        crate::storage::current_projection_image::note_projection_ledger_fallback();
+                        return Ok(None);
+                    }
+                    return aggregate
+                        .finish()
+                        .map(Some)
+                        .map_err(|error| JsValue::from_str(&error.to_string()));
+                }
+                if rows == 0 {
+                    break;
+                }
+                self.evict_aggregate_staging();
+                yield_browser_task().await?;
+            }
+        }
+        #[cfg(any(test, feature = "bench-internals"))]
+        crate::storage::current_projection_image::note_projection_ledger_fallback();
+        Ok(None)
     }
 
     async fn fetch_and_stage_page(&self, page_id: u64) -> Result<(), JsValue> {
@@ -4711,6 +4872,28 @@ mod tests {
         assert_eq!(first["attribute_count"], 2);
         assert_eq!(first["row_count"], 3);
         assert_eq!(first["arena_reused"], false);
+
+        let view = db.read_view().expect("projection read view");
+        let aggregate: serde_json::Value = serde_json::from_str(
+            &view
+                .query(
+                    "(query [:find (count ?rank) (sum ?rank) :where [?e :card/rank ?rank]])"
+                        .to_owned(),
+                    10,
+                    4_096,
+                )
+                .await
+                .expect("projected browser aggregate"),
+        )
+        .unwrap();
+        assert_eq!(aggregate["results"][0][0], 1);
+        assert_eq!(aggregate["results"][0][1], 9);
+        let diagnostics = crate::storage::current_projection_image::projection_read_diagnostics();
+        assert_eq!(diagnostics.route_attempts, 1);
+        assert_eq!(diagnostics.completed_scans, 1);
+        assert_eq!(diagnostics.rows_scanned, 1);
+        assert_eq!(diagnostics.full_image_decodes, 0);
+        assert!(diagnostics.pages_read > 0);
 
         let second: serde_json::Value = serde_json::from_str(
             &db.rebuild_current_projections(attributes.clone())

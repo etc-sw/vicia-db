@@ -663,7 +663,7 @@ fn decode_integer(encoded: &[u8]) -> Result<i64> {
     Ok((bits ^ 0x8000_0000_0000_0000).cast_signed())
 }
 
-fn decode_value(encoded: &[u8]) -> Result<Value> {
+pub(crate) fn decode_value(encoded: &[u8]) -> Result<Value> {
     let payload = encoded
         .get(1..)
         .ok_or_else(|| anyhow!("empty current projection value"))?;
