@@ -112,6 +112,14 @@ projection-page-tail-smoke OUTPUT_DIR="target/projection-page-tail/smoke":
 projection-page-tail-full OUTPUT_DIR="target/projection-page-tail/full":
     ./scripts/run-projection-page-tail-bench.sh full "{{OUTPUT_DIR}}"
 
+# Isolate one candidate and one temporal probe in every fresh measurement child.
+projection-isolated-tail-smoke OUTPUT_DIR="target/projection-isolated-tail/smoke":
+    ./scripts/run-projection-isolated-tail-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Run 40 fresh children per candidate/probe cell on the canonical 1M fixture.
+projection-isolated-tail-full OUTPUT_DIR="target/projection-isolated-tail/full":
+    ./scripts/run-projection-isolated-tail-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser

@@ -13,6 +13,8 @@ const TEMPORAL_BEFORE: i64 = TEMPORAL_BOUNDARY - 1;
 const TEMPORAL_AFTER: i64 = TEMPORAL_BOUNDARY + 2;
 const FULL_TRIALS: usize = 20;
 const SMOKE_TRIALS: usize = 6;
+const FULL_ISOLATED_SAMPLES_PER_CELL: usize = 40;
+const SMOKE_ISOLATED_SAMPLES_PER_CELL: usize = 6;
 const EXPECTED_FILL_PERCENT: u8 = 90;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -148,6 +150,82 @@ struct Receipt {
     file_format_changed: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IsolatedCell {
+    candidate: CandidateKind,
+    probe_index: usize,
+}
+
+const ISOLATED_CELLS: [IsolatedCell; 6] = [
+    IsolatedCell {
+        candidate: CandidateKind::Source,
+        probe_index: 0,
+    },
+    IsolatedCell {
+        candidate: CandidateKind::Decoded,
+        probe_index: 1,
+    },
+    IsolatedCell {
+        candidate: CandidateKind::Source,
+        probe_index: 2,
+    },
+    IsolatedCell {
+        candidate: CandidateKind::Decoded,
+        probe_index: 0,
+    },
+    IsolatedCell {
+        candidate: CandidateKind::Source,
+        probe_index: 1,
+    },
+    IsolatedCell {
+        candidate: CandidateKind::Decoded,
+        probe_index: 2,
+    },
+];
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IsolatedSample {
+    trial_index: usize,
+    launch_index: usize,
+    candidate: CandidateKind,
+    probe: String,
+    valid_at: i64,
+    image: ImageIdentity,
+    aggregate: TimedAggregate,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IsolatedProbeSummary {
+    name: String,
+    valid_at: i64,
+    source_ms: SeriesSummary,
+    decoded_ms: SeriesSummary,
+    gates: ProbeGates,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IsolatedReceipt {
+    schema: &'static str,
+    profile: String,
+    facts: u64,
+    samples_per_cell: usize,
+    admission_eligible: bool,
+    source_commit: String,
+    tracked_clean: bool,
+    host: Option<String>,
+    fixture: FixtureReceipt,
+    projection_identity: ImageIdentity,
+    measurements: Vec<IsolatedSample>,
+    probes: Vec<IsolatedProbeSummary>,
+    admitted: bool,
+    production_query_routing_changed: bool,
+    public_api_changed: bool,
+    file_format_changed: bool,
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     match args.as_slice() {
@@ -162,10 +240,40 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&trial)?);
             Ok(())
         }
+        [_, command, graph, fixture, facts, profile] if command == "isolated-run" => run_isolated(
+            Path::new(graph),
+            Path::new(fixture),
+            facts.parse()?,
+            profile,
+        ),
+        [
+            _,
+            command,
+            graph,
+            facts,
+            candidate,
+            probe_index,
+            trial_index,
+            launch_index,
+        ] if command == "isolated-trial" => {
+            let sample = measure_isolated_trial(
+                Path::new(graph),
+                facts.parse()?,
+                parse_candidate(candidate)?,
+                probe_index.parse()?,
+                trial_index.parse()?,
+                launch_index.parse()?,
+            )?;
+            println!("{}", serde_json::to_string(&sample)?);
+            Ok(())
+        }
         _ => bail!(
             "usage: current-projection-tail-bench \
              run <graph> <fixture-metadata> <facts> <smoke|full> | \
-             trial <graph> <facts> <trial-index>"
+             trial <graph> <facts> <trial-index> | \
+             isolated-run <graph> <fixture-metadata> <facts> <smoke|full> | \
+             isolated-trial <graph> <facts> <source|decoded> \
+             <probe-index> <trial-index> <launch-index>"
         ),
     }
 }
@@ -202,6 +310,71 @@ fn run(graph: &Path, fixture_path: &Path, facts: u64, profile: &str) -> Result<(
         profile: profile.to_owned(),
         facts,
         trials,
+        admission_eligible,
+        source_commit,
+        tracked_clean,
+        host: command_text("hostname", &[]).ok(),
+        fixture,
+        projection_identity,
+        measurements,
+        probes,
+        admitted,
+        production_query_routing_changed: false,
+        public_api_changed: false,
+        file_format_changed: false,
+    };
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
+}
+
+fn run_isolated(graph: &Path, fixture_path: &Path, facts: u64, profile: &str) -> Result<()> {
+    let samples_per_cell = match profile {
+        "smoke" => SMOKE_ISOLATED_SAMPLES_PER_CELL,
+        "full" => FULL_ISOLATED_SAMPLES_PER_CELL,
+        _ => bail!("profile must be smoke or full"),
+    };
+    let source_commit = command_text("git", &["rev-parse", "HEAD"])?;
+    let tracked_clean =
+        command_text("git", &["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    let fixture = load_fixture_metadata(
+        graph,
+        fixture_path,
+        facts,
+        &source_commit,
+        profile == "full",
+    )?;
+    let executable = std::env::current_exe()?;
+    let mut measurements =
+        Vec::with_capacity(samples_per_cell.saturating_mul(ISOLATED_CELLS.len()));
+    for trial_index in 0..samples_per_cell {
+        let schedule = isolated_schedule(trial_index);
+        for cell in schedule {
+            let launch_index = measurements.len();
+            eprintln!(
+                "projection-isolated-tail: sample {}/{}",
+                launch_index + 1,
+                samples_per_cell.saturating_mul(ISOLATED_CELLS.len())
+            );
+            measurements.push(child_isolated_trial(
+                &executable,
+                graph,
+                facts,
+                cell,
+                trial_index,
+                launch_index,
+            )?);
+        }
+    }
+    validate_isolated_measurements(&measurements, samples_per_cell, facts)?;
+    let projection_identity = common_isolated_identity(&measurements)?;
+    let probes = summarize_isolated_probes(&measurements, facts)?;
+    let admission_eligible = profile == "full";
+    let admitted = admission_eligible && probes.iter().all(|probe| probe.gates.admitted);
+    let receipt = IsolatedReceipt {
+        schema: "vicia.current-projection-isolated-tail.v1",
+        profile: profile.to_owned(),
+        facts,
+        samples_per_cell,
         admission_eligible,
         source_commit,
         tracked_clean,
@@ -348,6 +521,58 @@ fn measure_trial(graph: &Path, facts: u64, trial_index: usize) -> Result<Trial> 
     })
 }
 
+fn measure_isolated_trial(
+    graph: &Path,
+    facts: u64,
+    candidate_kind: CandidateKind,
+    probe_index: usize,
+    trial_index: usize,
+    launch_index: usize,
+) -> Result<IsolatedSample> {
+    let probe = PROBES
+        .get(probe_index)
+        .copied()
+        .context("isolated probe index")?;
+    let db = open(graph)?;
+    let source = db.benchmark_build_current_projection(ATTRIBUTE, TEMPORAL_BEFORE)?;
+    if source.row_count() != usize::try_from(facts)? {
+        bail!("source projection row count mismatch")
+    }
+    let image = db.benchmark_encode_current_projection_page_image(&source)?;
+    let decoded =
+        db.benchmark_decode_current_projection_page_image(&image, ATTRIBUTE, TEMPORAL_BEFORE)?;
+    let source_fingerprint = source.fingerprint()?;
+    if decoded.fingerprint()? != source_fingerprint || decoded.row_count() != source.row_count() {
+        bail!("source and decoded projections differ")
+    }
+    let identity = image.identity();
+    let image_identity = ImageIdentity {
+        base_generation: identity.base_generation(),
+        manifest_generation: identity.manifest_generation(),
+        tx_count: identity.tx_count(),
+        fingerprint: format!("{source_fingerprint:016x}"),
+        row_count: u64::try_from(source.row_count())?,
+        padded_bytes: image.padded_bytes(),
+    };
+    let candidate = select_candidate(candidate_kind, &source, &decoded);
+    ensure_expected(
+        facts,
+        probe.valid_at,
+        aggregate(&db, candidate, probe.valid_at)?,
+    )?;
+    let aggregate = timed_aggregate(&db, candidate, probe.valid_at)?;
+    ensure_expected(facts, probe.valid_at, (aggregate.count, aggregate.checksum))?;
+    Ok(IsolatedSample {
+        trial_index,
+        launch_index,
+        candidate: candidate_kind,
+        probe: probe.name.to_owned(),
+        valid_at: probe.valid_at,
+        image: image_identity,
+        aggregate,
+    })
+}
+
 fn select_candidate<'a>(
     kind: CandidateKind,
     source: &'a CurrentProjectionCandidate,
@@ -436,6 +661,56 @@ fn summarize_probes(measurements: &[Trial], facts: u64) -> Result<Vec<ProbeSumma
         .collect()
 }
 
+fn summarize_isolated_probes(
+    measurements: &[IsolatedSample],
+    facts: u64,
+) -> Result<Vec<IsolatedProbeSummary>> {
+    PROBES
+        .iter()
+        .map(|probe| {
+            let expected = expected_pair(facts, probe.valid_at);
+            let mut source = Vec::new();
+            let mut decoded = Vec::new();
+            let mut exact = true;
+            for sample in measurements
+                .iter()
+                .filter(|sample| sample.probe == probe.name)
+            {
+                exact &= (sample.aggregate.count, sample.aggregate.checksum) == expected;
+                match sample.candidate {
+                    CandidateKind::Source => source.push(sample.aggregate.elapsed_ms),
+                    CandidateKind::Decoded => decoded.push(sample.aggregate.elapsed_ms),
+                }
+            }
+            let source_ms = summarize(source)?;
+            let decoded_ms = summarize(decoded)?;
+            let decoded_latency = decoded_ms.p50 <= 150.0;
+            let decoded_tail = decoded_ms.p95 <= decoded_ms.p50 * 1.15;
+            let decoded_p50_relative = decoded_ms.p50 <= source_ms.p50 * 1.10;
+            let decoded_p95_relative = decoded_ms.p95 <= source_ms.p95 * 1.10;
+            let admitted = exact
+                && decoded_latency
+                && decoded_tail
+                && decoded_p50_relative
+                && decoded_p95_relative;
+            Ok(IsolatedProbeSummary {
+                name: probe.name.to_owned(),
+                valid_at: probe.valid_at,
+                source_ms,
+                decoded_ms,
+                gates: ProbeGates {
+                    exact,
+                    decoded_latency,
+                    decoded_tail,
+                    decoded_p50_relative,
+                    decoded_p95_relative,
+                    admitted,
+                },
+            })
+        })
+        .collect()
+}
+
 fn summarize(mut samples: Vec<f64>) -> Result<SeriesSummary> {
     if samples.is_empty()
         || samples
@@ -499,6 +774,40 @@ fn validate_trial_set(measurements: &[Trial], trials: usize, facts: u64) -> Resu
     Ok(())
 }
 
+fn validate_isolated_measurements(
+    measurements: &[IsolatedSample],
+    samples_per_cell: usize,
+    facts: u64,
+) -> Result<()> {
+    if measurements.len() != samples_per_cell.saturating_mul(ISOLATED_CELLS.len()) {
+        bail!("isolated sample count mismatch")
+    }
+    for (launch_index, sample) in measurements.iter().enumerate() {
+        let expected_cell = isolated_schedule(sample.trial_index)
+            .get(launch_index % ISOLATED_CELLS.len())
+            .copied()
+            .context("isolated launch position")?;
+        let probe = PROBES
+            .get(expected_cell.probe_index)
+            .context("isolated expected probe")?;
+        if sample.launch_index != launch_index
+            || sample.trial_index != launch_index / ISOLATED_CELLS.len()
+            || sample.candidate != expected_cell.candidate
+            || sample.probe != probe.name
+            || sample.valid_at != probe.valid_at
+            || sample.image.row_count != facts
+        {
+            bail!("isolated sample schedule mismatch")
+        }
+        ensure_expected(
+            facts,
+            sample.valid_at,
+            (sample.aggregate.count, sample.aggregate.checksum),
+        )?;
+    }
+    Ok(())
+}
+
 fn common_identity(measurements: &[Trial]) -> Result<ImageIdentity> {
     let first = measurements
         .first()
@@ -524,11 +833,63 @@ fn common_identity(measurements: &[Trial]) -> Result<ImageIdentity> {
     })
 }
 
+fn common_isolated_identity(measurements: &[IsolatedSample]) -> Result<ImageIdentity> {
+    let first = measurements
+        .first()
+        .context("isolated projection identity missing")?;
+    for sample in measurements.iter().skip(1) {
+        if sample.image.base_generation != first.image.base_generation
+            || sample.image.manifest_generation != first.image.manifest_generation
+            || sample.image.tx_count != first.image.tx_count
+            || sample.image.fingerprint != first.image.fingerprint
+            || sample.image.row_count != first.image.row_count
+            || sample.image.padded_bytes != first.image.padded_bytes
+        {
+            bail!("isolated projection identity changed across samples")
+        }
+    }
+    Ok(ImageIdentity {
+        base_generation: first.image.base_generation,
+        manifest_generation: first.image.manifest_generation,
+        tx_count: first.image.tx_count,
+        fingerprint: first.image.fingerprint.clone(),
+        row_count: first.image.row_count,
+        padded_bytes: first.image.padded_bytes,
+    })
+}
+
+fn isolated_schedule(trial_index: usize) -> [IsolatedCell; ISOLATED_CELLS.len()] {
+    std::array::from_fn(|position| {
+        ISOLATED_CELLS
+            .get((position + trial_index) % ISOLATED_CELLS.len())
+            .copied()
+            .unwrap_or(IsolatedCell {
+                candidate: CandidateKind::Source,
+                probe_index: 0,
+            })
+    })
+}
+
 fn candidate_order(trial_index: usize, probe_index: usize) -> [CandidateKind; 2] {
     if (trial_index + probe_index).is_multiple_of(2) {
         [CandidateKind::Source, CandidateKind::Decoded]
     } else {
         [CandidateKind::Decoded, CandidateKind::Source]
+    }
+}
+
+fn parse_candidate(candidate: &str) -> Result<CandidateKind> {
+    match candidate {
+        "source" => Ok(CandidateKind::Source),
+        "decoded" => Ok(CandidateKind::Decoded),
+        _ => bail!("candidate must be source or decoded"),
+    }
+}
+
+fn candidate_arg(candidate: CandidateKind) -> &'static str {
+    match candidate {
+        CandidateKind::Source => "source",
+        CandidateKind::Decoded => "decoded",
     }
 }
 
@@ -588,6 +949,33 @@ fn child_trial(executable: &Path, graph: &Path, facts: u64, trial_index: usize) 
         )
     }
     serde_json::from_slice(&output.stdout).context("decode trial JSON")
+}
+
+fn child_isolated_trial(
+    executable: &Path,
+    graph: &Path,
+    facts: u64,
+    cell: IsolatedCell,
+    trial_index: usize,
+    launch_index: usize,
+) -> Result<IsolatedSample> {
+    let output = Command::new(executable)
+        .arg("isolated-trial")
+        .arg(graph)
+        .arg(facts.to_string())
+        .arg(candidate_arg(cell.candidate))
+        .arg(cell.probe_index.to_string())
+        .arg(trial_index.to_string())
+        .arg(launch_index.to_string())
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "isolated measurement child failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+    serde_json::from_slice(&output.stdout).context("decode isolated sample JSON")
 }
 
 fn command_text(program: &str, args: &[&str]) -> Result<String> {
@@ -652,6 +1040,31 @@ mod tests {
         assert_eq!(rotated_probe_indices(1), [1, 2, 0]);
         assert_eq!(rotated_probe_indices(2), [2, 0, 1]);
         assert_eq!(rotated_probe_indices(3), [0, 1, 2]);
+    }
+
+    #[test]
+    fn isolated_schedule_balances_every_cell_across_launch_positions() {
+        for cell in ISOLATED_CELLS {
+            for position in 0..ISOLATED_CELLS.len() {
+                let appearances = (0..ISOLATED_CELLS.len())
+                    .filter(|trial| isolated_schedule(*trial)[position] == cell)
+                    .count();
+                assert_eq!(appearances, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_candidate_arguments_round_trip() {
+        assert_eq!(
+            parse_candidate(candidate_arg(CandidateKind::Source)).unwrap(),
+            CandidateKind::Source
+        );
+        assert_eq!(
+            parse_candidate(candidate_arg(CandidateKind::Decoded)).unwrap(),
+            CandidateKind::Decoded
+        );
+        assert!(parse_candidate("other").is_err());
     }
 
     #[test]
