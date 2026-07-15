@@ -557,6 +557,7 @@ async function projectionMaintenanceMain() {
     schema: "vicia.browser-projection-maintenance.v1",
     fixture,
     chrome: CHROME,
+    chromeVersion: execFileSync(CHROME, ["--version"], { encoding: "utf8" }).trim(),
     profile: PROFILE,
     import: null,
     maintenance: null,
