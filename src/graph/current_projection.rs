@@ -1,8 +1,10 @@
-//! Repository-only temporal current-projection feasibility model.
+//! Temporal current-projection model used by explicit maintenance rebuilds.
 //!
-//! This is deliberately not a production cache or a persisted format. It
-//! measures the compact-base plus exact-ledger-refresh shape proposed for R2-A
-//! without creating a second authority beside the append-only fact ledger.
+//! The append-only fact ledger remains authoritative. Maintenance rebuilds
+//! encode this deterministic derived state; production query routing is a
+//! separate admission boundary.
+
+#![cfg_attr(not(any(test, feature = "bench-internals")), allow(dead_code))]
 
 use crate::graph::types::{EntityId, Value};
 use crate::storage::index::encode_value;

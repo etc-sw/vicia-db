@@ -1,8 +1,6 @@
+use crate::graph::current_projection::{CurrentProjectionBuilder, CurrentProjectionCandidate};
 #[cfg(any(test, feature = "bench-internals"))]
-use crate::graph::current_projection::{
-    CurrentProjectionBuilder, CurrentProjectionCandidate, CurrentProjectionRefreshDiagnostics,
-    ProjectedInterval,
-};
+use crate::graph::current_projection::{CurrentProjectionRefreshDiagnostics, ProjectedInterval};
 use crate::graph::pending_overlay::{PendingFactId, PendingOverlay};
 use crate::graph::types::{
     Attribute, EntityId, Fact, RETRACT_ALL_VALID_FROM, TransactOptions, TxId, VALID_TIME_FOREVER,
@@ -1947,7 +1945,6 @@ impl FactStorage {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     fn visit_current_attribute_intervals(
         &self,
         attribute: &Attribute,
@@ -1964,7 +1961,6 @@ impl FactStorage {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn build_current_projection_candidate(
         &self,
         attribute: &str,
@@ -2060,7 +2056,6 @@ impl FactStorage {
         })
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn validate_current_projection_candidate(
         &self,
         candidate: &CurrentProjectionCandidate,
@@ -2074,7 +2069,6 @@ impl FactStorage {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn current_projection_watermark(&self) -> (u64, u64) {
         let publication_generation = self
             .data

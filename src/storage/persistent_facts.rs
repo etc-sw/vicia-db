@@ -34,10 +34,8 @@ use crate::storage::page_integrity::{
     BasePageIntegrityCatalog, catalog_crc32,
     compute_page_checksum as compute_integrity_page_checksum,
 };
-#[cfg(any(test, feature = "bench-internals"))]
-use crate::storage::projection_catalog::ProjectionCatalogEntry;
 use crate::storage::projection_catalog::{
-    ProjectionCatalog, ProjectionLedgerIdentity, read_catalog,
+    ProjectionCatalog, ProjectionCatalogEntry, ProjectionLedgerIdentity, read_catalog,
 };
 use crate::storage::{
     CommittedFactReader, CommittedIndexReader, FileHeader, PAGE_SIZE, StorageBackend,
@@ -704,7 +702,7 @@ impl BrowserV11BootstrapPlan {
             anyhow::bail!(
                 "Sparse browser bootstrap requires a paged-ready v{}..=v{} format, got v{}",
                 crate::storage::INTEGRITY_FORMAT_VERSION,
-                crate::storage::FORMAT_VERSION,
+                crate::storage::MAX_READABLE_FORMAT_VERSION,
                 header.version
             );
         }
@@ -799,6 +797,26 @@ impl BrowserV11BootstrapPlan {
             .iter()
             .map(|candidate| candidate.manifest_range)
             .collect()
+    }
+
+    /// Small catalog ranges needed to validate v13 projection authority.
+    /// Projection image pages remain demand-free until a later routed read.
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    pub(crate) fn projection_catalog_ranges(&self) -> Result<Vec<BrowserPageRange>> {
+        let mut ranges = Vec::new();
+        if let ProjectionCatalogSlotSelection::Candidates { newest, previous } =
+            select_projection_catalog_slots(&self.extension)
+        {
+            for (_, descriptor) in [Some(newest), previous].into_iter().flatten() {
+                ranges.push(BrowserPageRange::bounded(
+                    "Projection catalog",
+                    descriptor.catalog_page_start(),
+                    descriptor.catalog_page_count(),
+                    self.header.page_count,
+                )?);
+            }
+        }
+        Ok(ranges)
     }
 
     /// Decode every resident manifest candidate and plan its segment ranges.
@@ -1111,9 +1129,8 @@ struct PersistedProjectionCatalogCandidate {
     catalog: ProjectionCatalog,
 }
 
-#[cfg(any(test, feature = "bench-internals"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Repository-only location receipt for one committed projection publication.
+/// Location receipt for one committed projection publication.
 pub struct ProjectionPublicationReceipt {
     /// Monotonic projection catalog generation.
     pub generation: u64,
@@ -1127,6 +1144,36 @@ pub struct ProjectionPublicationReceipt {
     pub catalog_page_count: u64,
     /// Page count made visible by the page-0 commit.
     pub published_page_count: u64,
+    /// Whether the publication reused the inactive predecessor's page arena.
+    pub arena_reused: bool,
+}
+
+/// Complete copy-on-write page patch for one projection publication.
+///
+/// Page 0 is included and is always the last page. Browser storage can commit
+/// this patch in one IndexedDB transaction; native storage writes the payload
+/// pages first and publishes page 0 only after they are durable.
+pub(crate) struct ProjectionPublicationPlan {
+    #[cfg(not(target_arch = "wasm32"))]
+    expected_page0: Vec<u8>,
+    pages: Vec<(u64, Vec<u8>)>,
+    receipt: ProjectionPublicationReceipt,
+}
+
+impl ProjectionPublicationPlan {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pages(&self) -> &[(u64, Vec<u8>)] {
+        &self.pages
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn into_pages(self) -> Vec<(u64, Vec<u8>)> {
+        self.pages
+    }
+
+    pub(crate) fn receipt(&self) -> ProjectionPublicationReceipt {
+        self.receipt
+    }
 }
 
 pub struct PersistentFactStorage<B: StorageBackend + 'static> {
@@ -3306,7 +3353,17 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         self.last_checkpointed_tx_count
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn published_page_count(&self) -> Result<u64> {
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        let page0 = backend.read_page(0)?;
+        let header = FileHeader::from_bytes(&page0)?;
+        header.validate()?;
+        Ok(header.page_count)
+    }
+
     pub(crate) fn projection_ledger_identity(&self) -> Result<ProjectionLedgerIdentity> {
         let base_generation = self
             .base_integrity
@@ -3341,17 +3398,82 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         ))
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "bench-internals")))]
     pub(crate) fn publish_current_projection_image(
         &mut self,
         image: &crate::storage::current_projection_image::CurrentProjectionPageImage,
         attribute: &str,
         valid_time_floor: i64,
     ) -> Result<ProjectionPublicationReceipt> {
+        self.publish_current_projection_images(&[(attribute, valid_time_floor, image)])
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn publish_current_projection_images(
+        &mut self,
+        images: &[(
+            &str,
+            i64,
+            &crate::storage::current_projection_image::CurrentProjectionPageImage,
+        )],
+    ) -> Result<ProjectionPublicationReceipt> {
+        let plan = self.plan_current_projection_publication(images)?;
+        let receipt = plan.receipt();
+        let published_page0 = plan
+            .pages()
+            .last()
+            .filter(|(page_id, _)| *page_id == 0)
+            .map(|(_, page)| page.clone())
+            .ok_or_else(|| anyhow::anyhow!("Projection publication plan is missing page 0"))?;
+        let published_header = FileHeader::from_bytes(&published_page0)?;
+        let published_extension =
+            HeaderExtension::read_from_page0(published_header.version, &published_page0)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Projection publication plan is missing its extension")
+                })?;
+
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
+        for (page_id, page) in plan.pages().iter().filter(|(page_id, _)| *page_id != 0) {
+            backend.write_page(*page_id, page)?;
+        }
+        backend.sync()?;
+        if backend.read_page(0)? != plan.expected_page0 {
+            anyhow::bail!("Ledger page 0 changed during projection publication");
+        }
+        backend.write_page(0, &published_page0)?;
+        backend.sync()?;
+        drop(backend);
+
+        self.loaded_format_version = published_header.version;
+        self.load_projection_catalog_candidates(&published_header, Some(&published_extension))?;
+        if !self
+            .projection_catalog_candidates
+            .iter()
+            .any(|candidate| candidate.descriptor.generation() == receipt.generation)
+        {
+            anyhow::bail!("Published projection catalog could not be selected");
+        }
+        Ok(receipt)
+    }
+
+    pub(crate) fn plan_current_projection_publication(
+        &self,
+        images: &[(
+            &str,
+            i64,
+            &crate::storage::current_projection_image::CurrentProjectionPageImage,
+        )],
+    ) -> Result<ProjectionPublicationPlan> {
         if self.dirty {
             anyhow::bail!("Projection publication requires a clean durable ledger");
         }
-        let mut backend = self
+        if images.is_empty() {
+            anyhow::bail!("Projection publication requires at least one image");
+        }
+        let backend = self
             .backend
             .lock()
             .map_err(|_| anyhow::anyhow!("backend mutex poisoned"))?;
@@ -3364,16 +3486,30 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             anyhow::bail!("Projection publication requires a paged-ready ledger format");
         }
         let durable_identity = self.persisted_projection_identity(&captured_header);
-        if image.identity() != durable_identity
-            || self.storage.current_tx_count() != durable_identity.tx_count()
-        {
-            anyhow::bail!("Projection image is not bound to the selected durable ledger");
-        }
-        if image.as_bytes().is_empty()
-            || !image.as_bytes().len().is_multiple_of(PAGE_SIZE)
-            || image.page_count() == 0
-        {
-            anyhow::bail!("Projection image is not a complete page range");
+        for (attribute, valid_time_floor, image) in images {
+            if image.identity() != durable_identity
+                || self.storage.current_tx_count() != durable_identity.tx_count()
+            {
+                anyhow::bail!("Projection image is not bound to the selected durable ledger");
+            }
+            if image.as_bytes().is_empty()
+                || !image.as_bytes().len().is_multiple_of(PAGE_SIZE)
+                || image.page_count() == 0
+            {
+                anyhow::bail!("Projection image is not a complete page range");
+            }
+            let decoded = crate::storage::current_projection_image::decode(
+                image.as_bytes(),
+                durable_identity,
+                attribute,
+                *valid_time_floor,
+                self.storage.current_projection_watermark().0,
+            )?;
+            if decoded.row_count() != usize::try_from(image.row_count())?
+                || decoded.fingerprint()? != image.fingerprint()
+            {
+                anyhow::bail!("Projection image metadata does not match its decoded columns");
+            }
         }
 
         let extension = HeaderExtension::read_from_page0(captured_header.version, &captured_page0)?
@@ -3391,42 +3527,118 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
         let generation = highest_generation
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Projection catalog generation overflow"))?;
-        let image_page_start = captured_header.page_count;
-        for (index, page) in image.as_bytes().chunks_exact(PAGE_SIZE).enumerate() {
-            let page_id = image_page_start
-                .checked_add(u64::try_from(index)?)
-                .ok_or_else(|| anyhow::anyhow!("Projection image page id overflow"))?;
-            backend.write_page(page_id, page)?;
-        }
-        backend.sync()?;
-
-        let entry = ProjectionCatalogEntry::new(
-            attribute.to_owned(),
-            valid_time_floor,
-            image_page_start,
-            image.page_count(),
-            image.logical_bytes(),
-            image.row_count(),
-            image.fingerprint(),
+        let total_image_pages = images.iter().try_fold(0_u64, |total, (_, _, image)| {
+            total
+                .checked_add(image.page_count())
+                .ok_or_else(|| anyhow::anyhow!("Projection image page count overflow"))
+        })?;
+        let estimated_catalog_pages = u64::try_from(
+            ProjectionCatalog::new(
+                generation,
+                durable_identity,
+                images
+                    .iter()
+                    .map(|(attribute, floor, image)| {
+                        ProjectionCatalogEntry::new(
+                            (*attribute).to_owned(),
+                            *floor,
+                            1,
+                            image.page_count(),
+                            image.logical_bytes(),
+                            image.row_count(),
+                            image.fingerprint(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            )?
+            .encode_pages()?
+            .0
+            .len()
+                / PAGE_SIZE,
         )?;
-        let catalog = ProjectionCatalog::new(generation, durable_identity, vec![entry])?;
+        let required_pages = total_image_pages
+            .checked_add(estimated_catalog_pages)
+            .ok_or_else(|| anyhow::anyhow!("Projection publication page count overflow"))?;
+
+        let published_slot = match slot_selection {
+            ProjectionCatalogSlotSelection::Candidates {
+                newest: (ProjectionCatalogSlotName::Primary, _),
+                ..
+            } => ProjectionCatalogSlotName::Secondary,
+            ProjectionCatalogSlotSelection::Candidates {
+                newest: (ProjectionCatalogSlotName::Secondary, _),
+                ..
+            } => ProjectionCatalogSlotName::Primary,
+            ProjectionCatalogSlotSelection::NoProjectionCatalog
+            | ProjectionCatalogSlotSelection::RecoveryRequired => {
+                ProjectionCatalogSlotName::Primary
+            }
+        };
+        let reusable = self
+            .projection_catalog_candidates
+            .iter()
+            .find(|candidate| candidate.slot == published_slot)
+            .and_then(|candidate| {
+                let start = candidate
+                    .catalog
+                    .entries()
+                    .iter()
+                    .map(ProjectionCatalogEntry::image_page_start)
+                    .min()?;
+                let end = candidate
+                    .descriptor
+                    .catalog_page_start()
+                    .checked_add(candidate.descriptor.catalog_page_count())?;
+                let capacity = end.checked_sub(start)?;
+                (capacity >= required_pages).then_some((start, capacity))
+            });
+        let (image_page_start, arena_capacity, arena_reused) = reusable
+            .map(|(start, capacity)| (start, capacity, true))
+            .unwrap_or((captured_header.page_count, required_pages, false));
+
+        let mut pages = Vec::with_capacity(usize::try_from(required_pages)?.saturating_add(1));
+        let mut entries = Vec::with_capacity(images.len());
+        let mut next_page = image_page_start;
+        for (attribute, valid_time_floor, image) in images {
+            let entry_start = next_page;
+            for page in image.as_bytes().chunks_exact(PAGE_SIZE) {
+                pages.push((next_page, page.to_vec()));
+                next_page = next_page
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("Projection image page id overflow"))?;
+            }
+            entries.push(ProjectionCatalogEntry::new(
+                (*attribute).to_owned(),
+                *valid_time_floor,
+                entry_start,
+                image.page_count(),
+                image.logical_bytes(),
+                image.row_count(),
+                image.fingerprint(),
+            )?);
+        }
+        let catalog = ProjectionCatalog::new(generation, durable_identity, entries)?;
         let (catalog_bytes, catalog_len, catalog_checksum) = catalog.encode_pages()?;
-        let catalog_page_start = image_page_start
-            .checked_add(image.page_count())
-            .ok_or_else(|| anyhow::anyhow!("Projection catalog page start overflow"))?;
+        let catalog_page_start = next_page;
         for (index, page) in catalog_bytes.chunks_exact(PAGE_SIZE).enumerate() {
             let page_id = catalog_page_start
                 .checked_add(u64::try_from(index)?)
                 .ok_or_else(|| anyhow::anyhow!("Projection catalog page id overflow"))?;
-            backend.write_page(page_id, page)?;
-        }
-        backend.sync()?;
-
-        let current_page0 = backend.read_page(0)?;
-        if current_page0 != captured_page0 {
-            anyhow::bail!("Ledger page 0 changed during projection publication");
+            pages.push((page_id, page.to_vec()));
         }
         let catalog_page_count = u64::try_from(catalog_bytes.len() / PAGE_SIZE)?;
+        let written_end = catalog_page_start
+            .checked_add(catalog_page_count)
+            .ok_or_else(|| anyhow::anyhow!("Projection catalog page end overflow"))?;
+        let arena_end = image_page_start
+            .checked_add(arena_capacity)
+            .ok_or_else(|| anyhow::anyhow!("Projection arena page end overflow"))?;
+        if arena_reused && written_end < arena_end {
+            let zero_page = vec![0_u8; PAGE_SIZE];
+            for page_id in written_end..arena_end {
+                pages.push((page_id, zero_page.clone()));
+            }
+        }
         let descriptor = ProjectionCatalogSlot::new(
             generation,
             catalog_page_start,
@@ -3434,64 +3646,38 @@ impl<B: StorageBackend + 'static> PersistentFactStorage<B> {
             catalog_len,
             catalog_checksum,
         )?;
-        let (projection_primary, projection_secondary, published_slot) = match slot_selection {
-            ProjectionCatalogSlotSelection::Candidates {
-                newest: (ProjectionCatalogSlotName::Primary, _),
-                ..
-            } => (
-                extension.projection_primary(),
-                descriptor,
-                ProjectionCatalogSlotName::Secondary,
-            ),
-            ProjectionCatalogSlotSelection::Candidates {
-                newest: (ProjectionCatalogSlotName::Secondary, _),
-                ..
-            } => (
-                descriptor,
-                extension.projection_secondary(),
-                ProjectionCatalogSlotName::Primary,
-            ),
-            ProjectionCatalogSlotSelection::NoProjectionCatalog
-            | ProjectionCatalogSlotSelection::RecoveryRequired => (
-                descriptor,
-                extension.projection_secondary(),
-                ProjectionCatalogSlotName::Primary,
-            ),
+        let (projection_primary, projection_secondary) = match published_slot {
+            ProjectionCatalogSlotName::Primary => (descriptor, extension.projection_secondary()),
+            ProjectionCatalogSlotName::Secondary => (extension.projection_primary(), descriptor),
         };
         let published_extension = HeaderExtension::new(extension.primary(), extension.secondary())
             .with_base_fact_page_start(extension.base_fact_page_start())?
             .with_base_integrity(extension.base_integrity())?
             .with_projection_catalog_slots(projection_primary, projection_secondary)?;
-        let published_page_count = catalog_page_start
-            .checked_add(catalog_page_count)
-            .ok_or_else(|| anyhow::anyhow!("Projection publication page count overflow"))?;
+        let published_page_count = captured_header.page_count.max(written_end);
         let mut published_header = captured_header;
         published_header.version =
             crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION;
         published_header.page_count = published_page_count;
         published_header.header_checksum = compute_header_checksum(&published_header);
         let published_page0 =
-            build_header_page_with_extension(published_header, published_extension.clone())?;
-        backend.write_page(0, &published_page0)?;
-        backend.sync()?;
+            build_header_page_with_extension(published_header, published_extension)?;
+        pages.push((0, published_page0));
         drop(backend);
-
-        self.loaded_format_version = published_header.version;
-        self.load_projection_catalog_candidates(&published_header, Some(&published_extension))?;
-        if !self
-            .projection_catalog_candidates
-            .iter()
-            .any(|candidate| candidate.slot == published_slot && candidate.descriptor == descriptor)
-        {
-            anyhow::bail!("Published projection catalog could not be selected");
-        }
-        Ok(ProjectionPublicationReceipt {
+        let receipt = ProjectionPublicationReceipt {
             generation,
             image_page_start,
-            image_page_count: image.page_count(),
+            image_page_count: total_image_pages,
             catalog_page_start,
             catalog_page_count,
             published_page_count,
+            arena_reused,
+        };
+        Ok(ProjectionPublicationPlan {
+            #[cfg(not(target_arch = "wasm32"))]
+            expected_page0: captured_page0,
+            pages,
+            receipt,
         })
     }
 

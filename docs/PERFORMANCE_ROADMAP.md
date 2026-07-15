@@ -682,8 +682,9 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 through R2-C1 are closed. The next slice is R2-C2 maintenance-owned rebuild
-and browser publication parity, still before production query routing:
+R0 through R2-C1 are closed. R2-C2 now has its maintenance-owned native and
+browser implementation and functional Chrome evidence, still before production
+query routing:
 
 ```text
 expose projection rebuild only through the maintenance capability
@@ -692,9 +693,12 @@ prove interruption/fallback/import/export behavior in real Chrome
 keep foreground reads on the ledger until package and differential gates pass
 ```
 
-R2-C2 must not expose a general projection-management API on the interactive
-capability. Failure before page-0 publication leaves the previous descriptor
-authoritative; a failed browser transaction leaves the previous complete image
-visible. Native/browser export and import must preserve the published prefix
-and reject incomplete authority consistently. Keep production query routing
-and the Vetch package unchanged until these real-Chrome gates pass.
+The rebuild API is limited to 1–32 explicit stored attributes and captures one
+ledger identity plus UTC-millisecond valid-time floor. Native publication
+retires pending WAL work first; browser publication computes a detached patch
+and commits it with page 0 in one IndexedDB transaction. The 77-test Chrome
+suite proves v13 reopen, strict import/export, abort preservation, and legacy
+migration. The remaining R2-C2 closeout is a clean 1M native plus disposable-
+worker time/PSS receipt and the Vetch package differential suite. Keep
+production query routing and the Vetch package unchanged until those gates
+pass.

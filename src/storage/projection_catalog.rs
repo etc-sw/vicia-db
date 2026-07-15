@@ -39,21 +39,18 @@ impl ProjectionLedgerIdentity {
 
     /// Immutable base generation selected by the ledger.
     #[must_use]
-    #[cfg(any(test, feature = "bench-internals"))]
     pub fn base_generation(self) -> u64 {
         self.base_generation
     }
 
     /// Selected delta-manifest generation, or zero when no manifest exists.
     #[must_use]
-    #[cfg(any(test, feature = "bench-internals"))]
     pub fn manifest_generation(self) -> u64 {
         self.manifest_generation
     }
 
     /// Exact durable transaction watermark represented by the catalog.
     #[must_use]
-    #[cfg(any(test, feature = "bench-internals"))]
     pub fn tx_count(self) -> u64 {
         self.tx_count
     }
@@ -191,7 +188,6 @@ impl ProjectionCatalog {
             .and_then(|index| self.entries.get(index))
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn encode_pages(&self) -> Result<(Vec<u8>, u64, u32)> {
         let mut payload = Vec::new();
         for entry in &self.entries {

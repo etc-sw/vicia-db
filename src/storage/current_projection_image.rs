@@ -1,8 +1,7 @@
-//! Detached, generation-bound page image for the current projection.
+//! Generation-bound page image for the current projection.
 //!
-//! The bytes defined here are the durable R2 projection material. R2-B keeps
-//! them detached from page 0 so corruption, identity, and rebuild behavior can
-//! be proven before publication adds another selectable root.
+//! The bytes defined here are derived from the ledger and published only by an
+//! explicit maintenance capability.
 
 // Fixed-size encoder offsets are derived from a freshly allocated, fully sized
 // image. Untrusted decoder reads use checked helpers before these fixed ranges.
@@ -357,6 +356,7 @@ pub(crate) fn decode(
     Ok(candidate)
 }
 
+#[allow(dead_code)]
 pub(crate) fn logical_bytes(bytes: &[u8]) -> Result<u64> {
     if bytes.len() < PAGE_SIZE || !bytes.len().is_multiple_of(PAGE_SIZE) {
         bail!("current projection image is not a complete page range")

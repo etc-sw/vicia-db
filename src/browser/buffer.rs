@@ -1,4 +1,6 @@
-use crate::storage::{FORMAT_VERSION, FileHeader, PAGE_SIZE, StorageBackend};
+use crate::storage::{
+    FORMAT_VERSION, FileHeader, MAX_READABLE_FORMAT_VERSION, PAGE_SIZE, StorageBackend,
+};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -123,10 +125,11 @@ impl BrowserBufferBackend {
             .ok_or_else(|| anyhow::anyhow!("Sparse browser image is missing page 0"))?;
         let header = FileHeader::from_bytes(page_zero)?;
         header.validate()?;
-        if header.version != FORMAT_VERSION {
+        if header.version != FORMAT_VERSION && header.version != MAX_READABLE_FORMAT_VERSION {
             anyhow::bail!(
-                "Sparse browser paging requires format v{}, found v{}",
+                "Sparse browser paging requires format v{} or v{}, found v{}",
                 FORMAT_VERSION,
+                MAX_READABLE_FORMAT_VERSION,
                 header.version
             );
         }
@@ -265,10 +268,11 @@ impl BrowserBufferBackend {
             .get(&0)
             .ok_or_else(|| anyhow::anyhow!("Sparse browser image is missing page 0"))?;
         let header = FileHeader::from_bytes(page_zero)?;
-        if header.version != FORMAT_VERSION {
+        if header.version != FORMAT_VERSION && header.version != MAX_READABLE_FORMAT_VERSION {
             anyhow::bail!(
-                "Sparse browser paging requires format v{}, found v{}",
+                "Sparse browser paging requires format v{} or v{}, found v{}",
                 FORMAT_VERSION,
+                MAX_READABLE_FORMAT_VERSION,
                 header.version
             );
         }

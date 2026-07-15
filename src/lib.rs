@@ -98,11 +98,12 @@ pub mod browser;
 pub use db::{BackupOutcome, OpenOptionsWithPath};
 pub use db::{
     CURRENT_ENTITIES_MAX_ATTRIBUTES, CURRENT_ENTITIES_MAX_HISTORY_ENTRIES,
-    CURRENT_ENTITIES_MAX_IDS, CURRENT_ENTITIES_MAX_PAIRS, CURRENT_REFS_MAX_HISTORY_ENTRIES,
-    CurrentEntitiesRequest, CurrentFact, CurrentRefsRequest, InteractiveLedger,
-    InteractiveWriteTransaction, MaintenanceAdvice, MaintenanceCheckpointEffect,
+    CURRENT_ENTITIES_MAX_IDS, CURRENT_ENTITIES_MAX_PAIRS, CURRENT_PROJECTION_MAX_ATTRIBUTES,
+    CURRENT_REFS_MAX_HISTORY_ENTRIES, CurrentEntitiesRequest, CurrentFact, CurrentRefsRequest,
+    InteractiveLedger, InteractiveWriteTransaction, MaintenanceAdvice, MaintenanceCheckpointEffect,
     MaintenanceDeltaEffect, MaintenanceLedger, MaintenanceOutcome, Minigraf, OpenOptions,
-    READ_VIEW_MAX_ROWS, ReadView, ReadViewOptions, ReadViewValidAt, WriteTransaction,
+    ProjectionMaintenanceOutcome, READ_VIEW_MAX_ROWS, ReadView, ReadViewOptions, ReadViewValidAt,
+    WriteTransaction,
 };
 /// Vicia DB compatibility name for the primary embedded database handle.
 ///

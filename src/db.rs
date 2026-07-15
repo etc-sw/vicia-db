@@ -8,6 +8,8 @@
 //! - `Minigraf::backup_to()` for linearized live-writer snapshots
 //! - `Minigraf::export_fact_log()` for deterministic append-only audit export
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::graph::types::tx_id_now;
 use crate::graph::types::{Fact, FactRecord, TxId, VALID_TIME_FOREVER};
 
 /// Sentinel value used in `materialize_transaction` to signal "no explicit `valid_from`
@@ -69,7 +71,7 @@ use crate::query::datalog::functions::{
 use crate::query::datalog::parser::parse_datalog_command;
 use crate::query::datalog::rules::RuleRegistry;
 use crate::query::datalog::types::{
-    AsOf, AttributeSpec, DatalogCommand, ForgetSource, ForgetSpec, Transaction, ValidAt,
+    AsOf, AttributeSpec, DatalogCommand, ForgetSource, ForgetSpec, PseudoAttr, Transaction, ValidAt,
 };
 
 /// Largest result admitted by the foreground read-view API.
@@ -78,6 +80,10 @@ pub const READ_VIEW_MAX_ROWS: usize = 10_000;
 pub const CURRENT_ENTITIES_MAX_IDS: usize = 128;
 /// Maximum attributes admitted by one current-view request.
 pub const CURRENT_ENTITIES_MAX_ATTRIBUTES: usize = 32;
+/// Maximum attributes admitted by one explicit projection rebuild.
+pub const CURRENT_PROJECTION_MAX_ATTRIBUTES: usize = CURRENT_ENTITIES_MAX_ATTRIBUTES;
+const CURRENT_PROJECTION_MIN_BUDGET_BYTES: u64 = 1024 * 1024;
+const CURRENT_PROJECTION_MAX_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum distinct entity/attribute ranges in one current-view request.
 pub const CURRENT_ENTITIES_MAX_PAIRS: usize = 256;
 /// Maximum historical index entries consumed by one foreground current read.
@@ -133,6 +139,52 @@ pub(crate) fn normalize_current_entities_request(
         );
     }
     Ok((unique_ids, unique_attributes))
+}
+
+pub(crate) fn normalize_current_projection_attributes(
+    attributes: &[String],
+) -> Result<Vec<String>> {
+    if attributes.is_empty() || attributes.len() > CURRENT_PROJECTION_MAX_ATTRIBUTES {
+        bail!(
+            "current projection attributes must be in 1..={CURRENT_PROJECTION_MAX_ATTRIBUTES}; got {}",
+            attributes.len()
+        );
+    }
+    let mut normalized = attributes.to_vec();
+    normalized.sort();
+    for attribute in &normalized {
+        if !attribute.starts_with(':')
+            || !attribute.contains('/')
+            || attribute.contains('\0')
+            || attribute.len() > 64 * 1024
+            || PseudoAttr::from_keyword(attribute).is_some()
+        {
+            bail!(
+                "current projection attribute must be a namespace-qualified stored keyword: {attribute}"
+            );
+        }
+    }
+    if normalized
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left == right))
+    {
+        bail!("current projection attributes must not contain duplicates");
+    }
+    Ok(normalized)
+}
+
+pub(crate) fn current_projection_budget_bytes(published_pages: u64) -> Result<u64> {
+    let ledger_bytes = published_pages
+        .checked_mul(crate::storage::PAGE_SIZE as u64)
+        .ok_or_else(|| anyhow::anyhow!("published ledger byte count overflow"))?;
+    Ok(ledger_bytes
+        .saturating_mul(15)
+        .checked_div(100)
+        .unwrap_or(0)
+        .clamp(
+            CURRENT_PROJECTION_MIN_BUDGET_BYTES,
+            CURRENT_PROJECTION_MAX_BUDGET_BYTES,
+        ))
 }
 
 /// One net-asserted EAV value from a transaction-pinned current view.
@@ -668,6 +720,35 @@ pub struct MaintenanceOutcome {
     pub advice: MaintenanceAdvice,
 }
 
+/// Result of one explicit maintenance-owned current-projection rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionMaintenanceOutcome {
+    /// Whether pending WAL-backed writes were published before the rebuild.
+    pub checkpoint: MaintenanceCheckpointEffect,
+    /// New projection catalog generation.
+    pub generation: u64,
+    /// Immutable base generation selected by the projection.
+    pub base_generation: u64,
+    /// Selected delta-manifest generation, or zero when no delta exists.
+    pub manifest_generation: u64,
+    /// Exact durable transaction watermark represented by every image.
+    pub tx_count: u64,
+    /// Common valid-time floor captured once at rebuild start.
+    pub valid_time_floor: i64,
+    /// Number of attributes published in the catalog.
+    pub attribute_count: u32,
+    /// Total interval rows across every published image.
+    pub row_count: u64,
+    /// Total padded projection-image bytes, excluding the catalog page.
+    pub projection_bytes: u64,
+    /// Published graph page count before the rebuild.
+    pub before_pages: u64,
+    /// Published graph page count after the rebuild.
+    pub after_pages: u64,
+    /// Whether the inactive predecessor arena was reused.
+    pub arena_reused: bool,
+}
+
 impl MaintenanceOutcome {
     fn new(
         checkpoint: MaintenanceCheckpointEffect,
@@ -1189,6 +1270,104 @@ impl MaintenanceLedger {
     /// Run caller-scheduled idle maintenance.
     pub fn run_idle_maintenance(&self) -> Result<MaintenanceOutcome> {
         self.db.run_idle_maintenance()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn rebuild_current_projections_inner(
+        &self,
+        attributes: &[String],
+    ) -> Result<ProjectionMaintenanceOutcome> {
+        if is_write_tx_active() {
+            bail!(
+                "a WriteTransaction is already in progress on this thread; commit or roll it back before rebuilding current projections"
+            );
+        }
+        let attributes = normalize_current_projection_attributes(attributes)?;
+        let valid_time_floor = i64::try_from(tx_id_now())
+            .map_err(|_| anyhow::anyhow!("current projection valid-time floor exceeds i64"))?;
+        let mut ctx = self.db.inner.write_lock.lock().map_err(|_| {
+            anyhow::anyhow!("write lock is poisoned; database may be in an inconsistent state")
+        })?;
+        let checkpoint_outcome = Minigraf::do_checkpoint(&self.db.inner.fact_storage, &mut ctx)?;
+        let checkpoint = MaintenanceCheckpointEffect::from_checkpoint_outcome(checkpoint_outcome);
+
+        let WriteContext::File {
+            pfs,
+            wal,
+            wal_entry_count,
+            ..
+        } = &mut *ctx
+        else {
+            bail!("current projection rebuild requires a file-backed maintenance ledger");
+        };
+        if wal.is_some() || *wal_entry_count != 0 {
+            bail!("current projection rebuild requires a retired durable WAL");
+        }
+        let before_pages = pfs.published_page_count()?;
+        let budget = current_projection_budget_bytes(before_pages)?;
+        let identity = pfs.projection_ledger_identity()?;
+        let mut images = Vec::with_capacity(attributes.len());
+        let mut projection_bytes = 0_u64;
+        let mut row_count = 0_u64;
+        for attribute in &attributes {
+            let candidate = self
+                .db
+                .inner
+                .fact_storage
+                .build_current_projection_candidate(attribute, valid_time_floor)?;
+            self.db
+                .inner
+                .fact_storage
+                .validate_current_projection_candidate(&candidate)?;
+            let image = crate::storage::current_projection_image::encode(&candidate, identity)?;
+            projection_bytes = projection_bytes
+                .checked_add(image.padded_bytes())
+                .ok_or_else(|| anyhow::anyhow!("current projection byte count overflow"))?;
+            if projection_bytes > budget {
+                bail!(
+                    "current projection images require {projection_bytes} bytes, exceeding the {budget}-byte maintenance budget"
+                );
+            }
+            row_count = row_count
+                .checked_add(image.row_count())
+                .ok_or_else(|| anyhow::anyhow!("current projection row count overflow"))?;
+            images.push(image);
+        }
+        let image_refs = attributes
+            .iter()
+            .zip(&images)
+            .map(|(attribute, image)| (attribute.as_str(), valid_time_floor, image))
+            .collect::<Vec<_>>();
+        let receipt = pfs.publish_current_projection_images(&image_refs)?;
+        Ok(ProjectionMaintenanceOutcome {
+            checkpoint,
+            generation: receipt.generation,
+            base_generation: identity.base_generation(),
+            manifest_generation: identity.manifest_generation(),
+            tx_count: identity.tx_count(),
+            valid_time_floor,
+            attribute_count: u32::try_from(attributes.len())?,
+            row_count,
+            projection_bytes,
+            before_pages,
+            after_pages: receipt.published_page_count,
+            arena_reused: receipt.arena_reused,
+        })
+    }
+
+    /// Rebuild and atomically publish current projections for exact attributes.
+    ///
+    /// This is an explicit O(total selected history) maintenance operation. It
+    /// first checkpoints pending WAL-backed writes, captures one UTC
+    /// millisecond valid-time floor, and publishes all requested attributes as
+    /// one v13 catalog generation. It is never called from foreground writes
+    /// or ordinary idle-maintenance policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn rebuild_current_projections(
+        &self,
+        attributes: &[String],
+    ) -> Result<ProjectionMaintenanceOutcome> {
+        self.rebuild_current_projections_inner(attributes)
     }
 
     /// Create an exact checkpointed rollback copy.
@@ -5814,6 +5993,95 @@ mod capability_tests {
         assert!(!wal_path.exists());
         assert_eq!(maintenance.export_fact_log().unwrap().len(), 2);
         assert_eq!(maintenance.current_tx_count(), 2);
+    }
+
+    #[test]
+    fn maintenance_rebuild_publishes_multiple_attributes_after_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-maintenance.graph");
+        {
+            let ledger = InteractiveLedger::open(&path).unwrap();
+            ledger
+                .execute_write(
+                    r#"(transact [[#uuid "00000000-0000-0000-0000-000000000101" :card/title "A"]
+                                  [#uuid "00000000-0000-0000-0000-000000000101" :card/rank 7]
+                                  [#uuid "00000000-0000-0000-0000-000000000102" :card/title "B"]])"#,
+                )
+                .unwrap();
+        }
+        assert!(Minigraf::wal_path_for(&path).exists());
+
+        let maintenance = MaintenanceLedger::open(&path).unwrap();
+        let attributes = vec![":card/title".to_owned(), ":card/rank".to_owned()];
+        let first = maintenance
+            .rebuild_current_projections(&attributes)
+            .unwrap();
+        assert_eq!(first.checkpoint, MaintenanceCheckpointEffect::Published);
+        assert_eq!(first.attribute_count, 2);
+        assert_eq!(first.tx_count, 1);
+        assert_eq!(first.row_count, 3);
+        assert!(!Minigraf::wal_path_for(&path).exists());
+        for attribute in &attributes {
+            let candidate = maintenance
+                .db
+                .benchmark_load_current_projection_page_image(attribute, first.valid_time_floor)
+                .unwrap()
+                .expect("published attribute image");
+            assert!(
+                !maintenance
+                    .db
+                    .benchmark_current_projection_rows(&candidate)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        let second = maintenance
+            .rebuild_current_projections(&attributes)
+            .unwrap();
+        let third = maintenance
+            .rebuild_current_projections(&attributes)
+            .unwrap();
+        assert!(!second.arena_reused);
+        assert!(third.arena_reused);
+        assert_eq!(third.after_pages, second.after_pages);
+        assert_eq!(third.generation, second.generation + 1);
+
+        drop(maintenance);
+        let reopened = Minigraf::open(&path).unwrap();
+        let page0 = std::fs::read(&path).unwrap();
+        let header =
+            crate::storage::FileHeader::from_bytes(&page0[..crate::storage::PAGE_SIZE]).unwrap();
+        assert_eq!(
+            header.version,
+            crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION
+        );
+        assert_eq!(reopened.current_tx_count(), 1);
+    }
+
+    #[test]
+    fn maintenance_rebuild_rejects_invalid_attribute_sets_before_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection-invalid.graph");
+        let maintenance = MaintenanceLedger::open(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(maintenance.rebuild_current_projections(&[]).is_err());
+        assert!(
+            maintenance
+                .rebuild_current_projections(&[":card/title".to_owned(), ":card/title".to_owned()])
+                .is_err()
+        );
+        assert!(
+            maintenance
+                .rebuild_current_projections(&[":db/valid-from".to_owned()])
+                .is_err()
+        );
+        let too_many = (0..=CURRENT_PROJECTION_MAX_ATTRIBUTES)
+            .map(|index| format!(":card/field-{index}"))
+            .collect::<Vec<_>>();
+        assert!(maintenance.rebuild_current_projections(&too_many).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

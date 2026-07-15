@@ -229,6 +229,15 @@ impl BrowserMaintenanceLedger {
         self.db.run_idle_maintenance().await
     }
 
+    /// Rebuild exact current-attribute projections as one v13 publication.
+    #[wasm_bindgen(js_name = rebuildCurrentProjections)]
+    pub async fn rebuild_current_projections(
+        &self,
+        attributes: Vec<String>,
+    ) -> Result<String, JsValue> {
+        self.db.rebuild_current_projections(attributes).await
+    }
+
     /// Export the complete verified `.graph` image.
     #[wasm_bindgen(js_name = exportGraph)]
     pub async fn export_graph(&self) -> Result<js_sys::Uint8Array, JsValue> {
@@ -671,6 +680,134 @@ impl BrowserDb {
         result
     }
 
+    async fn rebuild_current_projections(
+        &self,
+        attributes: Vec<String>,
+    ) -> Result<String, JsValue> {
+        self.begin_mutation()?;
+        let result = self.rebuild_current_projections_inner(&attributes).await;
+        // The projection patch is detached from the live PFS and IndexedDB
+        // commits it atomically. A rejected plan or transaction leaves the
+        // previous authority usable.
+        self.finish_mutation(false);
+        self.evict_sparse_staging();
+        result
+    }
+
+    async fn rebuild_current_projections_inner(
+        &self,
+        attributes: &[String],
+    ) -> Result<String, JsValue> {
+        let attributes = crate::db::normalize_current_projection_attributes(attributes)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let valid_time_floor = i64::try_from(crate::graph::types::tx_id_now())
+            .map_err(|_| JsValue::from_str("current projection valid-time floor exceeds i64"))?;
+        self.checkpoint_inner().await?;
+
+        let (before_pages, idb) = {
+            let inner = self.inner.borrow();
+            let idb = inner
+                .idb
+                .as_ref()
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "current projection rebuild requires a persistent maintenance ledger",
+                    )
+                })?
+                .clone_handle();
+            let before_pages = inner
+                .pfs
+                .published_page_count()
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            (before_pages, idb)
+        };
+        let budget = crate::db::current_projection_budget_bytes(before_pages)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+        // The builder streams the immutable AEVT base. Resolve that complete
+        // integrity-covered range only inside this explicit O(total) worker
+        // operation; foreground reads retain their bounded demand paging.
+        self.prefetch_projection_source_pages().await?;
+
+        let (identity, images, projection_bytes, row_count) = {
+            let inner = self.inner.borrow();
+            let identity = inner
+                .pfs
+                .projection_ledger_identity()
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            let mut images = Vec::with_capacity(attributes.len());
+            let mut projection_bytes = 0_u64;
+            let mut row_count = 0_u64;
+            for attribute in &attributes {
+                let candidate = inner
+                    .fact_storage
+                    .build_current_projection_candidate(attribute, valid_time_floor)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                inner
+                    .fact_storage
+                    .validate_current_projection_candidate(&candidate)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                let image = crate::storage::current_projection_image::encode(&candidate, identity)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                projection_bytes = projection_bytes
+                    .checked_add(image.padded_bytes())
+                    .ok_or_else(|| JsValue::from_str("current projection byte count overflow"))?;
+                if projection_bytes > budget {
+                    return Err(JsValue::from_str(&format!(
+                        "current projection images require {projection_bytes} bytes, exceeding the {budget}-byte maintenance budget"
+                    )));
+                }
+                row_count = row_count
+                    .checked_add(image.row_count())
+                    .ok_or_else(|| JsValue::from_str("current projection row count overflow"))?;
+                images.push(image);
+            }
+            (identity, images, projection_bytes, row_count)
+        };
+
+        let image_refs = attributes
+            .iter()
+            .zip(&images)
+            .map(|(attribute, image)| (attribute.as_str(), valid_time_floor, image))
+            .collect::<Vec<_>>();
+        let plan = self
+            .inner
+            .borrow()
+            .pfs
+            .plan_current_projection_publication(&image_refs)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let receipt = plan.receipt();
+        idb.write_pages(plan.into_pages()).await?;
+
+        // Reopen only after the page-0 CAS transaction commits. This validates
+        // the same v13 catalog selection used by native open before the live
+        // handle can observe it.
+        let mode = self.inner.borrow().open_mode;
+        let (reopened, paged) = open_persistent_storage(&idb, mode).await?;
+        let reopened_storage = reopened.storage().clone();
+        let mut inner = self.inner.borrow_mut();
+        inner.pfs = reopened;
+        inner.fact_storage = reopened_storage;
+        inner.paged = paged;
+        drop(inner);
+
+        Ok(serde_json::json!({
+            "checkpoint": "noop",
+            "generation": receipt.generation,
+            "base_generation": identity.base_generation(),
+            "manifest_generation": identity.manifest_generation(),
+            "tx_count": identity.tx_count(),
+            "valid_time_floor": valid_time_floor,
+            "attribute_count": attributes.len(),
+            "row_count": row_count,
+            "projection_bytes": projection_bytes,
+            "before_pages": before_pages,
+            "after_pages": receipt.published_page_count,
+            "arena_reused": receipt.arena_reused,
+        })
+        .to_string())
+    }
+
     /// Serialise the current database to a portable `.graph` blob.
     ///
     /// The blob is byte-for-bit compatible with native `.graph` files opened by
@@ -878,12 +1015,12 @@ impl BrowserDb {
 
         if policy == BrowserImportPolicy::RequirePagedReady {
             if imported_version < crate::storage::INTEGRITY_FORMAT_VERSION
-                || imported_version > crate::storage::FORMAT_VERSION
+                || imported_version > crate::storage::MAX_READABLE_FORMAT_VERSION
             {
                 return Err(JsValue::from_str(&format!(
                     "strict paged import requires a paged-ready v{}..=v{} format, but recovery selected v{imported_version}",
                     crate::storage::INTEGRITY_FORMAT_VERSION,
-                    crate::storage::FORMAT_VERSION,
+                    crate::storage::MAX_READABLE_FORMAT_VERSION,
                 )));
             }
             validate_sparse_authority(&new_pfs).map_err(|error| {
@@ -896,7 +1033,7 @@ impl BrowserDb {
 
         let new_paged = if open_mode.is_paged()
             && imported_version >= crate::storage::INTEGRITY_FORMAT_VERSION
-            && imported_version <= crate::storage::FORMAT_VERSION
+            && imported_version <= crate::storage::MAX_READABLE_FORMAT_VERSION
         {
             configure_sparse_authority(&mut new_pfs)?;
             new_pfs.with_backend_mut(BrowserBufferBackend::evict_all_clean_unpinned);
@@ -1596,6 +1733,47 @@ impl BrowserDb {
         Ok(())
     }
 
+    async fn prefetch_projection_source_pages(&self) -> Result<(), JsValue> {
+        let (idb, range) = {
+            let inner = self.inner.borrow();
+            if !inner.paged {
+                return Ok(());
+            }
+            let logical_page_count = inner
+                .pfs
+                .with_backend(BrowserBufferBackend::page_count_raw)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            if logical_page_count == 0 {
+                return Ok(());
+            }
+            let page0 = inner
+                .pfs
+                .with_backend(|backend| backend.read_page_raw(0))
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            let plan = BrowserV11BootstrapPlan::from_page0(&page0)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            let idb = inner
+                .idb
+                .as_ref()
+                .ok_or_else(|| {
+                    JsValue::from_str("projection rebuild is missing its IndexedDB source")
+                })?
+                .clone_handle();
+            (idb, plan.base_covered_range())
+        };
+
+        let mut start = range.start_page();
+        while start < range.end_page() {
+            let count = (range.end_page() - start).min(BROWSER_IDB_BATCH_PAGES);
+            let pages = idb.load_page_range(start, count).await?;
+            self.verify_and_stage_pages(pages)?;
+            start = start
+                .checked_add(count)
+                .ok_or_else(|| JsValue::from_str("projection source page range overflow"))?;
+        }
+        Ok(())
+    }
+
     fn evict_sparse_staging(&self) {
         let mut inner = self.inner.borrow_mut();
         if inner.paged {
@@ -1911,7 +2089,9 @@ async fn open_persistent_storage(
 
     let header = crate::storage::FileHeader::from_bytes(&page0)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    if header.version == crate::storage::FORMAT_VERSION {
+    if header.version == crate::storage::FORMAT_VERSION
+        || header.version == crate::storage::MAX_READABLE_FORMAT_VERSION
+    {
         match open_current_sparse_storage(idb, page0).await {
             Ok(mut pfs) => {
                 if mode == BrowserOpenMode::EagerCompatibility {
@@ -1947,6 +2127,14 @@ async fn open_current_sparse_storage(
     }
     for candidate in plan.manifest_candidates() {
         if let Some(loaded) = load_optional_range(idb, candidate.manifest_range()).await? {
+            insert_bootstrap_pages(&mut pages, &mut pinned, loaded);
+        }
+    }
+    for range in plan
+        .projection_catalog_ranges()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
+    {
+        if let Some(loaded) = load_optional_range(idb, range).await? {
             insert_bootstrap_pages(&mut pages, &mut pinned, loaded);
         }
     }
@@ -4499,6 +4687,122 @@ mod tests {
             .expect("history after reopen");
         let reopened_history: serde_json::Value = serde_json::from_str(&reopened_history).unwrap();
         assert_eq!(reopened_history["results"].as_array().unwrap().len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn projection_maintenance_publishes_and_reopens_v13_atomically() {
+        let db_name = format!("minigraf-test-projection-v13-{}", js_sys::Date::now());
+        let db = BrowserDb::open_paged(&db_name).await.expect("open paged");
+        db.execute(
+            r#"(transact [[#uuid "00000000-0000-0000-0000-000000000201" :card/title "A"]
+                          [#uuid "00000000-0000-0000-0000-000000000201" :card/rank 9]
+                          [#uuid "00000000-0000-0000-0000-000000000202" :card/title "B"]])"#
+                .to_owned(),
+        )
+        .await
+        .expect("seed projection ledger");
+        let attributes = vec![":card/title".to_owned(), ":card/rank".to_owned()];
+        let first: serde_json::Value = serde_json::from_str(
+            &db.rebuild_current_projections(attributes.clone())
+                .await
+                .expect("first projection rebuild"),
+        )
+        .unwrap();
+        assert_eq!(first["attribute_count"], 2);
+        assert_eq!(first["row_count"], 3);
+        assert_eq!(first["arena_reused"], false);
+
+        let second: serde_json::Value = serde_json::from_str(
+            &db.rebuild_current_projections(attributes.clone())
+                .await
+                .expect("second projection rebuild"),
+        )
+        .unwrap();
+        let third: serde_json::Value = serde_json::from_str(
+            &db.rebuild_current_projections(attributes)
+                .await
+                .expect("third projection rebuild"),
+        )
+        .unwrap();
+        assert_eq!(third["arena_reused"], true);
+        assert_eq!(third["after_pages"], second["after_pages"]);
+
+        let exported = db.export_graph_async().await.expect("export v13");
+        let bytes = exported.to_vec();
+        let header =
+            crate::storage::FileHeader::from_bytes(&bytes[..crate::storage::PAGE_SIZE]).unwrap();
+        assert_eq!(
+            header.version,
+            crate::storage::header_extension::PROJECTION_CATALOG_FILE_FORMAT_VERSION
+        );
+        drop(db);
+
+        let reopened = BrowserDb::open_paged(&db_name).await.expect("reopen v13");
+        let result = reopened
+            .execute(r#"(query [:find ?title :where [?e :card/title ?title]])"#.to_owned())
+            .await
+            .expect("ledger query after v13 reopen");
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["results"].as_array().unwrap().len(), 2);
+
+        let import_name = format!("minigraf-test-projection-import-{}", js_sys::Date::now());
+        let imported = BrowserDb::open_paged(&import_name)
+            .await
+            .expect("open import target");
+        imported
+            .import_graph_for_paged_access(js_sys::Uint8Array::from(bytes.as_slice()))
+            .await
+            .expect("strict import native-compatible v13 image");
+        let imported_result = imported
+            .execute(r#"(query [:find ?rank :where [?e :card/rank ?rank]])"#.to_owned())
+            .await
+            .expect("query imported v13");
+        let imported_result: serde_json::Value = serde_json::from_str(&imported_result).unwrap();
+        assert_eq!(imported_result["results"].as_array().unwrap().len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn projection_publication_failure_keeps_previous_browser_authority() {
+        let db_name = format!("minigraf-test-projection-failure-{}", js_sys::Date::now());
+        let db = BrowserDb::open_paged(&db_name).await.expect("open paged");
+        db.execute(r#"(transact [[:card/a :card/title "A"]])"#.to_owned())
+            .await
+            .expect("seed ledger");
+        let before = db
+            .export_graph_async()
+            .await
+            .expect("export before")
+            .to_vec();
+        db.inner
+            .borrow()
+            .idb
+            .as_ref()
+            .expect("persistent handle")
+            .fail_next_write_for_test();
+
+        assert!(
+            db.rebuild_current_projections(vec![":card/title".to_owned()])
+                .await
+                .is_err(),
+            "injected publication failure must reject"
+        );
+        let after = db
+            .export_graph_async()
+            .await
+            .expect("export after")
+            .to_vec();
+        assert_eq!(after, before);
+        drop(db);
+
+        let reopened = BrowserDb::open_paged(&db_name)
+            .await
+            .expect("reopen old authority");
+        let result = reopened
+            .execute(r#"(query [:find ?title :where [:card/a :card/title ?title]])"#.to_owned())
+            .await
+            .expect("query after failed publication");
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["results"].as_array().unwrap().len(), 1);
     }
 
     #[wasm_bindgen_test]

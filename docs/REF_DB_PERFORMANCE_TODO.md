@@ -97,7 +97,15 @@ current executable checklist.
   publishes in 154.581 ms, validates and decodes on reopen in 189.459 ms, and
   preserves all three exact temporal probes.
 
-The next slice is R2-C2 maintenance-owned rebuild and browser publication
-parity. Put rebuild/publication on the maintenance capability, prove v13
-publish/reopen/fallback/import/export in real Chrome, and retain the ledger
-query route until those gates and the Vetch package differential suite pass.
+- [x] Put bounded multi-attribute rebuild/publication exclusively on native and
+  browser maintenance capabilities. One captured valid-time floor and ledger
+  identity bind the catalog; native retires pending WAL work first.
+- [x] Commit browser payload/catalog/page 0 as one guarded IndexedDB transaction,
+  reopen v13 only after success, and prove abort, export, strict import, reopen,
+  v11 migration, and ledger fallback in the 77-test real-Chrome suite.
+- [x] Reuse the inactive predecessor arena on the third same-shape publication
+  so steady-state rebuilds stop growing the declared page prefix.
+- [ ] Record the clean 1M native and disposable-worker rebuild receipt, including
+  time, image budget, browser process PSS, exact catalog identity, and export /
+  import parity. Keep production query routing and the Vetch package unchanged
+  until this evidence and the package differential suite pass.

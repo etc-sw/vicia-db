@@ -1,7 +1,7 @@
 # Maintenance API Contract
 
-Status: Q3-B native contract, A5-4 browser atomic compact maintenance, and the
-A5-6d 1M disposable-worker lifecycle boundary.
+Status: Q3-B native contract, A5-4 browser atomic compact maintenance, A5-6d
+1M disposable-worker lifecycle boundary, and R2-C2 explicit projection rebuild.
 
 `MaintenanceLedger::run_idle_maintenance()` and browser
 `BrowserMaintenanceLedger.runIdleMaintenance()` are the preferred maintenance
@@ -23,6 +23,8 @@ The native maintenance hook may:
 - fold visible delta segments into a fresh copy-on-write base when private
   threshold policy says maintenance is needed
 - return caller advice about checkpoint cadence pressure
+- explicitly rebuild a bounded list of exact current-attribute projections
+  through `rebuild_current_projections()`
 
 The browser hook may:
 
@@ -30,6 +32,9 @@ The browser hook may:
 - stream the complete fact log into a fresh contiguous graph image at threshold
 - atomically replace IndexedDB before swapping the live handle
 - return native-compatible outcome vocabulary plus before/after page counts
+- publish the same v13 projection catalog through
+  `rebuildCurrentProjections(attributes)` in one page-0-guarded IndexedDB
+  transaction
 
 The maintenance hook must not:
 
@@ -40,6 +45,8 @@ The maintenance hook must not:
   fact buffer
 - reclaim old ignored pages on the native file backend; native file-space
   reclamation remains a separate future phase
+- route ordinary reads through a derived projection; the R2-C2 reader remains
+  the full-history ledger until the later differential rollout gate
 
 Browser maintenance intentionally does reclaim obsolete IndexedDB records.
 Native copy-on-write recompact cannot do this because it appends its new base
@@ -113,6 +120,28 @@ necessarily the post-call state.
 Browser writes are already write-through, so normal browser maintenance reports
 `checkpoint = "noop"`. Replacement failure changes neither the live handle nor
 IndexedDB and can be retried later.
+
+## Current Projection Rebuild
+
+`MaintenanceLedger::rebuild_current_projections()` and
+`BrowserMaintenanceLedger.rebuildCurrentProjections()` accept 1 to 32 unique,
+namespace-qualified stored attributes. Pseudo-attributes and duplicates reject
+before checkpoint or publication. The operation is explicit O(total selected
+history): it checkpoints pending native WAL work, captures one UTC-millisecond
+valid-time floor, builds every requested image against one durable ledger
+identity, enforces an aggregate image budget of 15% of the published graph
+(minimum 1 MiB, maximum 512 MiB), and selects the complete catalog generation
+with one page-0 commit.
+
+The receipt reports generation and ledger identity, the common valid-time
+floor, attribute/row/byte counts, page growth, and whether the inactive
+predecessor arena was reused. The third same-shape rebuild can reuse the first
+generation's inactive arena, bounding steady-state file growth. A failure
+before native page-0 publication leaves the previous descriptor authoritative.
+Browser computes a detached page patch, commits payload and page 0 in one
+IndexedDB transaction, and reopens the selected v13 catalog only after commit.
+Transaction abort therefore leaves both the live handle and durable authority
+on the prior complete image.
 
 ## Error Semantics
 

@@ -21,6 +21,7 @@ forbidMethods(interactive, [
   "execute",
   "exportGraph",
   "importGraph",
+  "rebuildCurrentProjections",
   "runIdleMaintenance",
 ]);
 
@@ -30,6 +31,7 @@ requireMethods(maintenance, [
   "importGraph",
   "open",
   "openInMemory",
+  "rebuildCurrentProjections",
   "runIdleMaintenance",
 ]);
 forbidMethods(maintenance, [
@@ -51,6 +53,7 @@ requireMethods(compatibility, [
   "readView",
   "runIdleMaintenance",
 ]);
+forbidMethods(compatibility, ["rebuildCurrentProjections"]);
 
 console.log("validated browser interactive/maintenance capability surface");
 

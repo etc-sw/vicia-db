@@ -189,7 +189,6 @@ pub(crate) struct ProjectionCatalogSlot {
 impl ProjectionCatalogSlot {
     pub(crate) const LEN: usize = 40;
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn new(
         generation: u64,
         catalog_page_start: u64,
