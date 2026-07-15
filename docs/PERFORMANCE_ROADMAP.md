@@ -682,15 +682,14 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 through R2-C1 are closed. R2-C2 now has its maintenance-owned native and
-browser implementation and functional Chrome evidence, still before production
-query routing:
+R0 through R2-C2 are closed. Maintenance-owned native and browser projection
+publication is admitted, still before production query routing:
 
 ```text
 expose projection rebuild only through the maintenance capability
 publish and reopen the same v13 catalog through native and browser storage
 prove interruption/fallback/import/export behavior in real Chrome
-keep foreground reads on the ledger until package and differential gates pass
+keep foreground reads on the ledger until a separately admitted routing slice
 ```
 
 The rebuild API is limited to 1–32 explicit stored attributes and captures one
@@ -702,6 +701,14 @@ migration. The clean 1M native public-maintenance receipt passes at 650.787 ms
 with a 36.84 MiB peak-RSS delta and a 16,531,456-byte image (6.68% of the
 source). The Chrome 150 disposable-worker receipt also passes at 4,146.4 ms
 with a 485.40 MiB sampled PSS delta, exact v12-to-v13 page authority, and worker
-termination. The remaining R2-C2 closeout is the Vetch package differential
-suite. Keep production query routing and the Vetch package unchanged until that
-gate passes.
+termination. The clean staged package then passes the 77-test browser matrix,
+three Vetch authority smoke surfaces, canvas persistence concurrency, TypeScript
+checking, and the Vetch production build against clean Vetch `a9b1408`. No
+package was published and production reads remain on the ledger.
+
+The next durable slice is R2-C3: route only exact current selectors supported by
+the catalog through a generation-pinned projection reader, retain the ledger as
+the semantic oracle and fallback, and prove base/delta/retract/valid-window and
+corruption differentials before any Vetch package publication. Arbitrary
+Datalog, historical, recursive, grouped, distinct, window, and UDF queries stay
+on the existing executor.
