@@ -2256,6 +2256,26 @@ just projection-publication-smoke
 just projection-publication-full
 ```
 
+### R2-C2 maintenance-owned projection publication
+
+`vicia.projection-maintenance.v1` measures the public native maintenance path,
+including candidate build, image validation/encoding, v13 catalog publication,
+and reopen exactness. The full profile binds the clean fill-90 1M fixture to
+the exact source commit. Raw count/checksum fields derive exactness; stored
+gate booleans cannot override them. Admission requires at most 1,500 ms,
+projection bytes no larger than 15% of the source graph, and no more than
+128 MiB process peak-RSS growth over the post-open baseline. A mutation audit
+rejects fixture, exact-result, time, image-budget, and verdict corruption.
+
+This native receipt complements the real-Chrome functional suite. Browser
+disposable-worker time and process-PSS remain a separate host-level receipt;
+neither receipt changes production query routing or the Vetch package.
+
+```bash
+just projection-maintenance-smoke
+just projection-maintenance-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a

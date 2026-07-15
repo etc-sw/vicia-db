@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use minigraf::{CurrentProjectionCandidate, Minigraf, OpenOptions};
+use minigraf::{
+    CurrentProjectionCandidate, MaintenanceCheckpointEffect, MaintenanceLedger, Minigraf,
+    OpenOptions,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
@@ -267,6 +270,52 @@ struct PublicationReceipt {
     default_write_format_changed: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MaintenancePublicationReceipt {
+    schema: &'static str,
+    profile: String,
+    facts: u64,
+    admission_eligible: bool,
+    source_commit: String,
+    tracked_clean: bool,
+    host: Option<String>,
+    fixture: FixtureReceipt,
+    source_bytes: u64,
+    published_bytes: u64,
+    elapsed_ms: f64,
+    baseline_rss_bytes: u64,
+    peak_rss_delta_bytes: u64,
+    checkpoint: &'static str,
+    generation: u64,
+    base_generation: u64,
+    manifest_generation: u64,
+    tx_count: u64,
+    valid_time_floor: i64,
+    attribute_count: u32,
+    row_count: u64,
+    projection_bytes: u64,
+    before_pages: u64,
+    after_pages: u64,
+    arena_reused: bool,
+    aggregate_count: u64,
+    aggregate_checksum: i128,
+    exact: bool,
+    gates: MaintenancePublicationGates,
+    admitted: bool,
+    production_query_routing_changed: bool,
+    default_write_format_changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MaintenancePublicationGates {
+    exact: bool,
+    elapsed: bool,
+    image_budget: bool,
+    peak_rss: bool,
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     match args.as_slice() {
@@ -289,6 +338,17 @@ fn main() -> Result<()> {
         ),
         [_, command, source, published, fixture, facts, profile] if command == "publish" => {
             run_publication(
+                Path::new(source),
+                Path::new(published),
+                Path::new(fixture),
+                facts.parse()?,
+                profile,
+            )
+        }
+        [_, command, source, published, fixture, facts, profile]
+            if command == "maintenance-publish" =>
+        {
+            run_maintenance_publication(
                 Path::new(source),
                 Path::new(published),
                 Path::new(fixture),
@@ -323,10 +383,112 @@ fn main() -> Result<()> {
              trial <graph> <facts> <trial-index> | \
              isolated-run <graph> <fixture-metadata> <facts> <smoke|full> | \
              publish <source-graph> <published-graph> <fixture-metadata> <facts> <smoke|full> | \
+             maintenance-publish <source-graph> <published-graph> <fixture-metadata> <facts> <smoke|full> | \
              isolated-trial <graph> <facts> <source|decoded> \
              <probe-index> <trial-index> <launch-index>"
         ),
     }
+}
+
+fn run_maintenance_publication(
+    source: &Path,
+    published: &Path,
+    fixture_path: &Path,
+    facts: u64,
+    profile: &str,
+) -> Result<()> {
+    if profile != "smoke" && profile != "full" {
+        bail!("profile must be smoke or full")
+    }
+    let source_commit = command_text("git", &["rev-parse", "HEAD"])?;
+    let tracked_clean =
+        command_text("git", &["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    let fixture = load_fixture_metadata(
+        source,
+        fixture_path,
+        facts,
+        &source_commit,
+        profile == "full",
+    )?;
+    if published.exists() {
+        fs::remove_file(published)?;
+    }
+    fs::copy(source, published)?;
+    let source_bytes = fs::metadata(source)?.len();
+
+    let maintenance = MaintenanceLedger::open(published)?;
+    let baseline_rss_bytes = current_rss_bytes().context("read maintenance RSS baseline")?;
+    let peak_before = peak_rss_bytes().context("read maintenance peak RSS baseline")?;
+    let started = Instant::now();
+    let outcome = maintenance.rebuild_current_projections(&[ATTRIBUTE.to_owned()])?;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let peak_rss_delta_bytes = peak_rss_bytes()
+        .context("read maintenance peak RSS")?
+        .saturating_sub(peak_before.max(baseline_rss_bytes));
+    drop(maintenance);
+
+    let reopened = open(published)?;
+    let candidate = reopened
+        .benchmark_load_current_projection_page_image(ATTRIBUTE, outcome.valid_time_floor)?
+        .context("maintenance-published projection was not selected after reopen")?;
+    let (aggregate_count, aggregate_checksum) =
+        aggregate(&reopened, &candidate, outcome.valid_time_floor)?;
+    let expected = expected_pair(facts, outcome.valid_time_floor);
+    let exact = (aggregate_count, aggregate_checksum) == expected
+        && outcome.attribute_count == 1
+        && outcome.tx_count == fixture.facts / 1000
+        && outcome.row_count == u64::try_from(candidate.row_count())?;
+    let published_bytes = fs::metadata(published)?.len();
+    let image_budget = outcome.projection_bytes <= source_bytes.saturating_mul(15) / 100;
+    let gates = MaintenancePublicationGates {
+        exact,
+        elapsed: elapsed_ms <= 1_500.0,
+        image_budget,
+        peak_rss: peak_rss_delta_bytes <= 128 * 1024 * 1024,
+    };
+    let admission_eligible = profile == "full";
+    let admitted =
+        admission_eligible && gates.exact && gates.elapsed && gates.image_budget && gates.peak_rss;
+    let receipt = MaintenancePublicationReceipt {
+        schema: "vicia.projection-maintenance.v1",
+        profile: profile.to_owned(),
+        facts,
+        admission_eligible,
+        source_commit,
+        tracked_clean,
+        host: command_text("hostname", &[]).ok(),
+        fixture,
+        source_bytes,
+        published_bytes,
+        elapsed_ms,
+        baseline_rss_bytes,
+        peak_rss_delta_bytes,
+        checkpoint: match outcome.checkpoint {
+            MaintenanceCheckpointEffect::Noop => "noop",
+            MaintenanceCheckpointEffect::Published => "published",
+            _ => "unknown",
+        },
+        generation: outcome.generation,
+        base_generation: outcome.base_generation,
+        manifest_generation: outcome.manifest_generation,
+        tx_count: outcome.tx_count,
+        valid_time_floor: outcome.valid_time_floor,
+        attribute_count: outcome.attribute_count,
+        row_count: outcome.row_count,
+        projection_bytes: outcome.projection_bytes,
+        before_pages: outcome.before_pages,
+        after_pages: outcome.after_pages,
+        arena_reused: outcome.arena_reused,
+        aggregate_count,
+        aggregate_checksum,
+        exact,
+        gates,
+        admitted,
+        production_query_routing_changed: false,
+        default_write_format_changed: false,
+    };
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
 }
 
 fn run_publication(
@@ -1174,6 +1336,25 @@ fn nearest_rank(sorted: &[f64], percentile: usize) -> Option<f64> {
     }
     let rank = percentile.saturating_mul(sorted.len()).div_ceil(100);
     sorted.get(rank.saturating_sub(1)).copied()
+}
+
+fn current_rss_bytes() -> Option<u64> {
+    proc_status_kib("VmRSS:")?.checked_mul(1024)
+}
+
+fn peak_rss_bytes() -> Option<u64> {
+    proc_status_kib("VmHWM:")?.checked_mul(1024)
+}
+
+fn proc_status_kib(label: &str) -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix(label))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]

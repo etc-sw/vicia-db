@@ -128,6 +128,14 @@ projection-publication-smoke OUTPUT_DIR="target/projection-publication/smoke":
 projection-publication-full OUTPUT_DIR="target/projection-publication/full":
     ./scripts/run-projection-publication-bench.sh full "{{OUTPUT_DIR}}"
 
+# Smoke the public R2-C2 maintenance-owned projection publication path.
+projection-maintenance-smoke OUTPUT_DIR="target/projection-maintenance/smoke":
+    ./scripts/run-projection-maintenance-bench.sh smoke "{{OUTPUT_DIR}}"
+
+# Measure the clean 1M public maintenance rebuild and its resource gates.
+projection-maintenance-full OUTPUT_DIR="target/projection-maintenance/full":
+    ./scripts/run-projection-maintenance-bench.sh full "{{OUTPUT_DIR}}"
+
 # Generate and validate the browser interactive/maintenance TypeScript boundary.
 browser-capability-surface OUTPUT_DIR="target/browser-capability-surface":
     wasm-pack build --target web --out-dir "{{OUTPUT_DIR}}" -- --features browser
