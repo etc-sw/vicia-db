@@ -105,7 +105,10 @@ current executable checklist.
   v11 migration, and ledger fallback in the 77-test real-Chrome suite.
 - [x] Reuse the inactive predecessor arena on the third same-shape publication
   so steady-state rebuilds stop growing the declared page prefix.
-- [ ] Record the clean 1M native and disposable-worker rebuild receipt, including
-  time, image budget, browser process PSS, exact catalog identity, and export /
-  import parity. Keep production query routing and the Vetch package unchanged
-  until this evidence and the package differential suite pass.
+- [x] Record the clean 1M native public-maintenance receipt. The complete
+  rebuild and publication is 650.787 ms, adds 36.84 MiB peak RSS, emits a
+  16,531,456-byte image (6.68%), and reopens the exact
+  `500,000/249,999,250,000` current aggregate.
+- [ ] Record the 1M disposable-worker browser time/process-PSS receipt and run
+  the Vetch package differential suite. Keep production query routing and the
+  Vetch package unchanged until both pass.

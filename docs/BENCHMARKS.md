@@ -2267,7 +2267,22 @@ projection bytes no larger than 15% of the source graph, and no more than
 128 MiB process peak-RSS growth over the post-open baseline. A mutation audit
 rejects fixture, exact-result, time, image-budget, and verdict corruption.
 
-This native receipt complements the real-Chrome functional suite. Browser
+The clean HAL7800 full run at source `f75f23b` passes every gate:
+
+| 1M maintenance metric | Result |
+|---|---:|
+| Complete rebuild and publication | 650.787 ms |
+| Peak RSS delta | 38,625,280 B (36.84 MiB) |
+| Source / published graph | 247,562,240 / 264,097,792 B |
+| Projection image | 16,531,456 B (6.68% of source) |
+| Current aggregate | 500,000 / 249,999,250,000 |
+
+The authoritative receipt is preserved at
+`benchmarks/baselines/projection-maintenance/2026-07-15-hal7800-r2c2-full/receipt.json`
+with SHA-256
+`dd5735e30859d3cc142fb1e5741a7e398e952856088d5c531c7892fb99ead188`.
+
+This native receipt complements the 77-test real-Chrome functional suite. Browser
 disposable-worker time and process-PSS remain a separate host-level receipt;
 neither receipt changes production query routing or the Vetch package.
 
