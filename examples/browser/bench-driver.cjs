@@ -543,6 +543,68 @@ async function pagedMatrixMain() {
   console.log("pagedMatrix:", JSON.stringify(evidence));
 }
 
+// R2-C2: measure one explicit 1M projection rebuild inside the same disposable
+// maintenance worker used by the capability demo.
+async function projectionMaintenanceMain() {
+  const fixture = process.argv[3];
+  if (!fixture) {
+    console.error("usage: bench-driver.cjs projection-maintenance <fixture-url-path>");
+    process.exit(1);
+  }
+  const evidence = {
+    schema: "vicia.browser-projection-maintenance.v1",
+    fixture,
+    chrome: CHROME,
+    profile: PROFILE,
+    import: null,
+    maintenance: null,
+    source: {
+      commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      trackedClean: execFileSync(
+        "git",
+        ["status", "--porcelain", "--untracked-files=no"],
+        { encoding: "utf8" },
+      ).trim().length === 0,
+    },
+    environment: {
+      platform: process.platform,
+      release: os.release(),
+      cpu: os.cpus()[0]?.model ?? null,
+      logicalCpus: os.cpus().length,
+      totalMemoryBytes: os.totalmem(),
+      node: process.version,
+    },
+  };
+  evidence.import = await withPage(
+    async (page, browser) => {
+      await page.evaluate(() => window.benchReset());
+      await page.evaluate(() => window.benchReady());
+      return measureBrowserRss(browser, async () =>
+        JSON.parse(await page.evaluate((url) => window.benchPagedImport(url), fixture)),
+      );
+    },
+    { extraArgs: ["--js-flags=--expose-gc --max-old-space-size=4096"] },
+  );
+  evidence.maintenance = await withPage(
+    async (page, browser) => {
+      await page.evaluate(() => window.benchReady());
+      return measureBrowserRss(browser, async () =>
+        JSON.parse(
+          await page.evaluate(
+            (attributes) => window.benchProjectionMaintenance(attributes),
+            [":projection/value"],
+          ),
+        ),
+      );
+    },
+    {
+      extraArgs: ["--js-flags=--expose-gc --max-old-space-size=4096"],
+      forwardConsole: true,
+    },
+  );
+  console.log(JSON.stringify(evidence, null, 2));
+}
+
 async function ledgerCallerMain() {
   const fixture = process.argv[3];
   const samples = Number(process.argv[4] ?? 20);
@@ -599,6 +661,7 @@ async function openMain() {
     console.error(
         "usage: bench-driver.cjs <fixture-url-path|skip-import> [runs]\n" +
         "       bench-driver.cjs paged-matrix <fixture-url-path> [openRuns] [growthCycles]\n" +
+        "       bench-driver.cjs projection-maintenance <fixture-url-path>\n" +
         "       bench-driver.cjs ledger-caller <fixture-url-path> [samples]\n" +
         "       bench-driver.cjs growth <cycles> <factsPerCycle> <sampleEvery> <fixture-url-path|empty> [reopenRuns]\n" +
         "       bench-driver.cjs maintained-growth <cycles> <factsPerCycle> <sampleEvery> <maintenanceEvery> <fixture-url-path|empty> [reopenRuns]\n" +
@@ -628,6 +691,8 @@ async function openMain() {
 let main;
 if (process.argv[2] === "paged-matrix") {
   main = pagedMatrixMain();
+} else if (process.argv[2] === "projection-maintenance") {
+  main = projectionMaintenanceMain();
 } else if (process.argv[2] === "ledger-caller") {
   main = ledgerCallerMain();
 } else if (process.argv[2] === "growth") {

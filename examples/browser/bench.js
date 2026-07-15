@@ -604,3 +604,42 @@ window.benchPagedMaintenance = async (lastCycle) => {
     }),
   );
 };
+
+// R2-C2 explicit projection rebuild in one disposable maintenance worker.
+window.benchProjectionMaintenance = async (attributes) => {
+  await initPromise;
+  window.gc?.();
+  const heapBeforeBytes = heap();
+  const before = await idbStats();
+  const started = performance.now();
+  const worker = new Worker("./maintenance-worker.js", { type: "module" });
+  let terminated = false;
+  try {
+    const response = await new Promise((resolve, reject) => {
+      worker.onmessage = ({ data }) => data.ok
+        ? resolve(data)
+        : reject(new Error(data.error));
+      worker.onerror = (event) => reject(new Error(event.message));
+      worker.postMessage({
+        dbName: DB_NAME,
+        operation: "projection",
+        attributes,
+      });
+    });
+    const finished = performance.now();
+    const after = await idbStats();
+    return show(JSON.stringify({
+      elapsedMs: Math.round((finished - started) * 1000) / 1000,
+      outcome: response.outcome,
+      heapBeforeBytes,
+      heapAfterBytes: heap(),
+      before,
+      after,
+      workerTerminated: true,
+    }));
+  } finally {
+    worker.terminate();
+    terminated = true;
+    void terminated;
+  }
+};

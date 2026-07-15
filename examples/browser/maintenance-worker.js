@@ -25,6 +25,12 @@ async function withMaintenanceLedger(dbName, request) {
     switch (request.operation) {
       case "maintenance":
         return { outcome: JSON.parse(await ledger.runIdleMaintenance()) };
+      case "projection":
+        return {
+          outcome: JSON.parse(
+            await ledger.rebuildCurrentProjections(request.attributes),
+          ),
+        };
       case "export": {
         const bytes = (await ledger.exportGraph()).slice();
         return { bytes };
