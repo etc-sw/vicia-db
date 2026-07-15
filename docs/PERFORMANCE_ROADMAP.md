@@ -703,7 +703,7 @@ source). The Chrome 150 disposable-worker receipt also passes at 4,146.4 ms
 with a 485.40 MiB sampled PSS delta, exact v12-to-v13 page authority, and worker
 termination. The clean staged package then passes the 77-test browser matrix,
 three Vetch authority smoke surfaces, canvas persistence concurrency, TypeScript
-checking, and the Vetch production build against clean Vetch `a9b1408`. No
+checking, and the Vetch production build against clean Vetch `9634ba0`. No
 package was published and production reads remain on the ledger.
 
 The next durable slice is R2-C3: route only exact current selectors supported by

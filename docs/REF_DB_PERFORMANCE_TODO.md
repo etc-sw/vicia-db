@@ -113,7 +113,7 @@ current executable checklist.
   takes 4,146.4 ms, adds 485.40 MiB sampled PSS, advances the exact v12 prefix
   to v13, and terminates the worker; every 30-second/1-GiB resource gate passes.
 - [x] Run the Vetch package differential suite from the clean candidate against
-  clean Vetch `a9b1408`. The exact staged WASM passes all 77 browser format
+  clean Vetch `9634ba0`. The exact staged WASM passes all 77 browser format
   tests, three authority smoke surfaces, canvas persistence concurrency,
   TypeScript checking, and the production build. This admits R2-C2 without
   publishing the package or changing production query routing.

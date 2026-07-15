@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "generatedAt": "2026-07-15T09:52:52.378Z",
+  "vicia": {
+    "sourceCommit": "b98082de1c56028743d8254f203888f4030076fc",
+    "sourceDirty": false,
+    "sourceKind": "clean-commit",
+    "sourceWorkspaceSha256": "165cb093e251acdf6b55d61c3cb0b5762008d7a9fbe50ff19414f0e44ac8e5e3",
+    "wasmSha256": "c72d2d233d1f95ffe459f6ec83f1ab3eca191b6fd4e17664300214909c271a7e",
+    "wasmPackVersion": "0.15.0"
+  },
+  "vetch": {
+    "sourceCommit": "9634ba01c9d719545aaa723b9ee1157612597f60",
+    "sourceDirty": false
+  },
+  "checks": [
+    {
+      "name": "pnpm-install",
+      "status": "passed",
+      "durationMs": 494
+    },
+    {
+      "name": "browser-format-matrix",
+      "status": "passed",
+      "durationMs": 31541
+    },
+    {
+      "name": "authority-spike",
+      "status": "passed",
+      "durationMs": 1237
+    },
+    {
+      "name": "authority-contract",
+      "status": "passed",
+      "durationMs": 1148
+    },
+    {
+      "name": "authority-lifecycle",
+      "status": "passed",
+      "durationMs": 5684
+    },
+    {
+      "name": "canvas-persistence-concurrency",
+      "status": "passed",
+      "durationMs": 8293
+    },
+    {
+      "name": "typecheck",
+      "status": "passed",
+      "durationMs": 4750
+    },
+    {
+      "name": "build",
+      "status": "passed",
+      "durationMs": 3051
+    }
+  ]
+}
