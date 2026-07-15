@@ -1,0 +1,64 @@
+{
+  "schema": "vicia.projection-publication.v1",
+  "profile": "full",
+  "facts": 1000000,
+  "admissionEligible": true,
+  "sourceCommit": "77b5fbc7698ef389d9bd9a2328c3aa1885a1fa07",
+  "trackedClean": true,
+  "host": "HAL7800",
+  "fixture": {
+    "schema": "vicia.temporal-projection-fixture.v1",
+    "facts": 1000000,
+    "fillPercent": 90,
+    "bytes": 247562240,
+    "sha256": "c8dbc4a6dadd9e54ef9831b94baab2f5a06b4ab7fc6574717af4cd524e1e4756",
+    "formatVersion": 12,
+    "builderSourceCommit": "77b5fbc7698ef389d9bd9a2328c3aa1885a1fa07",
+    "builderTrackedClean": true
+  },
+  "sourceFormatVersion": 12,
+  "publishedFormatVersion": 13,
+  "sourceBytes": 247562240,
+  "publishedBytes": 280604672,
+  "projectionIdentity": {
+    "baseGeneration": 1,
+    "manifestGeneration": 0,
+    "txCount": 1000,
+    "fingerprint": "37a7869900e4b1b4",
+    "rowCount": 1000000,
+    "paddedBytes": 33038336
+  },
+  "generation": 1,
+  "imagePageStart": 60440,
+  "imagePageCount": 8066,
+  "catalogPageStart": 68506,
+  "catalogPageCount": 1,
+  "publishedPageCount": 68507,
+  "publishMs": 154.58143099999998,
+  "reopenDecodeMs": 189.45936,
+  "probes": [
+    {
+      "name": "beforeBoundary",
+      "validAt": 1735689599999,
+      "count": 500000,
+      "checksum": 249999500000
+    },
+    {
+      "name": "atBoundary",
+      "validAt": 1735689600000,
+      "count": 750000,
+      "checksum": 374999500000
+    },
+    {
+      "name": "afterBoundary",
+      "validAt": 1735689600002,
+      "count": 500000,
+      "checksum": 249999250000
+    }
+  ],
+  "exact": true,
+  "admitted": true,
+  "productionQueryRoutingChanged": false,
+  "publicApiChanged": false,
+  "defaultWriteFormatChanged": false
+}

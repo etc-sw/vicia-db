@@ -58,7 +58,7 @@ current executable checklist.
 
 ## Next task
 
-### Status: R2-B is admitted; R2-C publication authority is next
+### Status: R2-C1 persisted publication authority is admitted
 
 - [x] Add a deterministic, page-aligned codec for entity, value, and temporal
   columns behind `bench-internals` and tests.
@@ -86,9 +86,18 @@ current executable checklist.
   decoded/source p95 is 103.14%/79.26%/102.55%; every gate passes. Admit R2-B
   without changing the codec, threshold, persisted bytes, or production route.
 
-The next slice is R2-C persisted projection selection and recovery. Add no
-public projection API or production query routing in its first slice. Start
-with an in-file generation-bound descriptor, write-pages-before-publish
-ordering, matching-ledger selection, verified predecessor fallback, and
-fail-closed corruption tests. Projection publication must not own or advance
-WAL retirement.
+- [x] Persist projection selection and recovery as explicit v13 authority.
+  Default writes remain v12; repository-only publication appends the admitted
+  page image and catalog before publishing either of two checksummed page-0
+  slots. Open selects only matching ledger identity, falls back to a verified
+  predecessor, and keeps ledger reads available when every projection copy is
+  corrupt. Delta checkpoints preserve slots, recompact clears them, orphan
+  tails are reusable, and projection publication neither owns nor advances WAL
+  retirement. The clean 1M receipt grows 247,562,240 bytes to 280,604,672,
+  publishes in 154.581 ms, validates and decodes on reopen in 189.459 ms, and
+  preserves all three exact temporal probes.
+
+The next slice is R2-C2 maintenance-owned rebuild and browser publication
+parity. Put rebuild/publication on the maintenance capability, prove v13
+publish/reopen/fallback/import/export in real Chrome, and retain the ledger
+query route until those gates and the Vetch package differential suite pass.

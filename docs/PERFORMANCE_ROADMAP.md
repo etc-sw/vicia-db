@@ -343,6 +343,29 @@ than stable decoded-layout cost.
 - foreground writes update a bounded delta projection or mark it stale; they
   never rebuild total history.
 
+### R2-C1 measured publication outcome
+
+R2-C1 makes the admitted detached page image recoverable data inside the
+single `.graph` file without making it ledger authority. The ordinary writer
+still emits v12. An explicit repository-only publication operation appends the
+image and a checksummed catalog, makes those pages durable, and then upgrades
+page 0 to v13 by publishing one of two independent generation slots. Readers
+accept v13 and choose only a catalog whose base generation, manifest
+generation, and transaction watermark match the selected ledger state.
+
+The clean 1M receipt publishes an 8,066-page, 33,038,336-byte projection plus
+one catalog page. The graph grows from 247,562,240 to 280,604,672 bytes;
+publication takes 154.581 ms and reopen plus validated decode takes 189.459 ms.
+All before/at/after boundary probes preserve the exact expected count and
+checksum. Tests cover interruption before page-0 publication, corrupt-newer
+fallback, both-copies-corrupt ledger readability, stale WAL rejection, delta
+checkpoint slot preservation, recompact invalidation, and orphan-tail reuse.
+
+This admits persisted selection and recovery only. Production query routing,
+the public API, the default v12 write format, and the Vetch browser package are
+unchanged. A projection may always be discarded and rebuilt from ledger
+history; it never advances or owns WAL retirement.
+
 ### Query boundary
 
 - specialize exact current selectors and admitted count/sum operations first;
@@ -659,21 +682,19 @@ the same inspected commit in both locations.
 
 ## Immediate Next Slice
 
-R0 through R2-B are closed. The next slice is R2-C projection publication
-authority, beginning with persisted selection and recovery rather than
-production query routing:
+R0 through R2-C1 are closed. The next slice is R2-C2 maintenance-owned rebuild
+and browser publication parity, still before production query routing:
 
 ```text
-append the admitted deterministic projection page image inside the logical graph
-publish a generation-bound descriptor only after page integrity is durable
-select only a descriptor matching the chosen ledger base/manifest/tx watermark
-fall back to the last matching projection or rebuild without hiding ledger data
+expose projection rebuild only through the maintenance capability
+publish and reopen the same v13 catalog through native and browser storage
+prove interruption/fallback/import/export behavior in real Chrome
+keep foreground reads on the ledger until package and differential gates pass
 ```
 
-The first R2-C slice must state crash behavior before changing bytes: failure
-before descriptor publication leaves the previous descriptor authoritative;
-corrupt or incomplete newer projection state falls back only to a verified
-matching predecessor; a selected corrupt state must fail closed rather than
-silently change query results. WAL retirement remains owned by durable ledger
-publication. Keep production query routing and the Vetch package unchanged
-until reopen, corruption, fallback, and real-Chrome parity gates pass.
+R2-C2 must not expose a general projection-management API on the interactive
+capability. Failure before page-0 publication leaves the previous descriptor
+authoritative; a failed browser transaction leaves the previous complete image
+visible. Native/browser export and import must preserve the published prefix
+and reject incomplete authority consistently. Keep production query routing
+and the Vetch package unchanged until these real-Chrome gates pass.

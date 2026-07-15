@@ -2219,6 +2219,43 @@ just projection-isolated-tail-smoke
 just projection-isolated-tail-full
 ```
 
+### R2-C1 persisted projection publication
+
+`vicia.projection-publication.v1` verifies the first durable publication
+boundary. The default writer remains v12. An explicit repository-only operation
+appends the admitted projection image and a bounded checksummed catalog, syncs
+them, and publishes a v13 page 0 containing two independent generation slots.
+Reopen accepts only a catalog matching the selected ledger base, manifest, and
+transaction watermark; projection damage never hides ledger history.
+
+| 1M publication metric | Result |
+|---|---:|
+| Source / published graph | 247,562,240 / 280,604,672 B |
+| Projection image | 33,038,336 B / 8,066 pages |
+| Catalog | 4,096 B / 1 page |
+| Publication | 154.581 ms |
+| Reopen plus validated decode | 189.459 ms |
+
+The raw before/at/after probes are exactly
+`500,000/249,999,500,000`, `750,000/374,999,500,000`, and
+`500,000/249,999,250,000`. The validator derives exactness from these raw
+observations and its mutation audit rejects five provenance, layout, result,
+and verdict corruptions. The clean source `77b5fbc7698ef389d9bd9a2328c3aa1885a1fa07`
+receipt is preserved at
+`benchmarks/baselines/projection-publication/2026-07-15-hal7800-r2c-full/receipt.json`
+with SHA-256
+`650c8432cfca1ee5f968794eb79b68f05152beb4cef8b74ae2075dbc3e118772`.
+
+This receipt admits persisted selection and recovery, not production query
+routing or package rollout. Public APIs, the default write format, and the
+Vetch browser package remain unchanged pending maintenance-capability and
+real-Chrome v13 publication parity.
+
+```bash
+just projection-publication-smoke
+just projection-publication-full
+```
+
 ### H2 bounded typed current readers
 
 `vicia.current-reader.v1` measures the two H2 public selection boundaries on a
