@@ -2387,6 +2387,14 @@ The resident-tail unit gate accumulates 65,536 distinct empty replacement
 entries across refreshes, rejects the next entity without advancing the
 overlay watermark, and still permits replacement of an already retained
 entity. The real-Chrome matrix passes all 78 tests.
+The corrective package is rebuilt from clean Vicia `77a3008` with WASM
+SHA-256 `f1d3ae3e4660fcfb273fee71d67bf8b4e3b622e30d420af5f1aa4ed824939ae3`
+and committed vendor-only in Vetch `371719f`. The staged integration matrix,
+full Vetch authority suite, TypeScript check, and production build pass. The
+cutover smoke's accepted-build test pin was aligned only for that full-suite
+run and restored afterward, so no Vetch application or test-harness source is
+part of the rollout. The final generated receipt is preserved at
+`benchmarks/baselines/vetch-package-differential/2026-07-17-r2-bounded-contract-corrective/receipt.json`.
 This closes R2 without a package version bump, automatic projection rebuild,
 new scheduling policy, or expansion of the admitted Datalog route.
 

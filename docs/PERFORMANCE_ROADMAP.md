@@ -742,6 +742,14 @@ to the declared 1,000,000-row work maximum, but neither native nor browser
 foreground APIs may return more than 10,000 complete rows. A smaller caller
 budget remains the tighter result limit.
 
+Clean Vicia `77a3008` packages that corrective boundary as WASM SHA-256
+`f1d3ae3e4660fcfb273fee71d67bf8b4e3b622e30d420af5f1aa4ed824939ae3`
+in vendor-only Vetch commit `371719f`. The 78-test Chrome matrix, staged
+consumer matrix, complete Vetch authority suite, TypeScript check, production
+build, source/workspace provenance, and installed WASM hash all pass. The
+receipt lives at
+`benchmarks/baselines/vetch-package-differential/2026-07-17-r2-bounded-contract-corrective/receipt.json`.
+
 The next durable slice is R3 bounded-memory recompact. Measure and bound peak
 live memory during explicit idle recompact while preserving ledger identity,
 selected-state recovery, v11/v12 compatibility, and projection retirement.

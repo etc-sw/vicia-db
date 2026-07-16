@@ -146,9 +146,10 @@ current executable checklist.
   fallback without partial overlay installation.
 - [x] Roll the complete v13 browser package into clean Vetch. The package moves
   JS glue, declarations, manifest, licenses, WASM, build provenance, and the
-  integration receipt together from clean Vicia `b909cf5`. Its WASM SHA-256 is
-  `3267022d385175f2df1f335264190a029a12e814841afff2a9a5f4f925e46968`;
-  the final clean Vetch commit is `140ff14`. The 77-test Chrome matrix,
+  integration receipt together. The corrective package from clean Vicia
+  `77a3008` has WASM SHA-256
+  `f1d3ae3e4660fcfb273fee71d67bf8b4e3b622e30d420af5f1aa4ed824939ae3`;
+  the final vendor-only Vetch commit is `371719f`. The 78-test Chrome matrix,
   authority spike/contract/lifecycle, canvas persistence concurrency, full
   Vetch authority suite, TypeScript check, and production build pass. Package
   version, default v12 writes, Vetch scheduling, and arbitrary Datalog remain
