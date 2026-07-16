@@ -266,10 +266,12 @@ pub(crate) fn prepare_read_view_query(
     input: &str,
     tx_count: u64,
     valid_at: ValidAt,
-    max_rows: usize,
+    max_query_work_rows: usize,
 ) -> Result<DatalogCommand> {
-    if max_rows == 0 || max_rows > READ_VIEW_MAX_QUERY_WORK_ROWS {
-        bail!("read-view max_rows must be in 1..={READ_VIEW_MAX_QUERY_WORK_ROWS}; got {max_rows}");
+    if max_query_work_rows == 0 || max_query_work_rows > READ_VIEW_MAX_QUERY_WORK_ROWS {
+        bail!(
+            "read-view max_rows must be in 1..={READ_VIEW_MAX_QUERY_WORK_ROWS}; got {max_query_work_rows}"
+        );
     }
 
     let command = parse_datalog_command(input).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -288,8 +290,28 @@ pub(crate) fn prepare_read_view_query(
 
     query.as_of = Some(AsOf::Counter(tx_count));
     query.valid_at = Some(valid_at);
-    query.max_results = Some(max_rows);
+    query.max_results = Some(max_query_work_rows);
     Ok(DatalogCommand::Query(query))
+}
+
+pub(crate) fn enforce_read_view_result_limit(
+    result: &QueryResult,
+    max_query_work_rows: usize,
+) -> Result<()> {
+    let max_result_rows = read_view_result_limit(max_query_work_rows);
+    if let QueryResult::QueryResults { results, .. } = result
+        && results.len() > max_result_rows
+    {
+        bail!(
+            "read-view result has {} rows, exceeding result limit {max_result_rows}; result was rejected without truncation",
+            results.len()
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn read_view_result_limit(max_query_work_rows: usize) -> usize {
+    max_query_work_rows.min(READ_VIEW_MAX_ROWS)
 }
 
 impl ReadView<'_> {
@@ -307,10 +329,11 @@ impl ReadView<'_> {
 
     /// Execute one selective query with an explicit result and work bound.
     ///
-    /// `max_rows` bounds the complete result and conservatively limits source
-    /// visits, bindings, branches, and aggregate inputs while that result is
-    /// produced. A query may therefore reject even when its final projection
-    /// would fit. The method never returns a truncated prefix.
+    /// `max_rows` conservatively limits source visits, bindings, branches, and
+    /// aggregate inputs. The complete result is separately limited to the
+    /// smaller of `max_rows` and [`READ_VIEW_MAX_ROWS`]. A query may therefore
+    /// reject even when its final projection would fit, and this method never
+    /// returns a truncated prefix.
     pub fn query(&self, input: &str, max_rows: usize) -> Result<QueryResult> {
         #[cfg(any(test, feature = "bench-internals"))]
         crate::storage::current_projection_image::reset_projection_read_diagnostics();
@@ -320,6 +343,7 @@ impl ReadView<'_> {
         if let DatalogCommand::Query(query) = &command
             && let Some(result) = self.db.try_projected_read_view_query(query)?
         {
+            enforce_read_view_result_limit(&result, max_rows)?;
             return Ok(result);
         }
         let mut executor = DatalogExecutor::new_with_rules_and_functions(
@@ -328,15 +352,9 @@ impl ReadView<'_> {
             self.db.inner.functions.clone(),
         );
         executor.set_limits(self.db.inner.options.max_derived_facts, max_rows);
+        executor.set_output_limit(read_view_result_limit(max_rows));
         let result = executor.execute(command)?;
-        if let QueryResult::QueryResults { results, .. } = &result
-            && results.len() > max_rows
-        {
-            bail!(
-                "read-view result has {} rows, exceeding max_rows {max_rows}; result was rejected without truncation",
-                results.len()
-            );
-        }
+        enforce_read_view_result_limit(&result, max_rows)?;
         Ok(result)
     }
 
@@ -5639,6 +5657,49 @@ mod tests {
             })
             .unwrap();
         assert_eq!(refs, vec![second, first]);
+    }
+
+    #[test]
+    fn read_view_separates_source_work_from_complete_result_limit() {
+        let db = Minigraf::in_memory().unwrap();
+        let fact_count = READ_VIEW_MAX_ROWS + 1;
+        let facts = (0..fact_count)
+            .map(|index| {
+                (
+                    uuid::Uuid::from_u128(u128::try_from(index).unwrap().saturating_add(1)),
+                    ":item/group".to_owned(),
+                    Value::Keyword(":all".to_owned()),
+                )
+            })
+            .collect();
+        db.inner.fact_storage.transact(facts, None).unwrap();
+        let view = db.read_view(ReadViewOptions::default()).unwrap();
+
+        let aggregate = view
+            .query(
+                "(query [:find (count ?item) :where [?item :item/group :all]])",
+                fact_count,
+            )
+            .unwrap();
+        let QueryResult::QueryResults { results, .. } = aggregate else {
+            panic!("expected aggregate query results");
+        };
+        assert_eq!(results, vec![vec![Value::Integer(fact_count as i64)]]);
+
+        let oversized = view.query(
+            "(query [:find ?item :where [?item :item/group :all]])",
+            fact_count,
+        );
+        assert!(
+            oversized.is_err(),
+            "foreground results above READ_VIEW_MAX_ROWS must be rejected"
+        );
+        assert!(
+            oversized
+                .unwrap_err()
+                .to_string()
+                .contains("result limit 10000")
+        );
     }
 
     #[test]

@@ -718,8 +718,9 @@ grouped, distinct, window, and UDF queries stay on the existing executor.
 R2-C4 keeps that route live across a bounded post-publication tail. It replaces
 only touched entities with complete intervals rebuilt by the existing current
 reducer, and abandons the candidate before installation when the tail exceeds
-65,536 facts, 65,536 history entries, or 8 MiB. The clean 1M receipt adds 1,024
-entities with exact `501,024/251,023,773,776` count/checksum. Initial refresh is
+65,536 facts, 65,536 history entries, 65,536 cumulative replacement entities,
+or 8 MiB including empty tombstone key and map ownership. The clean 1M receipt
+adds 1,024 entities with exact `501,024/251,023,773,776` count/checksum. Initial refresh is
 128.586 ms; the cached p50/p95 is 120.685/130.062 ms versus 116.308/118.593 ms
 without a tail. Both paths read 4,036 projection pages, decode no full image,
 add zero measured query RSS, and avoid ledger fallback. Native retract,
@@ -734,6 +735,12 @@ integration receipt passes the 77-test Chrome matrix, authority spike,
 contract, lifecycle, canvas persistence concurrency, TypeScript check, and
 production build. R2 is closed without changing the package version, ordinary
 v12 writer default, application scheduling policy, or arbitrary-Datalog route.
+
+The post-rollout R2 corrective gate also separates the read-view source-work
+budget from its complete-result ceiling. A selective aggregate may inspect up
+to the declared 1,000,000-row work maximum, but neither native nor browser
+foreground APIs may return more than 10,000 complete rows. A smaller caller
+budget remains the tighter result limit.
 
 The next durable slice is R3 bounded-memory recompact. Measure and bound peak
 live memory during explicit idle recompact while preserving ledger identity,

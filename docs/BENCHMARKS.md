@@ -2347,8 +2347,11 @@ just projection-routing-full
 `vicia.projection-tail-overlay.v1` measures the exact projection route after
 1,024 post-publication facts. The overlay replaces complete touched-entity
 intervals through the authoritative current reducer and is installed only when
-tail facts, retained history, and resident bytes remain within 65,536 entries,
-65,536 entries, and 8 MiB respectively.
+tail facts, retained history, cumulative replacement entities, and resident
+bytes remain within 65,536 entries, 65,536 entries, 65,536 entities, and 8 MiB
+respectively. Empty retract replacements retain their entity tombstone, count
+toward the entity ceiling, and include key plus B-tree ownership in resident
+byte accounting.
 
 The clean HAL7800 1M receipt returns exact
 `501,024/251,023,773,776` count/checksum. Refresh takes 128.586 ms; cached
@@ -2373,6 +2376,17 @@ suite also passes against the same package. Source stability, workspace hash,
 installed-package provenance, and WASM hash are checked before publication.
 The final integration receipt is preserved at
 `benchmarks/baselines/vetch-package-differential/2026-07-15-r2c5-rollout/receipt.json`.
+
+### R2 bounded-contract corrective gate
+
+The post-rollout bounded-contract regression covers two independent limits.
+Native and browser read views accept a 10,001-row source-work budget for a
+single-row aggregate, while the equivalent non-aggregate query rejects the
+10,001-row complete result against the fixed 10,000-row foreground ceiling.
+The resident-tail unit gate accumulates 65,536 distinct empty replacement
+entries across refreshes, rejects the next entity without advancing the
+overlay watermark, and still permits replacement of an already retained
+entity. The real-Chrome matrix passes all 78 tests.
 This closes R2 without a package version bump, automatic projection rebuild,
 new scheduling policy, or expansion of the admitted Datalog route.
 

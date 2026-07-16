@@ -1094,9 +1094,10 @@ impl BrowserReadView {
 
     /// Execute one selective query and return a complete JSON result.
     ///
-    /// `max_rows` bounds both the complete result and conservative execution
-    /// work across source visits, bindings, branches, and aggregate inputs, so
-    /// a query may reject even when its final projection would fit. Both limits
+    /// `max_rows` bounds conservative execution work across source visits,
+    /// bindings, branches, and aggregate inputs. The complete result is
+    /// separately limited to the smaller of `max_rows` and 10,000 rows, so a
+    /// query may reject even when its final projection would fit. Both limits
     /// are mandatory. Oversized results are rejected, never truncated, and
     /// queries without an indexed seed are rejected before I/O.
     pub async fn query(
@@ -1124,19 +1125,15 @@ impl BrowserReadView {
         };
         db.ensure_usable()?;
         let guarded = db.begin_paged_read()?;
-        let result = db.execute_read_view_command(command).await;
+        let result = db
+            .execute_read_view_command(command, crate::db::read_view_result_limit(max_rows))
+            .await;
         if guarded {
             db.finish_paged_read();
         }
         let result = result?;
-        if let QueryResult::QueryResults { results, .. } = &result
-            && results.len() > max_rows
-        {
-            return Err(JsValue::from_str(&format!(
-                "read-view result has {} rows, exceeding max_rows {max_rows}; result was rejected without truncation",
-                results.len()
-            )));
-        }
+        crate::db::enforce_read_view_result_limit(&result, max_rows)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let json = query_result_to_json(result);
         if json.len() > max_bytes {
             return Err(JsValue::from_str(&format!(
@@ -1549,6 +1546,15 @@ impl BrowserDb {
     }
 
     async fn execute_read_command(&self, command: DatalogCommand) -> Result<QueryResult, JsValue> {
+        self.execute_read_command_with_output_limit(command, None)
+            .await
+    }
+
+    async fn execute_read_command_with_output_limit(
+        &self,
+        command: DatalogCommand,
+        max_output_results: Option<usize>,
+    ) -> Result<QueryResult, JsValue> {
         let demand_batch_pages = match &command {
             DatalogCommand::Query(query) => {
                 let plan = QueryAccessPlan::for_query(query);
@@ -1563,13 +1569,17 @@ impl BrowserDb {
         let mut aggregate_session = match &command {
             DatalogCommand::Query(query) => {
                 let inner = self.inner.borrow();
-                DatalogExecutor::new_with_rules_and_functions(
+                let mut executor = DatalogExecutor::new_with_rules_and_functions(
                     inner.fact_storage.clone(),
                     inner.rules.clone(),
                     inner.functions.clone(),
-                )
-                .owned_attribute_aggregate_session(query)
-                .map_err(|error| JsValue::from_str(&error.to_string()))?
+                );
+                if let Some(limit) = max_output_results {
+                    executor.set_output_limit(limit);
+                }
+                executor
+                    .owned_attribute_aggregate_session(query)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?
             }
             _ => None,
         };
@@ -1593,12 +1603,15 @@ impl BrowserDb {
                 }
             } else {
                 let inner = self.inner.borrow();
-                DatalogExecutor::new_with_rules_and_functions(
+                let mut executor = DatalogExecutor::new_with_rules_and_functions(
                     inner.fact_storage.clone(),
                     inner.rules.clone(),
                     inner.functions.clone(),
-                )
-                .execute(command.clone())
+                );
+                if let Some(limit) = max_output_results {
+                    executor.set_output_limit(limit);
+                }
+                executor.execute(command.clone())
             };
             match result {
                 Ok(result) => return Ok(result),
@@ -1624,13 +1637,15 @@ impl BrowserDb {
     async fn execute_read_view_command(
         &self,
         command: DatalogCommand,
+        max_output_results: usize,
     ) -> Result<QueryResult, JsValue> {
         if let DatalogCommand::Query(query) = &command
             && let Some(result) = self.try_execute_projected_read_view_query(query).await?
         {
             return Ok(result);
         }
-        self.execute_read_command(command).await
+        self.execute_read_command_with_output_limit(command, Some(max_output_results))
+            .await
     }
 
     async fn try_execute_projected_read_view_query(
@@ -5493,6 +5508,50 @@ mod tests {
                 .await
                 .is_err(),
             "max_rows must also bound aggregate source work"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn browser_read_view_separates_source_work_from_complete_result_limit() {
+        let db = BrowserDb::open_in_memory().expect("open bounded result fixture");
+        let fact_count = crate::db::READ_VIEW_MAX_ROWS + 1;
+        let facts = (0..fact_count)
+            .map(|index| format!("[:bounded/item-{index} :bounded/group :all]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        db.execute(format!("(transact [{facts}])"))
+            .await
+            .expect("seed bounded result fixture");
+        let view = db.read_view().expect("bounded result read view");
+
+        let aggregate = view
+            .query(
+                "(query [:find (count ?item) :where [?item :bounded/group :all]])".to_owned(),
+                fact_count,
+                1_048_576,
+            )
+            .await
+            .expect("large source-work aggregate");
+        let aggregate: serde_json::Value = serde_json::from_str(&aggregate).unwrap();
+        assert_eq!(aggregate["results"][0][0], fact_count);
+
+        let oversized = view
+            .query(
+                "(query [:find ?item :where [?item :bounded/group :all]])".to_owned(),
+                fact_count,
+                1_048_576,
+            )
+            .await;
+        assert!(
+            oversized.is_err(),
+            "browser results above READ_VIEW_MAX_ROWS must be rejected"
+        );
+        let error = oversized.expect_err("oversized browser result must fail");
+        assert!(
+            error
+                .as_string()
+                .unwrap_or_default()
+                .contains("result limit 10000")
         );
     }
 

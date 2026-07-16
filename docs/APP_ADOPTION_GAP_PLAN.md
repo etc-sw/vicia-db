@@ -60,7 +60,7 @@ the Ownership Split in `docs/VETCH_DELTA_STORAGE_ROADMAP.md`.
 | G11 | No bulk valid-time closure primitive; closing many facts requires per-fact round-trips. | `retract_batch` exists but no query-result-set atomic closure command. | **Harrekki P1 #6**. Slice A8. |
 | G12 | A caller needs an openable rollback point while the writer remains live. | `Minigraf::backup_to()` and the session `backup` op now hold one write lock across checkpoint, published-prefix copy, fsync, and atomic no-clobber publish. | **Harrekki P1 #7 — CLOSED by A9.** External `checkpoint(); copy` is explicitly not the contract. |
 | G13 | Durability states were not classified for the caller: applied-and-visible vs durably published vs rejected vs maintenance-pending. | Native session frames and BrowserDb write results now expose ordered transaction/durability fields; the backend-specific contract and failure states live in `docs/DURABILITY_AND_CALLER_RULES.md`. | **Vetch P0** (explicit durability receipts) — CLOSED by A5-3/A5-4/A6. Session frames and browser writes both report durability, while browser writes additionally report maintenance pressure/advice. |
-| G14 | The bounded read contract exposes one `max_rows` number for both complete results and conservative execution work. Vetch's owner relation is a reversible keyword value, while typed `refsTo` intentionally selects only true UUID Ref values. | Vetch's repaired single-clause indexed query and Vicia's shared 4,096-source keyword/Ref fixture prove the two existing paths without partial results. Native and paged browser tests cover retractions, pinned views, undersized budgets, and sparse residency. | **CLOSED by A10.** Keep fail-closed work accounting and the keyword/Ref semantic boundary. No additive selector is admitted without another measured caller. |
+| G14 | The bounded read contract exposes one compatibility `max_rows` argument as a conservative execution-work budget and caller-specific result limit, with an independent 10,000-row absolute result ceiling. Vetch's owner relation is a reversible keyword value, while typed `refsTo` intentionally selects only true UUID Ref values. | Vetch's repaired single-clause indexed query and Vicia's shared 4,096-source keyword/Ref fixture prove the two existing paths without partial results. Native and paged browser tests cover retractions, pinned views, undersized budgets, sparse residency, 10,001-row aggregate work, and absolute result rejection. | **CLOSED by A10 plus the R2 bounded-contract correction.** Keep fail-closed work accounting, the 10,000-row complete-result ceiling, and the keyword/Ref semantic boundary. No additive selector is admitted without another measured caller. |
 
 ## Slice Plan
 
@@ -469,10 +469,10 @@ The completed contract slice is documentation plus a caller-shaped regression
 fixture:
 
 1. Document that `ReadView::query(max_rows)` and browser
-   `BrowserReadView.query(..., max_rows, ...)` bound both complete results and
-   internal source/binding/branch work. Keep the existing parameter for
-   compatibility; describe separate concepts even if the implementation keeps
-   one conservative ceiling.
+   `BrowserReadView.query(..., max_rows, ...)` use the existing parameter as a
+   conservative source/binding/branch-work budget and caller-specific result
+   limit while independently enforcing the 10,000-row absolute foreground
+   result ceiling.
 2. Use one 4,096-source descriptor to exercise both the Vetch-shaped keyword
    relation and a true UUID Ref relation under a transaction-pinned
    `AnyValidTime` view. Native and browser tests prove exact deterministic

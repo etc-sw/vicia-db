@@ -137,6 +137,13 @@ current executable checklist.
   116.308/118.593 ms no-tail projection. It reads the same 4,036 base pages,
   decodes no full image, adds zero measured query RSS, and passes native,
   real-Chrome, fallback, provenance, and validator mutation gates.
+- [x] Close the R2 bounded-contract review findings. Read views now separate a
+  caller-selected source-work budget of up to 1,000,000 rows from the fixed
+  10,000-row complete-result ceiling, and resident tails cap cumulative empty
+  or non-empty replacement entities at 65,536 while accounting for entity keys
+  and B-tree entry ownership. Native regressions and the 78-test Chrome matrix
+  prove aggregate admission, oversized-result rejection, and tombstone
+  fallback without partial overlay installation.
 - [x] Roll the complete v13 browser package into clean Vetch. The package moves
   JS glue, declarations, manifest, licenses, WASM, build provenance, and the
   integration receipt together from clean Vicia `b909cf5`. Its WASM SHA-256 is

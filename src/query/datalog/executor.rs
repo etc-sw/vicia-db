@@ -101,6 +101,7 @@ pub struct DatalogExecutor {
     indexes: Arc<crate::storage::index::Indexes>,
     max_derived_facts: usize,
     max_results: usize,
+    max_output_results: usize,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
@@ -112,6 +113,7 @@ pub(crate) struct OwnedAttributeAggregateSession {
     entity_var: Option<String>,
     value_var: Option<String>,
     max_results: usize,
+    max_output_results: usize,
     visited_entries: usize,
 }
 
@@ -242,7 +244,14 @@ impl OwnedAttributeAggregateSession {
                     .sink
                     .take()
                     .ok_or_else(|| anyhow!("aggregate session already completed"))?;
-                let results = project_find_specs(&sink.finish()?, &self.find);
+                let finished = sink.finish()?;
+                if finished.len() > self.max_output_results {
+                    anyhow::bail!(
+                        "query result exceeds result limit {}; incomplete result rejected",
+                        self.max_output_results
+                    );
+                }
+                let results = project_find_specs(&finished, &self.find);
                 Ok(OwnedAggregateStep::Complete(QueryResult::QueryResults {
                     vars: self.find.iter().map(FindSpec::display_name).collect(),
                     results,
@@ -264,6 +273,7 @@ impl DatalogExecutor {
             indexes: Arc::new(crate::storage::index::Indexes::new()),
             max_derived_facts: crate::query::datalog::evaluator::DEFAULT_MAX_DERIVED_FACTS,
             max_results: crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS,
+            max_output_results: crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS,
         }
     }
 
@@ -284,6 +294,7 @@ impl DatalogExecutor {
             indexes: Arc::new(crate::storage::index::Indexes::new()),
             max_derived_facts: crate::query::datalog::evaluator::DEFAULT_MAX_DERIVED_FACTS,
             max_results: crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS,
+            max_output_results: crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS,
         }
     }
 
@@ -324,6 +335,10 @@ impl DatalogExecutor {
             entity_var: entity_var.map(str::to_owned),
             value_var: value_var.map(str::to_owned),
             max_results: query.max_results.unwrap_or(self.max_results),
+            max_output_results: query
+                .max_results
+                .unwrap_or(self.max_results)
+                .min(self.max_output_results),
             visited_entries: 0,
         }))
     }
@@ -381,6 +396,7 @@ impl DatalogExecutor {
             indexes: Arc::new(crate::storage::index::Indexes::new()),
             max_derived_facts: crate::query::datalog::evaluator::DEFAULT_MAX_DERIVED_FACTS,
             max_results: crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS,
+            max_output_results: crate::query::datalog::evaluator::DEFAULT_MAX_RESULTS,
         }
     }
 
@@ -418,6 +434,7 @@ impl DatalogExecutor {
             indexes: Arc::new(crate::storage::index::Indexes::new()),
             max_derived_facts,
             max_results,
+            max_output_results: max_results,
         }
     }
 
@@ -425,6 +442,12 @@ impl DatalogExecutor {
     pub fn set_limits(&mut self, max_derived_facts: usize, max_results: usize) {
         self.max_derived_facts = max_derived_facts;
         self.max_results = max_results;
+        self.max_output_results = max_results;
+    }
+
+    /// Set a complete-result ceiling independently from source and binding work.
+    pub(crate) fn set_output_limit(&mut self, max_output_results: usize) {
+        self.max_output_results = max_output_results;
     }
 
     /// Read-time "now" for query visibility.
@@ -626,6 +649,7 @@ impl DatalogExecutor {
         }
 
         let effective_max_results = query.max_results.unwrap_or(self.max_results);
+        let effective_max_output_results = effective_max_results.min(self.max_output_results);
 
         // Compute query-level valid_at value for :db/valid-at pseudo-attribute binding.
         let now = self.read_now();
@@ -694,6 +718,11 @@ impl DatalogExecutor {
                 crate::graph::storage::current_attribute_phase_diagnostics_enabled()
                     .then(std::time::Instant::now);
             let finished = sink.finish()?;
+            if finished.len() > effective_max_output_results {
+                anyhow::bail!(
+                    "query result exceeds result limit {effective_max_output_results}; incomplete result rejected"
+                );
+            }
             let results = project_find_specs(&finished, &query.find);
             #[cfg(any(test, feature = "bench-internals"))]
             if let Some(started) = finish_started {
@@ -1100,13 +1129,13 @@ impl DatalogExecutor {
                 .collect()
         };
 
-        let results =
-            apply_post_processing(not_filtered, &query.find, &query.with_vars, &registry)?;
-        if results.len() > effective_max_results {
-            anyhow::bail!(
-                "query result exceeds max-results {effective_max_results}; incomplete result rejected"
-            );
-        }
+        let results = apply_post_processing_bounded(
+            not_filtered,
+            &query.find,
+            &query.with_vars,
+            &registry,
+            effective_max_output_results,
+        )?;
 
         Ok(QueryResult::QueryResults {
             vars: query.find.iter().map(|s| s.display_name()).collect(),
@@ -1148,6 +1177,7 @@ impl DatalogExecutor {
 
         // Apply temporal filters before evaluating recursive rules
         let effective_max_results = query.max_results.unwrap_or(self.max_results);
+        let effective_max_output_results = effective_max_results.min(self.max_output_results);
         let filtered_facts = self.filter_facts_for_query(&query, effective_max_results)?;
 
         // Convert to FactStorage for StratifiedEvaluator (needs mutable accumulation)
@@ -1462,8 +1492,13 @@ impl DatalogExecutor {
                 .collect()
         };
 
-        let results =
-            apply_post_processing(not_filtered, &query.find, &query.with_vars, &registry)?;
+        let results = apply_post_processing_bounded(
+            not_filtered,
+            &query.find,
+            &query.with_vars,
+            &registry,
+            effective_max_output_results,
+        )?;
 
         Ok(QueryResult::QueryResults {
             vars: query.find.iter().map(|s| s.display_name()).collect(),
@@ -1674,11 +1709,22 @@ type NotJoinExclusionEntry = Option<(
 /// - Aggregates only → group-by collapse, then project.
 /// - Windows only → partition/sort/accumulate per spec, then project.
 /// - Mixed → aggregate collapses first, window runs over collapsed rows.
+#[cfg(test)]
 fn apply_post_processing(
     bindings: Vec<Binding>,
     find_specs: &[FindSpec],
     with_vars: &[String],
     registry: &FunctionRegistry,
+) -> Result<Vec<Vec<Value>>> {
+    apply_post_processing_bounded(bindings, find_specs, with_vars, registry, usize::MAX)
+}
+
+fn apply_post_processing_bounded(
+    bindings: Vec<Binding>,
+    find_specs: &[FindSpec],
+    with_vars: &[String],
+    registry: &FunctionRegistry,
+    max_output_results: usize,
 ) -> Result<Vec<Vec<Value>>> {
     let has_aggregates = find_specs
         .iter()
@@ -1686,6 +1732,11 @@ fn apply_post_processing(
     let has_windows = find_specs.iter().any(|s| matches!(s, FindSpec::Window(_)));
 
     if !has_aggregates && !has_windows {
+        if bindings.len() > max_output_results {
+            anyhow::bail!(
+                "query result exceeds result limit {max_output_results}; incomplete result rejected"
+            );
+        }
         return Ok(extract_variables(bindings, find_specs));
     }
 
@@ -1699,6 +1750,12 @@ fn apply_post_processing(
     // Step 2: Window functions (annotate each row, no collapse).
     if has_windows {
         apply_window_functions(&mut working, find_specs, registry)?;
+    }
+
+    if working.len() > max_output_results {
+        anyhow::bail!(
+            "query result exceeds result limit {max_output_results}; incomplete result rejected"
+        );
     }
 
     // Step 3: Project to output rows in find-spec order.

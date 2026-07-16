@@ -57,6 +57,12 @@ struct OverlayEntry {
 pub(crate) const CURRENT_PROJECTION_TAIL_MAX_FACTS: usize = 65_536;
 pub(crate) const CURRENT_PROJECTION_TAIL_MAX_HISTORY: usize = 65_536;
 pub(crate) const CURRENT_PROJECTION_TAIL_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Largest cumulative set of touched entities retained above one projection.
+pub(crate) const CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS: usize = 65_536;
+// Conservatively charge allocator/node ownership that is not represented by
+// the key and value structs themselves. The independent entity ceiling keeps
+// this implementation-detail estimate from becoming the only tombstone bound.
+const CURRENT_PROJECTION_TAIL_BTREE_ENTRY_OVERHEAD_BYTES: usize = 4 * std::mem::size_of::<usize>();
 
 /// Process-resident replacement rows above one immutable persisted projection.
 #[derive(Clone, Debug)]
@@ -123,6 +129,10 @@ impl CurrentProjectionTailOverlay {
             .sum()
     }
 
+    pub(crate) fn replacement_entities(&self) -> usize {
+        self.replacements.len()
+    }
+
     pub(crate) fn install(
         &mut self,
         tx_count: u64,
@@ -138,27 +148,35 @@ impl CurrentProjectionTailOverlay {
             });
             next.insert(entity, OverlayEntry { intervals });
         }
+        let new_entities = next
+            .keys()
+            .filter(|entity| !self.replacements.contains_key(entity))
+            .count();
+        if self.replacements.len().saturating_add(new_entities)
+            > CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS
+        {
+            return false;
+        }
         for (entity, entry) in next {
             self.replacements.insert(entity, entry);
         }
-        let bytes = self.attribute.capacity().saturating_add(
-            self.replacements
-                .values()
-                .map(|entry| {
-                    entry
-                        .intervals
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<ProjectedInterval>())
-                        .saturating_add(
-                            entry
-                                .intervals
-                                .iter()
-                                .map(|interval| interval.value.capacity())
-                                .sum::<usize>(),
-                        )
-                })
-                .sum::<usize>(),
-        );
+        let replacement_bytes = self.replacements.values().fold(0usize, |total, entry| {
+            total.saturating_add(
+                std::mem::size_of::<EntityId>()
+                    .saturating_add(std::mem::size_of::<OverlayEntry>())
+                    .saturating_add(CURRENT_PROJECTION_TAIL_BTREE_ENTRY_OVERHEAD_BYTES)
+                    .saturating_add(
+                        entry
+                            .intervals
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<ProjectedInterval>()),
+                    )
+                    .saturating_add(entry.intervals.iter().fold(0usize, |total, interval| {
+                        total.saturating_add(interval.value.capacity())
+                    })),
+            )
+        });
+        let bytes = self.attribute.capacity().saturating_add(replacement_bytes);
         if bytes > CURRENT_PROJECTION_TAIL_MAX_BYTES {
             return false;
         }
@@ -973,7 +991,8 @@ fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurrentProjectionBuilder, CurrentProjectionTailAdmission, CurrentProjectionTailCache,
+        CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS, CurrentProjectionBuilder,
+        CurrentProjectionTailAdmission, CurrentProjectionTailCache, CurrentProjectionTailOverlay,
         TemporalColumnBuilder, TemporalColumnDecoder, decode_value, decode_varint,
     };
     use crate::graph::storage::FactStorage;
@@ -1098,5 +1117,53 @@ mod tests {
             repeated,
             CurrentProjectionTailAdmission::OverBudget
         ));
+    }
+
+    #[test]
+    fn resident_tail_bounds_cumulative_empty_replacements() {
+        let mut overlay = CurrentProjectionTailOverlay::new(
+            ProjectionLedgerIdentity::new(1, 0, 0),
+            ":projection/value",
+            i64::MIN,
+        );
+        let first = (0..CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS / 2)
+            .map(|index| (Uuid::from_u128(index as u128 + 1), Vec::new()))
+            .collect();
+        assert!(overlay.install(1, first));
+        assert_eq!(
+            overlay.replacement_entities(),
+            CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS / 2
+        );
+        assert!(overlay.accounted_bytes() > overlay.attribute().len());
+
+        let second = (CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS / 2
+            ..CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS)
+            .map(|index| (Uuid::from_u128(index as u128 + 1), Vec::new()))
+            .collect();
+        assert!(overlay.install(2, second));
+        assert_eq!(
+            overlay.replacement_entities(),
+            CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS
+        );
+
+        assert!(!overlay.install(
+            3,
+            vec![(
+                Uuid::from_u128(CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS as u128 + 1),
+                Vec::new(),
+            )],
+        ));
+        assert_eq!(overlay.tx_count(), 2);
+        assert_eq!(
+            overlay.replacement_entities(),
+            CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS
+        );
+
+        assert!(overlay.install(3, vec![(Uuid::from_u128(1), Vec::new())]));
+        assert_eq!(overlay.tx_count(), 3);
+        assert_eq!(
+            overlay.replacement_entities(),
+            CURRENT_PROJECTION_TAIL_MAX_REPLACEMENTS
+        );
     }
 }
