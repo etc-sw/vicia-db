@@ -2391,8 +2391,9 @@ The corrective package is rebuilt from clean Vicia `77a3008` with WASM
 SHA-256 `f1d3ae3e4660fcfb273fee71d67bf8b4e3b622e30d420af5f1aa4ed824939ae3`
 and committed vendor-only in Vetch `371719f`. The staged integration matrix,
 full Vetch authority suite, TypeScript check, and production build pass. The
-cutover smoke's accepted-build test pin was aligned only for that full-suite
-run and restored afterward, so no Vetch application or test-harness source is
+cutover smoke no longer duplicates an accepted commit literal: Vetch `8877a11`
+requires a passed integration receipt whose source, workspace, and WASM
+provenance matches the vendored build. No Vetch runtime application source is
 part of the rollout. The final generated receipt is preserved at
 `benchmarks/baselines/vetch-package-differential/2026-07-17-r2-bounded-contract-corrective/receipt.json`.
 This closes R2 without a package version bump, automatic projection rebuild,

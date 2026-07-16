@@ -152,6 +152,8 @@ current executable checklist.
   the final vendor-only Vetch commit is `371719f`. The 78-test Chrome matrix,
   authority spike/contract/lifecycle, canvas persistence concurrency, full
   Vetch authority suite, TypeScript check, and production build pass. Package
+  provenance acceptance is manifest-driven in Vetch `8877a11`, with no
+  duplicated source-commit pin. Package
   version, default v12 writes, Vetch scheduling, and arbitrary Datalog remain
   unchanged.
 - [ ] Bound explicit idle recompact memory as R3. Preserve full-history ledger

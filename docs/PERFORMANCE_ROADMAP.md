@@ -747,6 +747,9 @@ Clean Vicia `77a3008` packages that corrective boundary as WASM SHA-256
 in vendor-only Vetch commit `371719f`. The 78-test Chrome matrix, staged
 consumer matrix, complete Vetch authority suite, TypeScript check, production
 build, source/workspace provenance, and installed WASM hash all pass. The
+Vetch `8877a11` cutover gate reads that provenance directly instead of pinning
+a duplicate accepted-source literal, so the full authority command remains
+valid for later verified package rollouts. The
 receipt lives at
 `benchmarks/baselines/vetch-package-differential/2026-07-17-r2-bounded-contract-corrective/receipt.json`.
 
